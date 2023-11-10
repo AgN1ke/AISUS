@@ -31,6 +31,7 @@ app = Client(session_name, api_id=api_id, api_hash=api_hash)
 # Initialize chat histories dictionary
 chat_histories = {}
 
+
 # Функция для транскрибирования голосовых сообщений
 async def transcribe_voice_message(voice_message_path):
     try:
@@ -50,7 +51,8 @@ async def transcribe_voice_message(voice_message_path):
 
 
 # Функция для генерации голосового ответа и сохранения в файл
-async def generate_voice_response_and_save_file(text, voice="alloy", folder_path="C:\\Python_projects\\Smartest\\Audio"):
+async def generate_voice_response_and_save_file(text, voice="alloy",
+                                                folder_path="C:\\Python_projects\\Smartest\\Audio"):
     openai_client = OpenAI(api_key=openai_api_key)
     response = openai_client.audio.speech.create(
         model="tts-1",
@@ -67,8 +69,18 @@ async def generate_voice_response_and_save_file(text, voice="alloy", folder_path
 
     return file_name
 
+
 @app.on_message(filters.private | (filters.group & (filters.reply | filters.mentioned)))
 async def echo(client: Client, message: Message):
+    # Get bot's username
+    bot_username = (await client.get_me()).username
+
+    # If the message is a reply but not a direct mention of the bot and not a reply to the bot's message, skip it
+    if message.reply_to_message:
+        if message.reply_to_message.from_user.username != bot_username and \
+                (message.text is None or f"@{bot_username}" not in message.text):
+            return
+
     chat_id = message.chat.id
 
     if message.voice:
@@ -114,5 +126,6 @@ async def echo(client: Client, message: Message):
                 os.remove(voice_response_file)
         else:
             await message.reply_text(bot_response)
+
 
 app.run()
