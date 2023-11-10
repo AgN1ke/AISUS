@@ -96,15 +96,19 @@ async def echo(client: Client, message: Message):
         print(f"Transcribed text: {transcribed_text}")
         if transcribed_text:
             gpt_input = transcribed_text
-            # Add the voice message component to the chat history if not present
+            # Insert the voice message component at the second position if not present
             if not any(item["content"] == voice_message_afix for item in chat_histories[chat_id]):
-                chat_histories[chat_id].append({"role": "system", "content": voice_message_afix})
+                # Insert at index 1
+                chat_histories[chat_id].insert(1, {"role": "system", "content": voice_message_afix})
         else:
             return  # If transcription fails, do not respond
     else:
         gpt_input = message.text
         # Remove the voice message component from the chat history if present
         chat_histories[chat_id] = [item for item in chat_histories[chat_id] if item["content"] != voice_message_afix]
+        # Make sure the welcome message is always the first
+        if chat_histories[chat_id][0]["content"] != welcome_message:
+            chat_histories[chat_id].insert(0, {"role": "system", "content": welcome_message})
 
     if gpt_input:
         first_name = message.from_user.first_name
