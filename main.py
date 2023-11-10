@@ -13,7 +13,8 @@ if __name__ == "__main__":
     app = Client(name=config.get_api_settings()['session_name'],
                  api_id=config.get_api_settings()['api_id'],
                  api_hash=config.get_api_settings()['api_hash'])
-    voice_processor = VoiceProcessor(whisper_model=config.get_openai_settings()['whisper_model'],
+    voice_processor = VoiceProcessor(api_key=config.get_openai_settings()['api_key'],
+                                     whisper_model=config.get_openai_settings()['whisper_model'],
                                      tts_model=config.get_openai_settings()['tts_model'])
     chat_history_manager = ChatHistoryManager()
     openai_wrapper = OpenAIWrapper(config.get_openai_settings()['api_key'])

@@ -1,11 +1,12 @@
 # voice_processor.py
-import openai
+from openai import OpenAI
 from datetime import datetime
 import os
 
 
 class VoiceProcessor:
-    def __init__(self, whisper_model: str, tts_model: str):
+    def __init__(self, api_key: str, whisper_model: str, tts_model: str):
+        self.api_key = api_key
         self.whisper_model = whisper_model
         self.tts_model = tts_model
 
@@ -13,7 +14,8 @@ class VoiceProcessor:
         """Transcribe a voice message using the Whisper model."""
         try:
             with open(voice_message_path, "rb") as audio_file:
-                transcript_response = openai.Audio.transcriptions.create(
+                client = OpenAI(api_key=self.api_key)
+                transcript_response = client.audio.transcriptions.create(
                     model=self.whisper_model,
                     file=audio_file
                 )
@@ -29,7 +31,8 @@ class VoiceProcessor:
             print("Warning: Provided folder path is invalid. Using current directory.")
             folder_path = os.getcwd()
 
-        response = openai.Audio.speech.create(
+        client = OpenAI(api_key=self.api_key)
+        response = client.audio.speech.create(
             model=self.tts_model,
             voice=voice,
             input=text
