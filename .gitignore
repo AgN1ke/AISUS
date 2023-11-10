@@ -5,3 +5,4 @@
 /config.ini
 *.session
 /.idea/
+*.session-journal
