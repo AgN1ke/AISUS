@@ -2,7 +2,7 @@
 from pyrogram.types import Message
 from message_wrapper import MessageWrapper
 from config_reader import ConfigReader
-from pyrogram import Client
+from pyrogram import Client, filters
 from voice_processor import VoiceProcessor
 from chat_history_manager import ChatHistoryManager
 from openai_wrapper import OpenAIWrapper
@@ -21,7 +21,8 @@ class MessageHandler:
         self.client = client
         self.voice_processor = voice_processor
         self.chat_history_manager = chat_history_manager
-        self.client.on_message(self.handle_message)
+        message_filters = filters.private | (filters.group & (filters.reply | filters.mentioned))
+        self.client.on_message(message_filters)(self.handle_message)
         self.openai_wrapper = openai_wrapper
 
     async def handle_message(self, client, message: Message):
