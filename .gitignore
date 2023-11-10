@@ -1,0 +1,7 @@
+# created by virtualenv automatically
+/venv/
+/audio/
+/downloads/
+/config.ini
+*.session
+/.idea/
