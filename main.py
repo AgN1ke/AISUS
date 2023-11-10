@@ -81,7 +81,6 @@ async def echo(client: Client, message: Message):
                 (message.text is None or f"@{bot_username}" not in message.text):
             return
 
-    chat_id = message.chat.id
 
     if message.voice:
         print("Received a voice message...")
@@ -97,6 +96,7 @@ async def echo(client: Client, message: Message):
 
     if gpt_input:
         # Update chat history
+        chat_id = message.chat.id
         if chat_id not in chat_histories:
             chat_histories[chat_id] = [{"role": "system", "content": welcome_message}]
 
@@ -116,6 +116,13 @@ async def echo(client: Client, message: Message):
         chat_histories[chat_id].append({"role": "assistant", "content": bot_response})
         print(f"GPT prompt: {gpt_input}")
         print(f"Bot: {bot_response}")
+
+        # Remove old messages from the history if their amount exceeds 4000 tokens
+        while sum([len(m['content']) for m in chat_histories[chat_id] if m['role'] != 'system']) > 4000:
+            for i in range(len(chat_histories[chat_id]) - 1, -1, -1):  # We start from the end of the list
+                if chat_histories[chat_id][i]['role'] != 'system':
+                    del chat_histories[chat_id][i]
+                    break
 
         # Send response
         if message.voice:
