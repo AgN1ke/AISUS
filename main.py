@@ -15,6 +15,9 @@ welcome_message = config['system_messages']['welcome_message']
 # If you used a line delimiter, replace it with newline characters
 welcome_message = welcome_message.replace(' | ', '\n')
 
+voice_message_afix = config['system_messages']['voice_message_afix']
+voice_message_afix = voice_message_afix.replace(' | ', '\n')
+
 # Получение значения ключа API для OpenAI
 openai_api_key = config['openai']['api_key']
 
@@ -72,6 +75,7 @@ async def generate_voice_response_and_save_file(text, voice="alloy",
 
 @app.on_message(filters.private | (filters.group & (filters.reply | filters.mentioned)))
 async def echo(client: Client, message: Message):
+    chat_id = message.chat.id
     # Get bot's username
     bot_username = (await client.get_me()).username
 
@@ -81,6 +85,9 @@ async def echo(client: Client, message: Message):
                 (message.text is None or f"@{bot_username}" not in message.text):
             return
 
+    # Update chat history
+    if chat_id not in chat_histories:
+        chat_histories[chat_id] = [{"role": "system", "content": welcome_message}]
 
     if message.voice:
         print("Received a voice message...")
@@ -88,18 +95,18 @@ async def echo(client: Client, message: Message):
         transcribed_text = await transcribe_voice_message(voice_message_path)
         print(f"Transcribed text: {transcribed_text}")
         if transcribed_text:
-            gpt_input = "Ты сейчас надиктовываешь текст для голосового сообщения: " + transcribed_text
+            gpt_input = transcribed_text
+            # Add the voice message component to the chat history if not present
+            if not any(item["content"] == voice_message_afix for item in chat_histories[chat_id]):
+                chat_histories[chat_id].append({"role": "system", "content": voice_message_afix})
         else:
-            return  # Если не удалось транскрибировать голос, то не отвечаем
+            return  # If transcription fails, do not respond
     else:
         gpt_input = message.text
+        # Remove the voice message component from the chat history if present
+        chat_histories[chat_id] = [item for item in chat_histories[chat_id] if item["content"] != voice_message_afix]
 
     if gpt_input:
-        # Update chat history
-        chat_id = message.chat.id
-        if chat_id not in chat_histories:
-            chat_histories[chat_id] = [{"role": "system", "content": welcome_message}]
-
         first_name = message.from_user.first_name
         last_name = message.from_user.last_name
         chat_histories[chat_id].append({"role": "user", "content": f"{first_name} сказал: {gpt_input}"})
