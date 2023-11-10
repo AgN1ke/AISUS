@@ -1,3 +1,4 @@
+# chat_history_manager.py
 class ChatHistoryManager:
     def __init__(self):
         self.chat_histories = {}
@@ -6,6 +7,12 @@ class ChatHistoryManager:
         if chat_id not in self.chat_histories:
             self.chat_histories[chat_id] = []
         self.chat_histories[chat_id].append({"role": role, "content": content})
+
+    def add_user_message(self, chat_id, content):
+        self.add_message(chat_id, 'user', content)
+
+    def add_bot_message(self, chat_id, content):
+        self.add_message(chat_id, 'assistant', content)
 
     def get_history(self, chat_id):
         return self.chat_histories.get(chat_id, [])

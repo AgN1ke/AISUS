@@ -2,3 +2,4 @@ openai
 configparser
 pyrogram
 python-dateutil
+tgcrypto
