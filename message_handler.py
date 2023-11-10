@@ -60,7 +60,7 @@ class MessageHandler:
             self.chat_history_manager.add_bot_message(chat_id, bot_response)
             print(f"AISUS: {bot_response}")
 
-            self.chat_history_manager.prune_history(chat_id, self.config.get_openai_settings()['max_tokens'])
+            self.chat_history_manager.prune_history(chat_id, self.config.get_file_paths_and_limits()['max_tokens'])
 
             if message.voice:
                 voice_response_file = await self.voice_processor.generate_voice_response_and_save_file(
