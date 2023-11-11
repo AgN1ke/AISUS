@@ -21,10 +21,10 @@ class ConfigReader:
     def get_system_messages(self):
         """Get and format system messages."""
         welcome_message = _format_message(self.config['system_messages']['welcome_message'])
-        voice_message_afix = _format_message(self.config['system_messages']['voice_message_afix'])
+        voice_message_affix = _format_message(self.config['system_messages']['voice_message_affix'])
         return {
             'welcome_message': welcome_message,
-            'voice_message_afix': voice_message_afix
+            'voice_message_affix': voice_message_affix
         }
 
     def get_openai_settings(self):

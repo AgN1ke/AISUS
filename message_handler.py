@@ -39,12 +39,12 @@ class MessageHandler:
             if not transcribed_text:
                 return
             user_message = transcribed_text
-            self.chat_history_manager.add_or_update_voice_message(
-                chat_id, self.config.get_system_messages()['voice_message_afix'], transcribed_text)
+            self.chat_history_manager.add_system_voice_affix_if_not_exist(
+                chat_id, self.config.get_system_messages()['voice_message_affix'])
         else:
             user_message = message.text
-            self.chat_history_manager.add_or_update_voice_message(
-                chat_id, self.config.get_system_messages()['voice_message_afix'], None)
+            self.chat_history_manager.remove_system_voice_affix_if_exist(
+                chat_id, self.config.get_system_messages()['voice_message_affix'])
 
         if user_message:
             first_name = message.from_user.first_name
