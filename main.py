@@ -1,149 +1,23 @@
-import openai
-import configparser
-from pyrogram import Client, filters
-from pyrogram.types import Message
-from openai import OpenAI
-import os
-from datetime import datetime
-
-# Создание экземпляра парсера и чтение конфигурационного файла
-config = configparser.ConfigParser()
-config.read('config.ini', encoding='utf-8')
-
-# Read the welcome message
-welcome_message = config['system_messages']['welcome_message']
-# If you used a line delimiter, replace it with newline characters
-welcome_message = welcome_message.replace(' | ', '\n')
-
-voice_message_afix = config['system_messages']['voice_message_afix']
-voice_message_afix = voice_message_afix.replace(' | ', '\n')
-
-# Получение значения ключа API для OpenAI
-openai_api_key = config['openai']['api_key']
-
-# Установка ключа API
-openai.api_key = openai_api_key
-
-# Получение настроек API для другого сервиса
-api_id = config['myapi']['api_id']
-api_hash = config['myapi']['api_hash']
-session_name = config['myapi']['session_name']
-
-# Инициализация клиента с полученными настройками
-app = Client(session_name, api_id=api_id, api_hash=api_hash)
-# Initialize chat histories dictionary
-chat_histories = {}
+# main.py
+from pyrogram import Client
+from config_reader import ConfigReader
+from message_handler import MessageHandler
+from voice_processor import VoiceProcessor
+from openai_wrapper import OpenAIWrapper
+from chat_history_manager import ChatHistoryManager
 
 
-# Функция для транскрибирования голосовых сообщений
-async def transcribe_voice_message(voice_message_path):
-    try:
-        # Создаем отдельный клиент для OpenAI
-        openai_client = OpenAI(api_key=openai_api_key)
+if __name__ == "__main__":
+    config = ConfigReader('config.ini')
 
-        with open(voice_message_path, "rb") as audio_file:
-            transcript_response = openai_client.audio.transcriptions.create(
-                model="whisper-1",
-                file=audio_file
-            )
-        # Доступ к тексту из ответа
-        return transcript_response.text
-    except Exception as e:
-        print(f"Ошибка при транскрипции: {e}")
-        return ""
+    app = Client(name=config.get_api_settings()['session_name'],
+                 api_id=config.get_api_settings()['api_id'],
+                 api_hash=config.get_api_settings()['api_hash'])
+    voice_processor = VoiceProcessor(api_key=config.get_openai_settings()['api_key'],
+                                     whisper_model=config.get_openai_settings()['whisper_model'],
+                                     tts_model=config.get_openai_settings()['tts_model'])
+    chat_history_manager = ChatHistoryManager()
+    openai_wrapper = OpenAIWrapper(config.get_openai_settings()['api_key'])
+    message_handler = MessageHandler(config, app, voice_processor, chat_history_manager, openai_wrapper)
 
-
-# Функция для генерации голосового ответа и сохранения в файл
-async def generate_voice_response_and_save_file(text, voice="alloy",
-                                                folder_path="C:\\Python_projects\\Smartest\\Audio"):
-    openai_client = OpenAI(api_key=openai_api_key)
-    response = openai_client.audio.speech.create(
-        model="tts-1",
-        voice=voice,
-        input=text
-    )
-    # Генерация уникального имени файла
-    timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
-    file_name = f"{folder_path}\\response_{timestamp}.mp3"
-
-    # Сохранение аудиофайла
-    with open(file_name, "wb") as audio_file:
-        audio_file.write(response.read())
-
-    return file_name
-
-
-@app.on_message(filters.private | (filters.group & (filters.reply | filters.mentioned)))
-async def echo(client: Client, message: Message):
-    chat_id = message.chat.id
-    # Get bot's username
-    bot_username = (await client.get_me()).username
-
-    # If the message is a reply but not a direct mention of the bot and not a reply to the bot's message, skip it
-    if message.reply_to_message:
-        if message.reply_to_message.from_user.username != bot_username and \
-                (message.text is None or f"@{bot_username}" not in message.text):
-            return
-
-    # Update chat history
-    if chat_id not in chat_histories:
-        chat_histories[chat_id] = [{"role": "system", "content": welcome_message}]
-
-    if message.voice:
-        print("Received a voice message...")
-        voice_message_path = await message.download()
-        transcribed_text = await transcribe_voice_message(voice_message_path)
-        print(f"Transcribed text: {transcribed_text}")
-        if transcribed_text:
-            gpt_input = transcribed_text
-            # Insert the voice message component at the second position if not present
-            if not any(item["content"] == voice_message_afix for item in chat_histories[chat_id]):
-                # Insert at index 1
-                chat_histories[chat_id].insert(1, {"role": "system", "content": voice_message_afix})
-        else:
-            return  # If transcription fails, do not respond
-    else:
-        gpt_input = message.text
-        # Remove the voice message component from the chat history if present
-        chat_histories[chat_id] = [item for item in chat_histories[chat_id] if item["content"] != voice_message_afix]
-        # Make sure the welcome message is always the first
-        if chat_histories[chat_id][0]["content"] != welcome_message:
-            chat_histories[chat_id].insert(0, {"role": "system", "content": welcome_message})
-
-    if gpt_input:
-        first_name = message.from_user.first_name
-        last_name = message.from_user.last_name
-        chat_histories[chat_id].append({"role": "user", "content": f"{first_name} сказал: {gpt_input}"})
-        print(f"{first_name} {last_name} ({chat_id}): {gpt_input}")
-
-        # Generate response from GPT-4
-        client = OpenAI(api_key=openai_api_key)
-        response = client.chat.completions.create(
-            model="gpt-4",
-            messages=chat_histories[chat_id],
-            max_tokens=4000
-        )
-        bot_response = response.choices[0].message.content
-        chat_histories[chat_id].append({"role": "assistant", "content": bot_response})
-        print(f"GPT prompt: {gpt_input}")
-        print(f"Bot: {bot_response}")
-
-        # Remove old messages from the history if their amount exceeds 4000 tokens
-        while sum([len(m['content']) for m in chat_histories[chat_id] if m['role'] != 'system']) > 4000:
-            for i in range(len(chat_histories[chat_id]) - 1, -1, -1):  # We start from the end of the list
-                if chat_histories[chat_id][i]['role'] != 'system':
-                    del chat_histories[chat_id][i]
-                    break
-
-        # Send response
-        if message.voice:
-            voice_response_file = await generate_voice_response_and_save_file(bot_response)
-            await message.reply_voice(voice_response_file)
-
-            if os.path.exists(voice_response_file):
-                os.remove(voice_response_file)
-        else:
-            await message.reply_text(bot_response)
-
-
-app.run()
+    app.run()
