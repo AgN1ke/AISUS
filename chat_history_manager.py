@@ -20,7 +20,7 @@ class ChatHistoryManager:
     def prune_history(self, chat_id, max_length):
         if chat_id in self.chat_histories:
             while sum([len(m['content']) for m in self.chat_histories[chat_id] if m['role'] != 'system']) > max_length:
-                for i in range(len(self.chat_histories[chat_id]) - 1, -1, -1):
+                for i in range(len(self.chat_histories[chat_id])):
                     if self.chat_histories[chat_id][i]['role'] != 'system':
                         del self.chat_histories[chat_id][i]
                         break
