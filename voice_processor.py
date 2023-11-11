@@ -10,7 +10,7 @@ class VoiceProcessor:
         self.whisper_model = whisper_model
         self.tts_model = tts_model
 
-    async def transcribe_voice_message(self, voice_message_path):
+    def transcribe_voice_message(self, voice_message_path):
         """Transcribe a voice message using the Whisper model."""
         try:
             with open(voice_message_path, "rb") as audio_file:
@@ -24,7 +24,7 @@ class VoiceProcessor:
             print(f"Error in transcription: {e}")
             return ""
 
-    async def generate_voice_response_and_save_file(self, text, voice, folder_path):
+    def generate_voice_response_and_save_file(self, text, voice, folder_path):
         """Generate a voice response and save it to a file."""
         # Validate or update folder_path
         if not folder_path or not os.path.isdir(folder_path):

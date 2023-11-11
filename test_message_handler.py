@@ -1,62 +1,58 @@
+# test_message_handler.py
 import unittest
-from unittest.mock import MagicMock, patch, AsyncMock
+from unittest.mock import Mock
 from message_handler import MessageHandler
 from config_reader import ConfigReader
 from chat_history_manager import ChatHistoryManager
-from pyrogram.types import Message, User
-from message_wrapper import MessageWrapper
 
 
 class TestMessageHandler(unittest.TestCase):
+
     def setUp(self):
-        # Mock dependencies
-        self.client = MagicMock()
-        self.voice_processor = MagicMock()
-        self.openai_wrapper = MagicMock()
-
-        # Mocking client.get_me() to return a mock username
-        self.client.get_me = AsyncMock(return_value=MagicMock(username='mock_bot'))
-
-        # Use real ConfigReader and ChatHistoryManager
-        self.config = ConfigReader('test_config.ini')
+        self.config = ConfigReader("test_config.ini")
         self.chat_history_manager = ChatHistoryManager()
-
-        self.voice_processor.transcribe_voice_message = MagicMock(return_value="some text")
-        # mock_response = AsyncMock()
-        # mock_response.choices = [AsyncMock(message=AsyncMock(content="Mocked bot response"))]
-        # self.openai_wrapper.chat_completion.return_value = mock_response
-
-        # Create an instance of MessageHandler
+        self.client = Mock()
+        self.voice_processor = Mock()
+        self.openai_wrapper = Mock()
         self.message_handler = MessageHandler(
-            self.config,
-            self.client,
-            self.voice_processor,
-            self.chat_history_manager,
-            self.openai_wrapper
+            config=self.config,
+            client=self.client,
+            voice_processor=self.voice_processor,
+            chat_history_manager=self.chat_history_manager,
+            openai_wrapper=self.openai_wrapper
         )
 
-    @patch('message_handler.MessageWrapper')  # Mock MessageWrapper
-    def test_handle_message_internal(self, mock_message_wrapper):
-        # Create a mock message
-        mock_message = MagicMock(spec=Message)
-        mock_message.chat.id = 123
-        mock_message.text = "Hello"
-        mock_user = MagicMock(spec=User)
-        mock_user.first_name = "John"
-        mock_user.last_name = "Doe"
-        mock_message.from_user = mock_user
+    def test_should_process_message(self):
+        # Setup
+        message = Mock()
+        message.voice = None
+        message.text = "Hello"
+        message.chat_id = 123
+        message.reply_to_message = None
+        message.from_user_first_name = "Test User"
 
-        # Wrapping the mock message
-        wrapped_message = MessageWrapper(mock_message)
-        mock_message_wrapper.return_value = wrapped_message
+        # Execution and Verification
+        self.assertTrue(self.message_handler._should_process_message(self.client, message))
 
-        # Call the method under test
-        self.message_handler.handle_message_internal(self.client, wrapped_message)
+    def test_mock_text_dialog(self):
+        # Setup
+        message = Mock()
+        message.voice = None
+        message.text = "Hello"
+        message.chat_id = 123
+        message.reply_to_message = None
+        message.from_user_first_name = "Test User"
 
-        # Assertions to check if the correct methods were called with expected arguments
-        self.chat_history_manager.add_user_message.assert_called_with(123, "Hello")
-        self.openai_wrapper.chat_completion.assert_called()
-        # Add more assertions based on the expected behavior of handle_message_internal
+        predefined_response = "Hi there!"
+        self.openai_wrapper.chat_completion.return_value = Mock(
+            choices=[Mock(message=Mock(content=predefined_response))])
+
+        # Execution
+        self.message_handler._handle_message(self.client, message)
+
+        # Verification
+        self.assertEqual(len(self.chat_history_manager.get_history(message.chat_id)), 3)
+        self.assertIn(predefined_response, self.chat_history_manager.get_history(message.chat_id)[-1]['content'])
 
 
 if __name__ == '__main__':

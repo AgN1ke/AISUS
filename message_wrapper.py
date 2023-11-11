@@ -1,38 +1,44 @@
 # message_wrapper.py
-from pyrogram.types import Message as PyrogramMessage
+from pyrogram.types import Message
 
 
 class MessageWrapper:
-    def __init__(self, message: PyrogramMessage):
-        self._message = message
+    def __init__(self, message: Message):
+        self.message = message
 
     @property
-    def chat(self):
-        return self._message.chat
+    def chat_id(self):
+        return self.message.chat.id
 
     @property
     def text(self):
-        return self._message.text
+        return self.message.text
 
     @property
     def voice(self):
-        return self._message.voice
-
-    @property
-    def from_user(self):
-        return self._message.from_user
+        return self.message.voice
 
     @property
     def reply_to_message(self):
-        return self._message.reply_to_message
+        return self.message.reply_to_message
 
-    async def reply_voice(self, voice, *args, **kwargs):
-        """Reply to the message with a voice message."""
-        return await self._message.reply_voice(voice, *args, **kwargs)
+    @property
+    def reply_to_message_from_user_username(self):
+        return self.message.reply_to_message.from_user.username
 
-    async def reply_text(self, text, *args, **kwargs):
-        """Reply to the message with a text message."""
-        return await self._message.reply_text(text, *args, **kwargs)
+    @property
+    def from_user_first_name(self):
+        return self.message.from_user.first_name
 
-    async def download(self):
-        return await self._message.download()
+    @property
+    def from_user_last_name(self):
+        return self.message.from_user.last_name
+
+    def download(self):
+        return self.message.download()
+
+    def reply_text(self, text: str):
+        return self.message.reply_text(text)
+
+    def reply_voice(self, voice):
+        return self.message.reply_voice(voice)
