@@ -1,11 +1,11 @@
 # message_handler.py
 from pyrogram.types import Message
-from message_wrapper import MessageWrapper
-from config_reader import ConfigReader
+from src.message_wrapper import MessageWrapper
+from src.config_reader import ConfigReader
 from pyrogram import Client, filters
-from voice_processor import VoiceProcessor
-from chat_history_manager import ChatHistoryManager
-from openai_wrapper import OpenAIWrapper
+from src.voice_processor import VoiceProcessor
+from src.chat_history_manager import ChatHistoryManager
+from src.openai_wrapper import OpenAIWrapper
 import os
 
 

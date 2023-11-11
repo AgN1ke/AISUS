@@ -1,15 +1,15 @@
 # test_message_handler.py
 import unittest
 from unittest.mock import Mock
-from message_handler import MessageHandler
-from config_reader import ConfigReader
-from chat_history_manager import ChatHistoryManager
+from src.message_handler import MessageHandler
+from src.config_reader import ConfigReader
+from src.chat_history_manager import ChatHistoryManager
 
 
 class TestMessageHandler(unittest.TestCase):
 
     def setUp(self):
-        self.config = ConfigReader("test_config.ini")
+        self.config = ConfigReader("../configs/test_config.ini")
         self.chat_history_manager = ChatHistoryManager()
         self.client = Mock()
         self.voice_processor = Mock()

@@ -1,14 +1,14 @@
 # main.py
 from pyrogram import Client
-from config_reader import ConfigReader
-from message_handler import MessageHandler
-from voice_processor import VoiceProcessor
-from openai_wrapper import OpenAIWrapper
-from chat_history_manager import ChatHistoryManager
+from src.config_reader import ConfigReader
+from src.message_handler import MessageHandler
+from src.voice_processor import VoiceProcessor
+from src.openai_wrapper import OpenAIWrapper
+from src.chat_history_manager import ChatHistoryManager
 
 
 if __name__ == "__main__":
-    config = ConfigReader('config.ini')
+    config = ConfigReader('configs/config.ini')
 
     app = Client(name=config.get_api_settings()['session_name'],
                  api_id=config.get_api_settings()['api_id'],
