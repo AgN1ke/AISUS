@@ -49,7 +49,7 @@ class MessageHandler:
         if user_message:
             first_name = message.from_user.first_name
             last_name = message.from_user.last_name
-            self.chat_history_manager.add_user_message(chat_id, user_message)
+            self.chat_history_manager.add_user_message(chat_id, first_name, user_message)
             print(f"{first_name} {last_name} ({chat_id}): {user_message}")
 
             response = self.openai_wrapper.chat_completion(

@@ -3,27 +3,35 @@ class ChatHistoryManager:
     def __init__(self):
         self.chat_histories = {}
 
-    def add_message(self, chat_id, role, content):
+    def _add_message(self, chat_id, role, content):
         if chat_id not in self.chat_histories:
             self.chat_histories[chat_id] = []
         self.chat_histories[chat_id].append({"role": role, "content": content})
 
-    def add_user_message(self, chat_id, content):
-        self.add_message(chat_id, 'user', content)
+    def add_user_message(self, chat_id, name, content):
+        self._add_message(chat_id, 'user', f"{name}: {content}")
 
     def add_bot_message(self, chat_id, content):
-        self.add_message(chat_id, 'assistant', content)
+        self._add_message(chat_id, 'assistant', content)
 
     def get_history(self, chat_id):
         return self.chat_histories.get(chat_id, [])
 
+    def calculate_history_length(self, chat_id):
+        total_length = 0
+        if chat_id in self.chat_histories:
+            for message in self.chat_histories[chat_id]:
+                total_length += len(message['content'])
+        return total_length
+
     def prune_history(self, chat_id, max_length):
         if chat_id in self.chat_histories:
-            while sum([len(m['content']) for m in self.chat_histories[chat_id] if m['role'] != 'system']) > max_length:
-                for i in range(len(self.chat_histories[chat_id]) - 1, -1, -1):
+            while self.calculate_history_length(chat_id) > max_length:
+                # Remove the oldest non-system message
+                for i in range(len(self.chat_histories[chat_id])):
                     if self.chat_histories[chat_id][i]['role'] != 'system':
-                        del self.chat_histories[chat_id][i]
-                        break
+                        self.chat_histories[chat_id].pop(i)
+                        break  # Break after removing one message, then recheck the total length
 
     def add_system_message(self, chat_id, content):
         if chat_id not in self.chat_histories:
