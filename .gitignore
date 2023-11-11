@@ -2,7 +2,7 @@
 /venv/
 /audio/
 /downloads/
-/config.ini
+/configs/config.ini
 *.session
 /.idea/
 *.session-journal
