@@ -40,9 +40,11 @@ class MessageHandler:
 
         first_name, last_name = message.from_user_first_name, message.from_user_last_name
         chat_id = message.chat_id
+        print(f"{first_name} {last_name} ({chat_id}): {user_message}")
         self._update_chat_history(chat_id, first_name, user_message, is_voice)
 
         bot_response = self._generate_bot_response(chat_id)
+        print(f"AISUS: {bot_response}")
         self._send_response(message, bot_response, is_voice)
         self.chat_history_manager.add_bot_message(chat_id, bot_response)
 
