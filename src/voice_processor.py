@@ -11,6 +11,7 @@ class VoiceProcessor:
         self.tts_model = tts_model
 
     def transcribe_voice_message(self, voice_message_path):
+        print(f"Voice file received")
         """Transcribe a voice message using the Whisper model."""
         try:
             with open(voice_message_path, "rb") as audio_file:
@@ -19,6 +20,7 @@ class VoiceProcessor:
                     model=self.whisper_model,
                     file=audio_file
                 )
+            print(f"Voice message: {transcript_response.text}")
             return transcript_response.text
         except Exception as e:
             print(f"Error in transcription: {e}")

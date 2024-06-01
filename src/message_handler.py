@@ -1,40 +1,35 @@
 # message_handler.py
-from pyrogram.types import Message
+from telegram import Update
+from telegram.ext import ContextTypes
 from src.message_wrapper import MessageWrapper
 from src.config_reader import ConfigReader
-from pyrogram import Client, filters
 from src.voice_processor import VoiceProcessor
 from src.chat_history_manager import ChatHistoryManager
 from src.openai_wrapper import OpenAIWrapper
 import os
 
-
-class MessageHandler:
+class CustomMessageHandler:
     def __init__(self,
                  config: ConfigReader,
-                 client: Client,
                  voice_processor: VoiceProcessor,
                  chat_history_manager: ChatHistoryManager,
                  openai_wrapper: OpenAIWrapper):
 
         self.config = config
-        self.client = client
         self.voice_processor = voice_processor
         self.chat_history_manager = chat_history_manager
-        message_filters = filters.private | (filters.group & (filters.reply | filters.mentioned))
-        self.client.on_message(message_filters)(self.handle_message)
         self.openai_wrapper = openai_wrapper
 
-    def handle_message(self, client, message: Message):
-        wrapped_message = MessageWrapper(message)
-        self._handle_message(client, wrapped_message)
+    async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        wrapped_message = MessageWrapper(update)
+        await self._handle_message(context.bot, wrapped_message)
 
-    def _handle_message(self, client, message: MessageWrapper):
+    async def _handle_message(self, bot, message: MessageWrapper):
         """Handle incoming messages and generate responses."""
-        if not self._should_process_message(client, message):
+        if not await self._should_process_message(bot, message):
             return
 
-        user_message, is_voice = self._process_message_content(message)
+        user_message, is_voice = await self._process_message_content(message)
         if not user_message:
             return
 
@@ -45,23 +40,24 @@ class MessageHandler:
 
         bot_response = self._generate_bot_response(chat_id)
         print(f"AISUS: {bot_response}")
-        self._send_response(message, bot_response, is_voice)
+        await self._send_response(message, bot_response, is_voice)
         self.chat_history_manager.add_bot_message(chat_id, bot_response)
 
         self.chat_history_manager.prune_history(chat_id, self.config.get_file_paths_and_limits()['max_tokens'])
 
-    @staticmethod
-    def _should_process_message(client, message):
+    async def _should_process_message(self, bot, message):
         """Determine if the message should be processed."""
-        bot_username = client.get_me().username
-        return not (message.reply_to_message and
-                    message.reply_to_message_from_user_username != bot_username and
-                    (message.text is None or f"@{bot_username}" not in message.text))
+        bot_username = (await bot.get_me()).username
+        return (
+            message.chat_type == 'private' or
+            (message.text and f"@{bot_username}" in message.text) or
+            (message.reply_to_message and message.reply_to_message.from_user.username == bot_username)
+        )
 
-    def _process_message_content(self, message):
+    async def _process_message_content(self, message):
         """Process the content of the message, whether it's voice or text."""
         if message.voice:
-            voice_message_path = message.download()
+            voice_message_path = await message.download()
             transcribed_text = self.voice_processor.transcribe_voice_message(voice_message_path)
             return transcribed_text, True
         else:
@@ -87,15 +83,15 @@ class MessageHandler:
         bot_response = response.choices[0].message.content
         return bot_response
 
-    def _send_response(self, message, bot_response, is_voice):
+    async def _send_response(self, message, bot_response, is_voice):
         """Send the response back to the user."""
         if is_voice:
             voice_response_file = self.voice_processor.generate_voice_response_and_save_file(
                 bot_response,
                 self.config.get_openai_settings()['vocalizer_voice'],
                 self.config.get_file_paths_and_limits()['audio_folder_path'])
-            message.reply_voice(voice_response_file)
+            await message.reply_voice(voice_response_file)
             if os.path.exists(voice_response_file):
                 os.remove(voice_response_file)
         else:
-            message.reply_text(bot_response)
+            await message.reply_text(bot_response)

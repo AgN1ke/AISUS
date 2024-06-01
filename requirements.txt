@@ -1,5 +1,4 @@
 openai
 configparser
-pyrogram
+python-telegram-bot==20.0
 python-dateutil
-tgcrypto

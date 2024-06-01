@@ -1,11 +1,9 @@
 # config_reader.py
 import configparser
 
-
 def _format_message(message):
     """Format the welcome and voice messages."""
     return message.replace(' | ', '\n')
-
 
 class ConfigReader:
     def __init__(self, file_path):
@@ -38,11 +36,9 @@ class ConfigReader:
         }
 
     def get_api_settings(self):
-        """Get other API settings."""
+        """Get bot API settings."""
         return {
-            'api_id': self.config['myapi']['api_id'],
-            'api_hash': self.config['myapi']['api_hash'],
-            'session_name': self.config['myapi']['session_name']
+            'bot_token': self.config['myapi']['bot_token']
         }
 
     def get_file_paths_and_limits(self):
