@@ -8,6 +8,7 @@ from src.chat_history_manager import ChatHistoryManager
 from src.openai_wrapper import OpenAIWrapper
 import os
 
+
 class CustomMessageHandler:
     def __init__(self,
                  config: ConfigReader,
@@ -21,44 +22,56 @@ class CustomMessageHandler:
         self.openai_wrapper = openai_wrapper
 
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        wrapped_message = MessageWrapper(update)
-        await self._handle_message(context.bot, wrapped_message)
+        try:
+            wrapped_message = MessageWrapper(update)
+            await self._handle_message(context.bot, wrapped_message)
+        except Exception as e:
+            print(f"Error handling message: {e}")
 
     async def _handle_message(self, bot, message: MessageWrapper):
         """Handle incoming messages and generate responses."""
         if not await self._should_process_message(bot, message):
+            print("Message not processed due to filter.")
             return
 
         user_message, is_voice = await self._process_message_content(message)
         if not user_message:
+            print("No user message found.")
             return
 
         first_name, last_name = message.from_user_first_name, message.from_user_last_name
         chat_id = message.chat_id
-        print(f"{first_name} {last_name} ({chat_id}): {user_message}")
+        print(f"Processing message from {first_name} {last_name} ({chat_id}): {user_message}")
         self._update_chat_history(chat_id, first_name, user_message, is_voice)
 
-        bot_response = self._generate_bot_response(chat_id)
-        print(f"AISUS: {bot_response}")
-        await self._send_response(message, bot_response, is_voice)
-        self.chat_history_manager.add_bot_message(chat_id, bot_response)
+        try:
+            bot_response = self._generate_bot_response(chat_id)
+            print(f"Generated response: {bot_response}")
+            await self._send_response(message, bot_response, is_voice)
+            self.chat_history_manager.add_bot_message(chat_id, bot_response)
+        except Exception as e:
+            print(f"Error generating or sending response: {e}")
+            await message.reply_text("Вибачте, але я не можу продовжити цю розмову.")
 
-        self.chat_history_manager.prune_history(chat_id, self.config.get_file_paths_and_limits()['max_tokens'])
+        self.chat_history_manager.prune_history(chat_id, 124000)
 
     async def _should_process_message(self, bot, message):
         """Determine if the message should be processed."""
         bot_username = (await bot.get_me()).username
         return (
-            message.chat_type == 'private' or
-            (message.text and f"@{bot_username}" in message.text) or
-            (message.reply_to_message and message.reply_to_message.from_user.username == bot_username)
+                message.chat_type == 'private' or
+                (message.text and f"@{bot_username}" in message.text) or
+                (message.reply_to_message and message.reply_to_message_from_user_username == bot_username) or
+                message.voice
         )
 
     async def _process_message_content(self, message):
         """Process the content of the message, whether it's voice or text."""
         if message.voice:
+            print("Voice file received")
             voice_message_path = await message.download()
             transcribed_text = self.voice_processor.transcribe_voice_message(voice_message_path)
+            print(f"Voice message: {transcribed_text}")
             return transcribed_text, True
         else:
             return message.text, False
@@ -79,7 +92,7 @@ class CustomMessageHandler:
         response = self.openai_wrapper.chat_completion(
             model=self.config.get_openai_settings()['gpt_model'],
             messages=self.chat_history_manager.get_history(chat_id),
-            max_tokens=self.config.get_file_paths_and_limits()['max_tokens'])
+            max_tokens=4000)  # Обеспечиваем лимит для ответа в 4000 токенов
         bot_response = response.choices[0].message.content
         return bot_response
 

@@ -24,7 +24,7 @@ class ChatHistoryManager:
                 total_length += len(message['content'])
         return total_length
 
-    def prune_history(self, chat_id, max_length):
+    def prune_history(self, chat_id, max_length=124000):
         if chat_id in self.chat_histories:
             while self.calculate_history_length(chat_id) > max_length:
                 # Remove the oldest non-system message
