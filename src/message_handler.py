@@ -1,4 +1,5 @@
 # message_handler.py
+import os
 from telegram import Update
 from telegram.ext import ContextTypes
 from src.message_wrapper import MessageWrapper
@@ -6,22 +7,25 @@ from src.config_reader import ConfigReader
 from src.voice_processor import VoiceProcessor
 from src.chat_history_manager import ChatHistoryManager
 from src.openai_wrapper import OpenAIWrapper
-import os
-
 
 class CustomMessageHandler:
-    def __init__(self,
-                 config: ConfigReader,
-                 voice_processor: VoiceProcessor,
-                 chat_history_manager: ChatHistoryManager,
-                 openai_wrapper: OpenAIWrapper):
-
+    def __init__(self, config: ConfigReader, voice_processor: VoiceProcessor, chat_history_manager: ChatHistoryManager, openai_wrapper: OpenAIWrapper):
         self.config = config
         self.voice_processor = voice_processor
         self.chat_history_manager = chat_history_manager
         self.openai_wrapper = openai_wrapper
+        self.authenticated_users = {}  # Dictionary to keep track of authenticated users
 
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        chat_id = update.effective_chat.id
+        if not self.authenticated_users.get(chat_id):
+            if update.message.text == self.config.get_system_messages()['password']:
+                self.authenticated_users[chat_id] = True
+                await update.message.reply_text("Автентифікація успішна. Ви можете почати спілкування.")
+            else:
+                await update.message.reply_text("Будь ласка, введіть пароль для продовження.")
+            return
+
         try:
             wrapped_message = MessageWrapper(update)
             await self._handle_message(context.bot, wrapped_message)
