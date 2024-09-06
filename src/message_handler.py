@@ -106,6 +106,7 @@ class CustomMessageHandler:
         bot_response = response.choices[0].message.content
         return bot_response
 
+
     async def _send_response(self, message, bot_response, is_voice):
         """Send the response back to the user."""
         if is_voice:
