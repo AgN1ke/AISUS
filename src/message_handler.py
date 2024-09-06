@@ -99,12 +99,17 @@ class CustomMessageHandler:
 
     def _generate_bot_response(self, chat_id):
         """Generate the bot's response using OpenAI."""
-        response = self.openai_wrapper.chat_completion(
-            model=self.config.get_openai_settings()['gpt_model'],
-            messages=self.chat_history_manager.get_history(chat_id),
-            max_tokens=4000)  # Обеспечиваем лимит для ответа в 4000 токенов
-        bot_response = response.choices[0].message.content
-        return bot_response
+        try:
+            response = self.openai_wrapper.chat_completion(
+                model=self.config.get_openai_settings()['gpt_model'],
+                messages=self.chat_history_manager.get_history(chat_id),
+                max_tokens=4000
+            )
+            bot_response = response.choices[0].message.content
+            return bot_response
+        except Exception as e:
+            print(f"Error generating bot response: {e}")
+            return "Вибачте, але я не можу продовжити цю розмову."
 
     async def _send_response(self, message, bot_response, is_voice):
         """Send the response back to the user."""
@@ -120,4 +125,3 @@ class CustomMessageHandler:
         else:
             # Додаємо parse_mode для форматування Markdown
             await message.reply_text(bot_response, parse_mode="Markdown")
-
