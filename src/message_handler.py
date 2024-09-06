@@ -112,9 +112,12 @@ class CustomMessageHandler:
             voice_response_file = self.voice_processor.generate_voice_response_and_save_file(
                 bot_response,
                 self.config.get_openai_settings()['vocalizer_voice'],
-                self.config.get_file_paths_and_limits()['audio_folder_path'])
+                self.config.get_file_paths_and_limits()['audio_folder_path']
+            )
             await message.reply_voice(voice_response_file)
             if os.path.exists(voice_response_file):
                 os.remove(voice_response_file)
         else:
-            await message.reply_text(bot_response)
+            # Додаємо parse_mode для форматування Markdown
+            await message.reply_text(bot_response, parse_mode="Markdown")
+
