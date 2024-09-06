@@ -3,4 +3,3 @@ configparser
 python-telegram-bot==20.0
 python-dateutil
 heroku3
-subprocess
