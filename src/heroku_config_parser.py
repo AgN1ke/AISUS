@@ -12,6 +12,7 @@ class ConfigReader:
         # System messages
         self.welcome_message = _format_message(os.getenv('SYSTEM_MESSAGES_WELCOME_MESSAGE'))
         self.voice_message_affix = _format_message(os.getenv('SYSTEM_MESSAGES_VOICE_MESSAGE_AFFIX'))
+        self.password = _format_message(os.getenv('PASSWORD'))
 
         # OpenAI settings
         self.api_key = os.getenv('OPENAI_API_KEY')
@@ -33,7 +34,8 @@ class ConfigReader:
         """Return formatted system messages."""
         return {
             'welcome_message': self.welcome_message,
-            'voice_message_affix': self.voice_message_affix
+            'voice_message_affix': self.voice_message_affix,
+            'password': self.password
         }
 
     def get_openai_settings(self):
