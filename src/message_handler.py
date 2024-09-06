@@ -41,6 +41,7 @@ class CustomMessageHandler:
             await self._handle_message(context.bot, wrapped_message)
         except Exception as e:
             print(f"Error handling message: {e}")
+            await update.message.reply_text("Сталася помилка при обробці вашого повідомлення.")
 
     async def _should_process_message(self, bot, message):
         """Determine if the message should be processed."""
@@ -99,23 +100,35 @@ class CustomMessageHandler:
 
     def _generate_bot_response(self, chat_id):
         """Generate the bot's response using OpenAI."""
-        response = self.openai_wrapper.chat_completion(
-            model=self.config.get_openai_settings()['gpt_model'],
-            messages=self.chat_history_manager.get_history(chat_id),
-            max_tokens=4000)  # Обеспечиваем лимит для ответа в 4000 токенов
-        bot_response = response.choices[0].message.content
-        return bot_response
+        try:
+            response = self.openai_wrapper.chat_completion(
+                model=self.config.get_openai_settings()['gpt_model'],
+                messages=self.chat_history_manager.get_history(chat_id),
+                max_tokens=4000
+            )
+            bot_response = response.choices[0].message.content
+            print(f"Bot response: {bot_response}")
+            return bot_response
+        except Exception as e:
+            print(f"Error generating bot response: {e}")
+            return "Вибачте, але я не можу продовжити цю розмову."
 
 
     async def _send_response(self, message, bot_response, is_voice):
         """Send the response back to the user."""
-        if is_voice:
-            voice_response_file = self.voice_processor.generate_voice_response_and_save_file(
-                bot_response,
-                self.config.get_openai_settings()['vocalizer_voice'],
-                self.config.get_file_paths_and_limits()['audio_folder_path'])
-            await message.reply_voice(voice_response_file)
-            if os.path.exists(voice_response_file):
-                os.remove(voice_response_file)
-        else:
-            await message.reply_text(bot_response)
+        try:
+            if is_voice:
+                voice_response_file = self.voice_processor.generate_voice_response_and_save_file(
+                    bot_response,
+                    self.config.get_openai_settings()['vocalizer_voice'],
+                    self.config.get_file_paths_and_limits()['audio_folder_path']
+                )
+                await message.reply_voice(voice_response_file)
+                if os.path.exists(voice_response_file):
+                    os.remove(voice_response_file)
+            else:
+                # Додаємо parse_mode для форматування Markdown
+                await message.reply_text(bot_response, parse_mode="Markdown")
+        except Exception as e:
+            print(f"Error sending response: {e}")
+            await message.reply_text("Сталася помилка при відправці відповіді.")
