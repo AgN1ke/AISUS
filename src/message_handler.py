@@ -1,4 +1,3 @@
-# message_handler.py
 import os
 from telegram import Update
 from telegram.ext import ContextTypes
@@ -18,14 +17,20 @@ class CustomMessageHandler:
 
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         chat_id = update.effective_chat.id
+        message_text = update.message.text
+
+        # Check if the user is already authenticated
         if not self.authenticated_users.get(chat_id):
-            if update.message.text == self.config.get_system_messages()['password']:
+            if message_text == self.config.get_system_messages().get('password'):
+                # Authenticate the user if the password is correct
                 self.authenticated_users[chat_id] = True
                 await update.message.reply_text("Автентифікація успішна. Ви можете почати спілкування.")
             else:
+                # Ask for the password if the user is not authenticated
                 await update.message.reply_text("Будь ласка, введіть пароль для продовження.")
-            return
+            return  # Exit here if not authenticated or after successful authentication
 
+        # Process the message if the user is authenticated
         try:
             wrapped_message = MessageWrapper(update)
             await self._handle_message(context.bot, wrapped_message)
