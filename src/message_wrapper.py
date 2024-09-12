@@ -45,7 +45,7 @@ class MessageWrapper:
         return file_path
 
     def reply_text(self, text: str):
-        return self.message.reply_text(text)
+        return self.message.reply_text(text, parse_mode='MarkdownV2')
 
     def reply_voice(self, voice):
         return self.message.reply_voice(voice)
