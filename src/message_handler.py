@@ -2,10 +2,11 @@ import os
 from telegram import Update
 from telegram.ext import ContextTypes
 from src.message_wrapper import MessageWrapper
-from src.config_reader import ConfigReader
+from src.heroku_config_parser import ConfigReader
 from src.voice_processor import VoiceProcessor
 from src.chat_history_manager import ChatHistoryManager
 from src.openai_wrapper import OpenAIWrapper
+
 
 class CustomMessageHandler:
     def __init__(self, config: ConfigReader, voice_processor: VoiceProcessor, chat_history_manager: ChatHistoryManager, openai_wrapper: OpenAIWrapper):
@@ -102,7 +103,7 @@ class CustomMessageHandler:
         response = self.openai_wrapper.chat_completion(
             model=self.config.get_openai_settings()['gpt_model'],
             messages=self.chat_history_manager.get_history(chat_id),
-            max_tokens=4000)  # Обеспечиваем лимит для ответа в 4000 токенов
+            max_tokens=3000)  # Обеспечиваем лимит для ответа в 4000 токенов
         bot_response = response.choices[0].message.content
         return bot_response
 
