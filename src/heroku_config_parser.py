@@ -1,6 +1,5 @@
 import os
-from dotenv import load_dotenv
-
+# from dotenv import load_dotenv
 
 
 def _format_message(message):
@@ -12,7 +11,7 @@ class ConfigReader:
     def __init__(self):
         """Initialize the configuration from environment variables."""
         # System messages
-        load_dotenv()
+        # load_dotenv()
         self.welcome_message = _format_message(os.getenv('SYSTEM_MESSAGES_WELCOME_MESSAGE'))
         self.voice_message_affix = _format_message(os.getenv('SYSTEM_MESSAGES_VOICE_MESSAGE_AFFIX'))
         self.password = _format_message(os.getenv('PASSWORD'))
