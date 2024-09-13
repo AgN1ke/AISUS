@@ -3,3 +3,4 @@ configparser
 python-telegram-bot==21.5
 python-dateutil
 heroku3
+requests

@@ -1,19 +1,20 @@
 import os
-# from dotenv import load_dotenv
-
+# from dotenv import load_dotenv # Розкоментуйте цю лінію, якщо використовуєте файл .env
 
 def _format_message(message):
     """Format the welcome and voice messages."""
     return message.replace(' | ', '\n')
 
-
 class ConfigReader:
     def __init__(self):
         """Initialize the configuration from environment variables."""
         # System messages
-        # load_dotenv()
+        # load_dotenv() # Розкоментуйте цю лінію, якщо використовуєте файл .env
         self.welcome_message = _format_message(os.getenv('SYSTEM_MESSAGES_WELCOME_MESSAGE'))
         self.voice_message_affix = _format_message(os.getenv('SYSTEM_MESSAGES_VOICE_MESSAGE_AFFIX'))
+        self.image_message_affix = _format_message(os.getenv('SYSTEM_MESSAGES_IMAGE_MESSAGE_AFFIX', 'Ти отримав зображення.'))
+        self.image_caption_affix = _format_message(os.getenv('SYSTEM_MESSAGES_IMAGE_CAPTION_AFFIX', 'Під ним такий підпис відправника:'))
+        self.image_sence_affix = _format_message(os.getenv('SYSTEM_MESSAGES_IMAGE_SENCE_AFFIX', 'На картинці зображено:'))
         self.password = _format_message(os.getenv('PASSWORD'))
 
         # OpenAI settings
@@ -37,6 +38,9 @@ class ConfigReader:
         return {
             'welcome_message': self.welcome_message,
             'voice_message_affix': self.voice_message_affix,
+            'image_message_affix': self.image_message_affix,
+            'image_caption_affix': self.image_caption_affix,
+            'image_sence_affix': self.image_sence_affix,
             'password': self.password
         }
 
@@ -62,7 +66,3 @@ class ConfigReader:
             'audio_folder_path': self.audio_folder_path,
             'max_tokens': self.max_tokens
         }
-
-# Usage of the class would simply be instantiating and accessing the properties:
-# config_reader = ConfigReader()
-# print(config_reader.get_openai_settings())

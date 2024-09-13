@@ -23,6 +23,10 @@ class MessageWrapper:
         return self.message.voice
 
     @property
+    def photo(self):
+        return self.message.photo
+
+    @property
     def reply_to_message(self):
         return self.message.reply_to_message
 
@@ -38,9 +42,15 @@ class MessageWrapper:
     def from_user_last_name(self):
         return self.message.from_user.last_name
 
-    async def download(self):
+    async def download_voice(self):
         file = await self.message.voice.get_file()
         file_path = os.path.join(os.getcwd(), f"{file.file_id}.ogg")
+        await file.download_to_drive(file_path)
+        return file_path
+
+    async def download_image(self):
+        file = await self.message.photo[-1].get_file()
+        file_path = os.path.join(os.getcwd(), f"{file.file_id}.jpg")
         await file.download_to_drive(file_path)
         return file_path
 
