@@ -26,7 +26,7 @@ class CustomMessageHandler:
 
         # Check if the user is already authenticated
         if not self.authenticated_users.get(chat_id):
-            if message_text == self.config.get_system_messages().get('password'):
+            if message_text == self.config.get_system_messages().get('password') or self.config.get_system_messages().get('password')=="":
                 # Authenticate the user if the password is correct
                 self.authenticated_users[chat_id] = True
                 await update.message.reply_text("Автентифікація успішна. Ви можете почати спілкування.")
