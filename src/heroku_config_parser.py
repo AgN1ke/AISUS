@@ -1,3 +1,5 @@
+#heroku_config_parser.py
+
 import os
 # from dotenv import load_dotenv # Розкоментуйте цю лінію, якщо використовуєте файл .env
 

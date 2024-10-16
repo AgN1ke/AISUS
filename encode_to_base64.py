@@ -1,3 +1,5 @@
+#encode_to_base64.py
+
 import base64
 
 def encode_file_to_base64(file_path):
