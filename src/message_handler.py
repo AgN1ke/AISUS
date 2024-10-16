@@ -14,7 +14,7 @@ class CustomMessageHandler:
         self.voice_processor = voice_processor
         self.chat_history_manager = chat_history_manager
         self.authenticated_users = {}
-        self.openai_client = OpenAIRealtimeClient(api_key=config.get_openai_settings()['api_key'])
+        self.openai_client = None  # Ініціалізуємо пізніше
 
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         chat_id = update.effective_chat.id
@@ -56,18 +56,20 @@ class CustomMessageHandler:
         chat_id = message.chat_id
         print(f"Обробка повідомлення від {first_name} ({chat_id})")
 
-        await self.openai_client.connect()
+        # Ініціалізуємо клієнта OpenAI для кожного повідомлення
+        self.openai_client = OpenAIRealtimeClient(api_key=self.config.get_openai_settings()['api_key'])
+        self.openai_client.connect()
 
         if is_voice:
-            await self.openai_client.send_audio(user_message)
+            self.openai_client.send_audio(user_message)
         else:
-            await self.openai_client.send_message(user_message)
+            self.openai_client.send_message(user_message)
 
         # Отримуємо та відправляємо відповідь користувачу
-        response_text = await self.openai_client.receive_responses()
+        response_text = self.openai_client.get_response()
         await message.reply_text(response_text)
 
-        await self.openai_client.close()
+        self.openai_client.close()
 
     async def _process_message_content(self, message):
         is_voice = False

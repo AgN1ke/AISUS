@@ -1,42 +1,61 @@
 # src/openai_wrapper.py
 
-import websockets
+import websocket
+import threading
 import json
 
 class OpenAIRealtimeClient:
     def __init__(self, api_key, model='gpt-4o-realtime-preview-2024-10-01'):
         self.api_key = api_key
         self.model = model
-        self.websocket = None
+        self.ws = None
         self.url = f"wss://api.openai.com/v1/realtime?model={self.model}"
         self.headers = {
             "Authorization": f"Bearer {self.api_key}",
             "OpenAI-Beta": "realtime=v1"
         }
+        self.session_id = None
+        self.response_text = ""
+        self.is_connected = False
 
-    async def connect(self):
-        self.websocket = await websockets.connect(
-            self.url,
-            extra_headers=self.headers
-        )
+    def on_open(self, ws):
         print("Підключено до OpenAI Realtime API")
-        # Очікуємо подію session.created
-        message = await self.websocket.recv()
+        self.is_connected = True
+
+    def on_message(self, ws, message):
         event = json.loads(message)
         if event['type'] == 'session.created':
             self.session_id = event['session']['id']
             print(f"ID сесії: {self.session_id}")
+        elif event['type'] == 'response.text.delta':
+            delta_text = event['content']['text']
+            self.response_text += delta_text
+        elif event['type'] == 'response.text.done':
+            ws.close()
 
-    async def send_event(self, event):
-        await self.websocket.send(json.dumps(event))
+    def on_error(self, ws, error):
+        print(f"Помилка WebSocket: {error}")
 
-    async def receive_event(self):
-        message = await self.websocket.recv()
-        event = json.loads(message)
-        return event
+    def on_close(self, ws, close_status_code, close_msg):
+        print("З'єднання з OpenAI Realtime API закрито")
+        self.is_connected = False
 
-    async def send_message(self, text):
-        # Відправляємо повідомлення користувача
+    def connect(self):
+        websocket.enableTrace(False)
+        self.ws = websocket.WebSocketApp(
+            self.url,
+            header=[f"{key}: {value}" for key, value in self.headers.items()],
+            on_open=self.on_open,
+            on_message=self.on_message,
+            on_error=self.on_error,
+            on_close=self.on_close
+        )
+        wst = threading.Thread(target=self.ws.run_forever)
+        wst.start()
+        while not self.is_connected:
+            pass  # Очікуємо підключення
+
+    def send_message(self, text):
         event = {
             "type": "conversation.item.create",
             "item": {
@@ -50,9 +69,8 @@ class OpenAIRealtimeClient:
                 ]
             }
         }
-        await self.send_event(event)
+        self.ws.send(json.dumps(event))
 
-        # Стартуємо генерацію відповіді
         response_event = {
             "type": "response.create",
             "response": {
@@ -60,48 +78,13 @@ class OpenAIRealtimeClient:
                 "instructions": "Please assist the user."
             }
         }
-        await self.send_event(response_event)
+        self.ws.send(json.dumps(response_event))
 
-    async def send_audio(self, audio_data_base64):
-        # Відправляємо аудіо користувача
-        event = {
-            "type": "conversation.item.create",
-            "item": {
-                "type": "message",
-                "role": "user",
-                "content": [
-                    {
-                        "type": "input_audio",
-                        "audio": audio_data_base64
-                    }
-                ]
-            }
-        }
-        await self.send_event(event)
+    def get_response(self):
+        while self.is_connected:
+            pass  # Очікуємо завершення отримання відповіді
+        return self.response_text
 
-        # Стартуємо генерацію відповіді
-        response_event = {
-            "type": "response.create",
-            "response": {
-                "modalities": ["audio", "text"],
-                "instructions": "Please assist the user."
-            }
-        }
-        await self.send_event(response_event)
-
-    async def receive_responses(self):
-        """Асинхронно отримуємо відповіді від сервера."""
-        response_text = ""
-        while True:
-            event = await self.receive_event()
-            # Обробляємо події відповідно
-            if event['type'] == 'response.text.delta':
-                delta_text = event['content']['text']
-                response_text += delta_text
-            elif event['type'] == 'response.text.done':
-                break
-            # Додайте обробку інших типів подій за потреби
-        return response_text
-
-    async def close(self):
-        await self.websocket.close()
+    def close(self):
+        if self.ws:
+            self.ws.close()
