@@ -1,4 +1,4 @@
-# src/message_wrapper.py
+#message_wrapper.py
 
 import os
 from telegram import Update
