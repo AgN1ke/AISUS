@@ -61,9 +61,3 @@ class MessageWrapper:
 
     def reply_voice(self, voice):
         return self.message.reply_voice(voice)
-
-    async def reply_text(self, text: str):
-        return await self.message.reply_text(text, parse_mode='Markdown')
-
-    async def reply_voice(self, voice):
-        return await self.message.reply_voice(voice)
