@@ -1,49 +1,30 @@
 # voice_processor.py
-from openai import OpenAI
-from datetime import datetime
+import base64
 import os
-
+from pydub import AudioSegment
 
 class VoiceProcessor:
-    def __init__(self, api_key: str, whisper_model: str, tts_model: str):
-        self.api_key = api_key
-        self.whisper_model = whisper_model
-        self.tts_model = tts_model
+    def __init__(self):
+        pass  # Немає необхідності у параметрах ініціалізації для цього класу
 
-    def transcribe_voice_message(self, voice_message_path):
-        print(f"Voice file received")
-        """Transcribe a voice message using the Whisper model."""
+    def encode_audio_to_base64(self, audio_file_path):
+        """Кодує аудіофайл у формат Base64 та приводить його до формату PCM 16-bit, 24kHz, 1 канал."""
         try:
-            with open(voice_message_path, "rb") as audio_file:
-                client = OpenAI(api_key=self.api_key)
-                transcript_response = client.audio.transcriptions.create(
-                    model=self.whisper_model,
-                    file=audio_file
-                )
-            print(f"Voice message: {transcript_response.text}")
-            return transcript_response.text
+            audio = AudioSegment.from_file(audio_file_path)
+            # Перетворюємо аудіо до потрібного формату
+            audio = audio.set_frame_rate(24000).set_channels(1).set_sample_width(2)
+            raw_data = audio.raw_data
+            encoded_audio = base64.b64encode(raw_data).decode('utf-8')
+            return encoded_audio
         except Exception as e:
-            print(f"Error in transcription: {e}")
-            return ""
+            print(f"Помилка при кодуванні аудіо: {e}")
+            return None
 
-    def generate_voice_response_and_save_file(self, text, voice, folder_path):
-        """Generate a voice response and save it to a file."""
-        # Validate or update folder_path
-        if not folder_path or not os.path.isdir(folder_path):
-            print("Warning: Provided folder path is invalid. Using current directory.")
-            folder_path = os.getcwd()
-
-        client = OpenAI(api_key=self.api_key)
-        response = client.audio.speech.create(
-            model=self.tts_model,
-            voice=voice,
-            input=text
-        )
-
-        timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
-        file_name = os.path.join(folder_path, f"response_{timestamp}.mp3")
-
-        with open(file_name, "wb") as audio_file:
-            audio_file.write(response.read())
-
-        return file_name
+    def save_audio_from_base64(self, audio_base64, output_path):
+        """Зберігає аудіо з Base64 у файл."""
+        try:
+            audio_bytes = base64.b64decode(audio_base64)
+            with open(output_path, 'wb') as f:
+                f.write(audio_bytes)
+        except Exception as e:
+            print(f"Помилка при збереженні аудіо: {e}")
