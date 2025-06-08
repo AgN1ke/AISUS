@@ -10,9 +10,11 @@ from src.chat_history_manager import ChatHistoryManager
 if __name__ == "__main__":
     config = ConfigReader()
 
-    voice_processor = VoiceProcessor(api_key=config.get_openai_settings()['api_key'],
-                                     whisper_model=config.get_openai_settings()['whisper_model'],
-                                     tts_model=config.get_openai_settings()['tts_model'])
+    voice_processor = VoiceProcessor(
+        api_key=config.get_openai_settings()['api_key'],
+        whisper_model=config.get_openai_settings()['whisper_model'],
+        tts_model=config.get_openai_settings()['tts_model']
+    )
     chat_history_manager = ChatHistoryManager()
     openai_wrapper = OpenAIWrapper(config.get_openai_settings()['api_key'])
     message_handler = CustomMessageHandler(config, voice_processor, chat_history_manager, openai_wrapper)
