@@ -58,19 +58,49 @@ class CustomMessageHandler:
     async def _handle_user_message(self, bot, message: MessageWrapper):
         """Handle incoming user messages (text, voice, image) and generate responses."""
         user_message, is_voice, is_image = await self._process_message_content(message)
-        if not user_message:
+        if user_message is None:
             print("No user message found.")
             return
 
         first_name, last_name = message.from_user_first_name, message.from_user_last_name
         chat_id = message.chat_id
+
+        if is_voice:
+            # Transcribe the user's voice for context
+            transcribed_text = await self.voice_processor.transcribe_voice_message(user_message)
+            print(f"Processing voice message from {first_name} {last_name} ({chat_id}): {transcribed_text}")
+            self._update_chat_history(chat_id, first_name, transcribed_text, True, False)
+
+            # Generate voice response from OpenAI
+            voice_response = await self.voice_processor.voice_to_voice_chat(
+                user_message,
+                self.config.get_openai_settings()['gpt_model'],
+                self.config.get_openai_settings()['vocalizer_voice'],
+                self.config.get_file_paths_and_limits()['audio_folder_path'],
+            )
+
+            if voice_response:
+                await self._send_response(message, voice_response, True)
+                # Transcribe bot response and store it
+                bot_text = await self.voice_processor.transcribe_voice_message(voice_response)
+                self.chat_history_manager.add_bot_message(chat_id, bot_text)
+
+            if os.path.exists(user_message):
+                try:
+                    os.remove(user_message)
+                except Exception as e:
+                    print(f"Error removing temp voice file {user_message}: {e}")
+
+            self.chat_history_manager.prune_history(chat_id, 124000)
+            return
+
         print(f"Processing message from {first_name} {last_name} ({chat_id}): {user_message}")
         self._update_chat_history(chat_id, first_name, user_message, is_voice, is_image)
 
         try:
             bot_response = self._generate_bot_response(chat_id)
             print(f"Generated response: {bot_response}")
-            await self._send_response(message, bot_response, is_voice)
+            await self._send_response(message, bot_response, False)
             self.chat_history_manager.add_bot_message(chat_id, bot_response)
         except Exception as e:
             print(f"Error generating or sending response: {e}")
@@ -86,8 +116,7 @@ class CustomMessageHandler:
         if message.voice:
             print("Voice file received")
             voice_message_path = await message.download_voice()
-            transcribed_text = self.voice_processor.transcribe_voice_message(voice_message_path)
-            return transcribed_text, True, False
+            return voice_message_path, True, False
         elif message.photo:
             print("Image received")
             image_path = await message.download_image()
@@ -167,12 +196,8 @@ class CustomMessageHandler:
     async def _send_response(self, message, bot_response, is_voice):
         """Send the response back to the user."""
         if is_voice:
-            voice_response_file = self.voice_processor.generate_voice_response_and_save_file(
-                bot_response,
-                self.config.get_openai_settings()['vocalizer_voice'],
-                self.config.get_file_paths_and_limits()['audio_folder_path'])
-            await message.reply_voice(voice_response_file)
-            if os.path.exists(voice_response_file):
-                os.remove(voice_response_file)
+            await message.reply_voice(bot_response)
+            if os.path.exists(bot_response):
+                os.remove(bot_response)
         else:
             await message.reply_text(bot_response)
