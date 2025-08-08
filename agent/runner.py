@@ -8,9 +8,14 @@ from agent.tools.web_search import search_web
 from agent.tools.fetch_page import fetch_page
 from memory import memory_manager
 
+THINKING_ENABLED = bool(int(os.getenv("THINKING_ENABLED", "1")))
+SEARCH_ENABLED = bool(int(os.getenv("SEARCH_ENABLED", "1")))
+MAX_STEPS = int(os.getenv("REASONING_MAX_STEPS", "3"))
+
 THINKING_ENABLED = bool(int(os.getenv("THINKING_ENABLED","1")))
 SEARCH_ENABLED = bool(int(os.getenv("SEARCH_ENABLED","1")))
 MAX_STEPS = int(os.getenv("REASONING_MAX_STEPS","3"))
+
 
 SYSTEM_PROMPT_AGENT = (
     "Ти асистент-агент. Якщо бракує фактів або потрібна актуальна інформація — "
@@ -19,6 +24,59 @@ SYSTEM_PROMPT_AGENT = (
 )
 
 def _should_use_agent(user_text: str) -> bool:
+
+    """
+    Строгі тригери, якщо THINKING_STRICT=1:
+    - явна команда /think
+    - явні формулювання про веб-пошук/актуальність
+    Якщо THINKING_STRICT=0 — поведінка м’якша (як раніше).
+    """
+    strict = bool(int(os.getenv("THINKING_STRICT", "1")))
+    t = (user_text or "").strip().lower()
+
+    hard_triggers = [
+        "/think",
+        "пошукай",
+        "знайди в інтернеті",
+        "перевір в інтернеті",
+        "що нового",
+        "новини",
+    ]
+    if any(k in t for k in hard_triggers):
+        return True
+
+    if strict:
+        return False  # тільки явні тригери
+
+    return bool(int(os.getenv("THINKING_ENABLED", "1")))
+
+def _needs_reasoning(user_text: str) -> bool:
+    """
+    Використовуємо reasoning (gpt-5) тільки явним чином:
+    - /think на початку
+    - або є емодзі/слова: '🧠', 'роздумай', 'step-by-step'
+    """
+    t = (user_text or "").strip().lower()
+    return t.startswith("/think") or ("🧠" in user_text) or ("роздумай" in t) or ("step-by-step" in t)
+
+async def run_agent(chat_id: int, user_text: str) -> str:
+    # 0) нормалізація: якщо є /think — прибираємо префікс із тексту
+    raw = user_text or ""
+    tnorm = raw.strip()
+    if tnorm.lower().startswith("/think"):
+        parts = tnorm.split(None, 1)
+        user_text = parts[1] if len(parts) > 1 else ""
+    else:
+        user_text = tnorm
+
+    # 1) контекст пам'яті (без системного, він нижче):
+    ctx = await memory_manager.select_context(chat_id=chat_id, user_query=user_text, system_prompt=None)
+
+    # 2) чи потрібен reasoning (gpt-5)?
+    use_reasoning = _needs_reasoning(tnorm)
+
+    # 3) первинний виклик з інструментами
+
     if not THINKING_ENABLED and not SEARCH_ENABLED:
         return False
     t = (user_text or "").lower()
@@ -31,11 +89,16 @@ def _should_use_agent(user_text: str) -> bool:
 
 async def run_agent(chat_id: int, user_text: str) -> str:
     ctx = await memory_manager.select_context(chat_id=chat_id, user_query=user_text, system_prompt=None)
+
     messages = make_messages(SYSTEM_PROMPT_AGENT, ctx, user_text)
     tools = tool_spec()
     used_sources: list[dict] = []
 
+
+    resp = chat_once(messages, tools=tools, use_reasoning=use_reasoning)
+=======
     resp = chat_once(messages, tools=tools, use_reasoning=THINKING_ENABLED)
+
     step = 0
     while step < MAX_STEPS:
         step += 1
@@ -85,7 +148,10 @@ async def run_agent(chat_id: int, user_text: str) -> str:
                 "name": name,
                 "content": result_str[:20000],
             })
+        resp = chat_once(messages, tools=tools, use_reasoning=use_reasoning)
+
         resp = chat_once(messages, tools=tools, use_reasoning=THINKING_ENABLED)
+
     final = resp.choices[0].message.content or "Не вдалося завершити міркування. Дай мені ще підказку."
     return final.strip()
 
