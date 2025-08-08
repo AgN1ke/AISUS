@@ -9,6 +9,8 @@ from src.heroku_config_parser import ConfigReader
 from src.voice_processor import VoiceProcessor
 from src.chat_history_manager import ChatHistoryManager
 from src.openai_wrapper import OpenAIWrapper
+from db.hooks import track_chat_and_user_ptb
+from memory import memory_manager
 import base64
 
 class CustomMessageHandler:
@@ -20,6 +22,7 @@ class CustomMessageHandler:
         self.authenticated_users = {}  # Dictionary to keep track of authenticated users
 
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        await track_chat_and_user_ptb(update, context)
         chat_id = update.effective_chat.id
         message_text = update.message.text if update.message.text else ""
 
@@ -67,11 +70,27 @@ class CustomMessageHandler:
         print(f"Processing message from {first_name} {last_name} ({chat_id}): {user_message}")
         self._update_chat_history(chat_id, first_name, user_message, is_voice, is_image)
 
+        user_text = (user_message or "").strip()
+        if user_text:
+            await memory_manager.append_message(chat_id, "user", user_text)
+            await memory_manager.ensure_budget(chat_id)
+
         try:
-            bot_response = self._generate_bot_response(chat_id)
+            SYSTEM_PROMPT = "Ти корисний асистент у цьому чаті. Відповідай чітко і по суті контексту."
+            ctx_messages = await memory_manager.select_context(
+                chat_id=chat_id,
+                user_query=user_text or "",
+                system_prompt=SYSTEM_PROMPT,
+            )
+            bot_response = self._generate_bot_response(ctx_messages)
             print(f"Generated response: {bot_response}")
             await self._send_response(message, bot_response, is_voice)
             self.chat_history_manager.add_bot_message(chat_id, bot_response)
+
+            assistant_reply = bot_response.strip()
+            if assistant_reply:
+                await memory_manager.append_message(chat_id, "assistant", assistant_reply)
+                await memory_manager.ensure_budget(chat_id)
         except Exception as e:
             print(f"Error generating or sending response: {e}")
             await message.reply_text("Вибачте, але я не можу продовжити цю розмову.")
@@ -155,11 +174,11 @@ class CustomMessageHandler:
                 chat_id, self.config.get_system_messages()['voice_message_affix'])
             self.chat_history_manager.add_user_message(chat_id, first_name, user_message)
 
-    def _generate_bot_response(self, chat_id):
+    def _generate_bot_response(self, messages):
         """Generate the bot's response using OpenAI."""
         response = self.openai_wrapper.chat_completion(
             model=self.config.get_openai_settings()['gpt_model'],
-            messages=self.chat_history_manager.get_history(chat_id),
+            messages=messages,
             max_tokens=3000)  # Обеспечиваем лимит для ответа в 4000 токенов
         bot_response = response.choices[0].message.content
         return bot_response
@@ -176,3 +195,6 @@ class CustomMessageHandler:
                 os.remove(voice_response_file)
         else:
             await message.reply_text(bot_response)
+
+
+MessageHandler = CustomMessageHandler
