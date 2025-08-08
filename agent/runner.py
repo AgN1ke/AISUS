@@ -12,6 +12,11 @@ THINKING_ENABLED = bool(int(os.getenv("THINKING_ENABLED", "1")))
 SEARCH_ENABLED = bool(int(os.getenv("SEARCH_ENABLED", "1")))
 MAX_STEPS = int(os.getenv("REASONING_MAX_STEPS", "3"))
 
+THINKING_ENABLED = bool(int(os.getenv("THINKING_ENABLED","1")))
+SEARCH_ENABLED = bool(int(os.getenv("SEARCH_ENABLED","1")))
+MAX_STEPS = int(os.getenv("REASONING_MAX_STEPS","3"))
+
+
 SYSTEM_PROMPT_AGENT = (
     "Ти асистент-агент. Якщо бракує фактів або потрібна актуальна інформація — "
     "користуйся інструментами search_web та fetch_page. "
@@ -19,6 +24,7 @@ SYSTEM_PROMPT_AGENT = (
 )
 
 def _should_use_agent(user_text: str) -> bool:
+
     """
     Строгі тригери, якщо THINKING_STRICT=1:
     - явна команда /think
@@ -70,11 +76,29 @@ async def run_agent(chat_id: int, user_text: str) -> str:
     use_reasoning = _needs_reasoning(tnorm)
 
     # 3) первинний виклик з інструментами
+
+    if not THINKING_ENABLED and not SEARCH_ENABLED:
+        return False
+    t = (user_text or "").lower()
+    if t.startswith("/think") or "пошукай" in t or "знайди в інтернеті" in t or "що нового" in t:
+        return True
+    for kw in ["сьогодні", "вчора", "новини", "коли вийшло", "актуально"]:
+        if kw in t:
+            return True
+    return THINKING_ENABLED
+
+async def run_agent(chat_id: int, user_text: str) -> str:
+    ctx = await memory_manager.select_context(chat_id=chat_id, user_query=user_text, system_prompt=None)
+
     messages = make_messages(SYSTEM_PROMPT_AGENT, ctx, user_text)
     tools = tool_spec()
     used_sources: list[dict] = []
 
+
     resp = chat_once(messages, tools=tools, use_reasoning=use_reasoning)
+=======
+    resp = chat_once(messages, tools=tools, use_reasoning=THINKING_ENABLED)
+
     step = 0
     while step < MAX_STEPS:
         step += 1
@@ -125,6 +149,9 @@ async def run_agent(chat_id: int, user_text: str) -> str:
                 "content": result_str[:20000],
             })
         resp = chat_once(messages, tools=tools, use_reasoning=use_reasoning)
+
+        resp = chat_once(messages, tools=tools, use_reasoning=THINKING_ENABLED)
+
     final = resp.choices[0].message.content or "Не вдалося завершити міркування. Дай мені ще підказку."
     return final.strip()
 
