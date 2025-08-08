@@ -11,6 +11,9 @@ from src.chat_history_manager import ChatHistoryManager
 from src.openai_wrapper import OpenAIWrapper
 from db.hooks import track_chat_and_user_ptb
 from memory import memory_manager
+from knowledge.threads import handle_message_ptb
+from knowledge.glossary import process_user_text
+
 import base64
 import asyncio
 
@@ -32,8 +35,19 @@ class CustomMessageHandler:
 
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         await track_chat_and_user_ptb(update, context)
+
+        await handle_message_ptb(update, context)
+
+        msg = update.effective_message
+
         chat_id = update.effective_chat.id
-        message_text = update.message.text if update.message.text else ""
+        message_text = msg.text if msg.text else ""
+
+        full_text = (msg.text or msg.caption or "") or ""
+        if full_text:
+            suggestion = await process_user_text(chat_id, full_text)
+            if suggestion:
+                await msg.reply_text(suggestion)
 
         # Перевірка, чи бот має бути активований в публічному чаті (тільки через тег або відповідь)
         if not await self._should_process_message_async(context.bot, MessageWrapper(update)):
