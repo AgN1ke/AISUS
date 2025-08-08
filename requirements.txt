@@ -8,3 +8,5 @@ aiomysql
 python-dotenv
 tiktoken>=0.7.0
 beautifulsoup4>=4.12.3
+pydub>=0.25.1
+
