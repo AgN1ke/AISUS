@@ -17,3 +17,8 @@ pyyaml>=6.0.2
 telethon>=1.36.0
 pyyaml>=6.0.2
 
+
+telethon>=1.36.0
+pyyaml>=6.0.2
+
+

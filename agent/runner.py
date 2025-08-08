@@ -12,9 +12,11 @@ THINKING_ENABLED = bool(int(os.getenv("THINKING_ENABLED", "1")))
 SEARCH_ENABLED = bool(int(os.getenv("SEARCH_ENABLED", "1")))
 MAX_STEPS = int(os.getenv("REASONING_MAX_STEPS", "3"))
 
+
 THINKING_ENABLED = bool(int(os.getenv("THINKING_ENABLED","1")))
 SEARCH_ENABLED = bool(int(os.getenv("SEARCH_ENABLED","1")))
 MAX_STEPS = int(os.getenv("REASONING_MAX_STEPS","3"))
+
 
 
 SYSTEM_PROMPT_AGENT = (
@@ -77,6 +79,7 @@ async def run_agent(chat_id: int, user_text: str) -> str:
 
     # 3) первинний виклик з інструментами
 
+
     if not THINKING_ENABLED and not SEARCH_ENABLED:
         return False
     t = (user_text or "").lower()
@@ -96,7 +99,9 @@ async def run_agent(chat_id: int, user_text: str) -> str:
 
 
     resp = chat_once(messages, tools=tools, use_reasoning=use_reasoning)
-=======
+
+    resp = chat_once(messages, tools=tools, use_reasoning=use_reasoning)
+
     resp = chat_once(messages, tools=tools, use_reasoning=THINKING_ENABLED)
 
     step = 0
@@ -150,7 +155,9 @@ async def run_agent(chat_id: int, user_text: str) -> str:
             })
         resp = chat_once(messages, tools=tools, use_reasoning=use_reasoning)
 
+
         resp = chat_once(messages, tools=tools, use_reasoning=THINKING_ENABLED)
+
 
     final = resp.choices[0].message.content or "Не вдалося завершити міркування. Дай мені ще підказку."
     return final.strip()

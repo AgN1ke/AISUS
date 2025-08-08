@@ -9,8 +9,12 @@ CHAT_MODEL = os.getenv("OPENAI_CHAT_MODEL", "gpt-5-chat-latest")
 
 REASONING_MODEL = os.getenv("OPENAI_REASONING_MODEL", "gpt-5")  # <-- default reasoning model
 
+
+REASONING_MODEL = os.getenv("OPENAI_REASONING_MODEL", "gpt-5")  # <-- default reasoning model
+
 REASONING_MODEL = os.getenv("OPENAI_REASONING_MODEL") or ""
 
+>
 REASONING_EFFORT = os.getenv("REASONING_EFFORT", "medium")
 
 _client: Optional[OpenAI] = None
