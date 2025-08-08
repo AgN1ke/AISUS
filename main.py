@@ -1,6 +1,7 @@
 #main.py
 
 from telegram.ext import ApplicationBuilder, MessageHandler, filters
+from db.bootstrap import bootstrap_db, bootstrap_db_sync
 from src.heroku_config_parser import ConfigReader
 from src.message_handler import CustomMessageHandler
 from src.voice_processor import VoiceProcessor
@@ -40,4 +41,5 @@ if __name__ == "__main__":
     app.add_handler(mentioned_message_handler)
     app.add_handler(reply_message_handler)
 
+    bootstrap_db_sync()
     app.run_polling()

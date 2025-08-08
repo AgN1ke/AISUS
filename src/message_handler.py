@@ -9,6 +9,7 @@ from src.heroku_config_parser import ConfigReader
 from src.voice_processor import VoiceProcessor
 from src.chat_history_manager import ChatHistoryManager
 from src.openai_wrapper import OpenAIWrapper
+from db.hooks import track_chat_and_user_ptb
 import base64
 
 class CustomMessageHandler:
@@ -20,6 +21,7 @@ class CustomMessageHandler:
         self.authenticated_users = {}  # Dictionary to keep track of authenticated users
 
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        await track_chat_and_user_ptb(update, context)
         chat_id = update.effective_chat.id
         message_text = update.message.text if update.message.text else ""
 
@@ -176,3 +178,6 @@ class CustomMessageHandler:
                 os.remove(voice_response_file)
         else:
             await message.reply_text(bot_response)
+
+
+MessageHandler = CustomMessageHandler
