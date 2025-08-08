@@ -3,7 +3,8 @@ configparser
 python-telegram-bot==21.5
 python-dateutil
 heroku3
-requests
+requests>=2.32.2
 aiomysql
 python-dotenv
 tiktoken>=0.7.0
+beautifulsoup4>=4.12.3
