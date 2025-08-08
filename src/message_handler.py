@@ -13,6 +13,7 @@ from db.hooks import track_chat_and_user_ptb
 from memory import memory_manager
 from knowledge.threads import handle_message_ptb
 from knowledge.glossary import process_user_text
+
 import base64
 import asyncio
 
@@ -34,9 +35,11 @@ class CustomMessageHandler:
 
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         await track_chat_and_user_ptb(update, context)
+
         await handle_message_ptb(update, context)
 
         msg = update.effective_message
+
         chat_id = update.effective_chat.id
         message_text = msg.text if msg.text else ""
 
