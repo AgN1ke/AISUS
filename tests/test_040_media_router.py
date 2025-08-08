@@ -33,6 +33,7 @@ async def test_first_mention_with_text():
     txt = await handle_ptb_mention(upd, DummyCtx, "mybot")
     assert "зроби" in txt
 
+
 @pytest.mark.asyncio
 async def test_video_mention_adds_media(monkeypatch, tmp_path):
     chat = 99905

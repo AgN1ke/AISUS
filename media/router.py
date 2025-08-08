@@ -1,5 +1,9 @@
 from __future__ import annotations
+
 import logging, os, re
+
+import os, re
+
 from typing import Optional, Tuple
 from media.downloader import download_from_ptb_message, download_from_telethon_message
 from media.vision import describe_images
@@ -7,7 +11,9 @@ from media.video import analyze_video
 from whisper_tool import transcribe as whisper_transcribe
 from memory import memory_manager
 
+
 logger = logging.getLogger(__name__)
+
 
 def _strip_bot_mention(text: str, bot_username: Optional[str]) -> str:
     if not text:
@@ -31,6 +37,7 @@ async def handle_ptb_mention(update, context, bot_username: str) -> Optional[str
     if info["type"] == "photo":
         media_context = describe_images(info["paths"], task_hint=user_text or None)
     elif info["type"] == "video":
+
         try:
             media_context = analyze_video(info["paths"][0], task_hint=user_text or None)["summary"]
         except Exception as e:
@@ -48,6 +55,15 @@ async def handle_ptb_mention(update, context, bot_username: str) -> Optional[str
             logger.error("audio transcription failed: %s", e, exc_info=True)
             await msg.reply_text("Не вдалося обробити аудіо")
             return None
+
+        media_context = analyze_video(info["paths"][0], task_hint=user_text or None)["summary"]
+    elif info["type"] in ("voice", "audio"):
+        path = info["paths"][0]
+        whisper_transcribe(path)
+        from pathlib import Path
+        txt = Path(path).with_suffix(".txt")
+        media_context = f"Транскрипт аудіо:\n{txt.read_text(encoding='utf-8') if txt.exists() else ''}"
+
     elif info["type"] == "doc" and info["paths"]:
         media_context = f"Отримано документ: {os.path.basename(info['paths'][0])} (аналіз документів додамо окремо)"
     else:
@@ -76,6 +92,7 @@ async def handle_telethon_mention(event, bot_username: str) -> Optional[str]:
     if info["type"] == "photo":
         media_context = describe_images(info["paths"], task_hint=user_text or None)
     elif info["type"] == "video":
+
         try:
             media_context = analyze_video(info["paths"][0], task_hint=user_text or None)["summary"]
         except Exception as e:
@@ -93,6 +110,15 @@ async def handle_telethon_mention(event, bot_username: str) -> Optional[str]:
             logger.error("audio transcription failed: %s", e, exc_info=True)
             await event.reply("Не вдалося обробити аудіо")
             return None
+
+        media_context = analyze_video(info["paths"][0], task_hint=user_text or None)["summary"]
+    elif info["type"] in ("voice", "audio"):
+        path = info["paths"][0]
+        whisper_transcribe(path)
+        from pathlib import Path
+        txt = Path(path).with_suffix(".txt")
+        media_context = f"Транскрипт аудіо:\n{txt.read_text(encoding='utf-8') if txt.exists() else ''}"
+
     elif info["type"] == "doc" and info["paths"]:
         media_context = f"Отримано документ: {os.path.basename(info['paths'][0])}"
     else:

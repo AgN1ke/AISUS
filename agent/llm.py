@@ -6,7 +6,19 @@ from openai import OpenAI
 
 _OPENAI_API_KEY = os.getenv("OPENAI_API_KEY") or os.getenv("OPENAI_APIKEY") or os.getenv("OPENAI_API_KEY_V1")
 CHAT_MODEL = os.getenv("OPENAI_CHAT_MODEL", "gpt-5-chat-latest")
+
 REASONING_MODEL = os.getenv("OPENAI_REASONING_MODEL", "gpt-5")  # <-- default reasoning model
+
+
+REASONING_MODEL = os.getenv("OPENAI_REASONING_MODEL", "gpt-5")  # <-- default reasoning model
+
+
+REASONING_MODEL = os.getenv("OPENAI_REASONING_MODEL", "gpt-5")  # <-- default reasoning model
+
+REASONING_MODEL = os.getenv("OPENAI_REASONING_MODEL") or ""
+
+
+
 REASONING_EFFORT = os.getenv("REASONING_EFFORT", "medium")
 
 _client: Optional[OpenAI] = None
