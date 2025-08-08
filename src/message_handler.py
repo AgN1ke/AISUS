@@ -35,6 +35,7 @@ import base64
 import asyncio
 
 
+
 class CustomMessageHandler:
     def __init__(
         self,
@@ -55,6 +56,30 @@ class CustomMessageHandler:
         await handle_message_ptb(update, context)
 
         msg = update.effective_message
+
+        chat_id = update.effective_chat.id
+        bot_username = context.bot.username
+
+        full_text = (msg.text or msg.caption or "") or ""
+        if full_text:
+            suggestion = await process_user_text(chat_id, full_text)
+            if suggestion:
+                await msg.reply_text(suggestion)
+
+        st = await get_settings(chat_id) or {}
+        if not (st.get("auth_ok") or 0):
+            t = (msg.text or msg.caption or "") or ""
+            if _is_mention_for_bot(msg, bot_username):
+                stripped = (t.replace(f"@{bot_username}", "", 1)).strip()
+                pw = stripped.split()[0] if stripped else ""
+                if pw and pw == os.getenv("CHAT_JOIN_PASSWORD", ""):
+                    await upsert_settings(chat_id, auth_ok=True, mode=None)
+                    await msg.reply_text("✅ Дякую, пароль прийнято. Я готова працювати в цьому чаті.")
+                    return
+                else:
+                    await msg.reply_text("🔒 Вкажи коректний пароль у форматі: @" + bot_username + " <пароль>")
+                    return
+=======
         chat_id = update.effective_chat.id
         bot_username = context.bot.username
 
@@ -99,6 +124,7 @@ class CustomMessageHandler:
         # Перевірка, чи бот має бути активований в публічному чаті (тільки через тег або відповідь)
         if not await self._should_process_message_async(context.bot, MessageWrapper(update)):
             print("Message not processed due to filter.")
+
             return
 
     
@@ -139,6 +165,7 @@ class CustomMessageHandler:
         bot_response = self._generate_bot_response(history)
         self.chat_history_manager.add_bot_message(chat_id, bot_response)
         self.chat_history_manager.prune_history(chat_id, 124000)
+
 
 
     def _handle_message(self, bot, message):
@@ -208,6 +235,7 @@ class CustomMessageHandler:
                 bot_response = await run_simple(chat_id, user_text)
 
 
+
             SYSTEM_PROMPT = "Ти корисний асистент у цьому чаті. Відповідай чітко і по суті контексту."
             ctx_messages = await memory_manager.select_context(
                 chat_id=chat_id,
@@ -215,6 +243,7 @@ class CustomMessageHandler:
                 system_prompt=SYSTEM_PROMPT,
             )
             bot_response = self._generate_bot_response(ctx_messages)
+
 
 
             print(f"Generated response: {bot_response}")
