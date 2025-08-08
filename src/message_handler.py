@@ -35,9 +35,16 @@ class CustomMessageHandler:
 
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         await track_chat_and_user_ptb(update, context)
+
         await handle_message_ptb(update, context)
 
         msg = update.effective_message
+
+
+        await handle_message_ptb(update, context)
+
+        msg = update.effective_message
+
         chat_id = update.effective_chat.id
         message_text = msg.text if msg.text else ""
 
@@ -128,10 +135,20 @@ class CustomMessageHandler:
             await memory_manager.ensure_budget(chat_id)
 
         try:
+
             if _should_use_agent(user_text):
                 bot_response = await run_agent(chat_id, user_text)
             else:
                 bot_response = await run_simple(chat_id, user_text)
+
+            SYSTEM_PROMPT = "Ти корисний асистент у цьому чаті. Відповідай чітко і по суті контексту."
+            ctx_messages = await memory_manager.select_context(
+                chat_id=chat_id,
+                user_query=user_text or "",
+                system_prompt=SYSTEM_PROMPT,
+            )
+            bot_response = self._generate_bot_response(ctx_messages)
+
             print(f"Generated response: {bot_response}")
             await self._send_response(message, bot_response, is_voice)
             self.chat_history_manager.add_bot_message(chat_id, bot_response)
