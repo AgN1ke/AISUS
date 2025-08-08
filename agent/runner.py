@@ -19,6 +19,7 @@ MAX_STEPS = int(os.getenv("REASONING_MAX_STEPS","3"))
 
 
 
+
 SYSTEM_PROMPT_AGENT = (
     "Ти асистент-агент. Якщо бракує фактів або потрібна актуальна інформація — "
     "користуйся інструментами search_web та fetch_page. "
@@ -80,6 +81,7 @@ async def run_agent(chat_id: int, user_text: str) -> str:
     # 3) первинний виклик з інструментами
 
 
+
     if not THINKING_ENABLED and not SEARCH_ENABLED:
         return False
     t = (user_text or "").lower()
@@ -93,6 +95,7 @@ async def run_agent(chat_id: int, user_text: str) -> str:
 async def run_agent(chat_id: int, user_text: str) -> str:
     ctx = await memory_manager.select_context(chat_id=chat_id, user_query=user_text, system_prompt=None)
 
+
     messages = make_messages(SYSTEM_PROMPT_AGENT, ctx, user_text)
     tools = tool_spec()
     used_sources: list[dict] = []
@@ -100,9 +103,13 @@ async def run_agent(chat_id: int, user_text: str) -> str:
 
     resp = chat_once(messages, tools=tools, use_reasoning=use_reasoning)
 
+
+    resp = chat_once(messages, tools=tools, use_reasoning=use_reasoning)
+
     resp = chat_once(messages, tools=tools, use_reasoning=use_reasoning)
 
     resp = chat_once(messages, tools=tools, use_reasoning=THINKING_ENABLED)
+
 
     step = 0
     while step < MAX_STEPS:
@@ -154,6 +161,7 @@ async def run_agent(chat_id: int, user_text: str) -> str:
                 "content": result_str[:20000],
             })
         resp = chat_once(messages, tools=tools, use_reasoning=use_reasoning)
+
 
 
         resp = chat_once(messages, tools=tools, use_reasoning=THINKING_ENABLED)

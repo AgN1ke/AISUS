@@ -32,3 +32,29 @@ async def test_first_mention_with_text():
     upd = DummyUpdate(chat, msg)
     txt = await handle_ptb_mention(upd, DummyCtx, "mybot")
     assert "зроби" in txt
+
+
+@pytest.mark.asyncio
+async def test_video_mention_adds_media(monkeypatch, tmp_path):
+    chat = 99905
+    vid = tmp_path/"v.mp4"
+    vid.write_text("vid")
+
+    async def fake_download(msg, context):
+        return {"type":"video", "paths":[str(vid)], "text":None}
+    monkeypatch.setattr("media.router.download_from_ptb_message", fake_download)
+    monkeypatch.setattr("media.router.analyze_video", lambda p, task_hint=None: {"summary":"sum","transcript":"","frames":[],"vision_summary":""})
+
+    stored = {}
+    async def fake_append(chat_id, role, content):
+        stored["content"] = content
+    async def fake_budget(chat_id):
+        return None
+    monkeypatch.setattr(memory_manager, "append_message", fake_append)
+    monkeypatch.setattr(memory_manager, "ensure_budget", fake_budget)
+
+    msg = DummyMsg(chat, 11, text="@mybot")
+    upd = DummyUpdate(chat, msg)
+    out = await handle_ptb_mention(upd, DummyCtx, "mybot")
+    assert "[MEDIA]" in stored.get("content", "")
+    assert "Проаналізуй" in out

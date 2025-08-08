@@ -16,9 +16,9 @@ if __name__ == "__main__":
                                      tts_model=config.get_openai_settings()['tts_model'])
     chat_history_manager = ChatHistoryManager()
     openai_wrapper = OpenAIWrapper(config.get_openai_settings()['api_key'])
-    message_handler = CustomMessageHandler(config, voice_processor, chat_history_manager, openai_wrapper)
 
     app = ApplicationBuilder().token(config.get_api_settings()['bot_token']).build()
+    message_handler = CustomMessageHandler(config, app.bot, voice_processor, chat_history_manager, openai_wrapper)
 
     # Создание обработчиков сообщений для разных случаев
     private_message_handler = MessageHandler(
