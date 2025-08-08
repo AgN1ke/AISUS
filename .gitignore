@@ -6,4 +6,4 @@
 *.session
 /.idea/
 *.session-journal
-.env
+__pycache__/

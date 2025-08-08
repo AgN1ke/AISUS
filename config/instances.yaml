@@ -1,0 +1,14 @@
+instances:
+  - name: mainbot
+    type: bot
+    token: "PUT_YOUR_BOT_TOKEN_1"
+
+  - name: helperbot
+    type: bot
+    token: "PUT_YOUR_BOT_TOKEN_2"
+
+  - name: userbot1
+    type: userbot
+    api_id: 123456
+    api_hash: "YOUR_API_HASH"
+    session: "sessions/userbot1.session"
