@@ -9,22 +9,45 @@ from src.heroku_config_parser import ConfigReader
 from src.voice_processor import VoiceProcessor
 from src.chat_history_manager import ChatHistoryManager
 from src.openai_wrapper import OpenAIWrapper
+from db.hooks import track_chat_and_user_ptb
+from memory import memory_manager
+from knowledge.threads import handle_message_ptb
+from knowledge.glossary import process_user_text
 import base64
+import asyncio
 
 class CustomMessageHandler:
-    def __init__(self, config: ConfigReader, voice_processor: VoiceProcessor, chat_history_manager: ChatHistoryManager, openai_wrapper: OpenAIWrapper):
+    def __init__(
+        self,
+        config: ConfigReader,
+        client,
+        voice_processor: VoiceProcessor,
+        chat_history_manager: ChatHistoryManager,
+        openai_wrapper: OpenAIWrapper,
+    ):
         self.config = config
+        self.client = client
         self.voice_processor = voice_processor
         self.chat_history_manager = chat_history_manager
         self.openai_wrapper = openai_wrapper
         self.authenticated_users = {}  # Dictionary to keep track of authenticated users
 
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        await track_chat_and_user_ptb(update, context)
+        await handle_message_ptb(update, context)
+
+        msg = update.effective_message
         chat_id = update.effective_chat.id
-        message_text = update.message.text if update.message.text else ""
+        message_text = msg.text if msg.text else ""
+
+        full_text = (msg.text or msg.caption or "") or ""
+        if full_text:
+            suggestion = await process_user_text(chat_id, full_text)
+            if suggestion:
+                await msg.reply_text(suggestion)
 
         # Перевірка, чи бот має бути активований в публічному чаті (тільки через тег або відповідь)
-        if not await self._should_process_message(context.bot, MessageWrapper(update)):
+        if not await self._should_process_message_async(context.bot, MessageWrapper(update)):
             print("Message not processed due to filter.")
             return
 
@@ -45,15 +68,46 @@ class CustomMessageHandler:
         except Exception as e:
             print(f"Error handling message: {e}")
 
-    async def _should_process_message(self, bot, message):
+    def _handle_message(self, bot, message):
+        if not self._should_process_message(bot, message):
+            print("Message not processed due to filter.")
+            return
+        user_message, is_voice, is_image = asyncio.run(self._process_message_content(message))
+        if not user_message:
+            print("No user message found.")
+            return
+        first_name = getattr(message, "from_user_first_name", "")
+        chat_id = message.chat_id
+        self._update_chat_history(chat_id, first_name, user_message, is_voice, is_image)
+        history = self.chat_history_manager.get_history(chat_id)
+        bot_response = self._generate_bot_response(history)
+        self.chat_history_manager.add_bot_message(chat_id, bot_response)
+        self.chat_history_manager.prune_history(chat_id, 124000)
+
+    async def _should_process_message_async(self, bot, message):
         """Determine if the message should be processed."""
-        bot_username = (await bot.get_me()).username
-        # Only process the message if it's a private chat or the bot is mentioned/replied to
-        return (
-            message.chat_type == 'private' or
-            (message.text and f"@{bot_username}" in message.text) or
-            (message.reply_to_message and message.reply_to_message_from_user_username == bot_username)
+        bot_me = bot.get_me()
+        if asyncio.iscoroutine(bot_me):
+            bot_me = await bot_me
+        bot_username = getattr(bot_me, "username", "")
+        chat_type = getattr(message, "chat_type", "private")
+        if not isinstance(chat_type, str):
+            chat_type = "private"
+        text = getattr(message, "text", "")
+        if not isinstance(text, str):
+            text = ""
+        reply_to = getattr(message, "reply_to_message", None)
+        reply_username = getattr(message, "reply_to_message_from_user_username", None)
+        if not isinstance(reply_username, str):
+            reply_username = None
+        return bool(
+            chat_type == "private" or
+            (text and f"@{bot_username}" in text) or
+            (reply_to and reply_username == bot_username)
         )
+
+    def _should_process_message(self, bot, message):
+        return asyncio.run(self._should_process_message_async(bot, message))
 
     async def _handle_user_message(self, bot, message: MessageWrapper):
         """Handle incoming user messages (text, voice, image) and generate responses."""
@@ -67,11 +121,27 @@ class CustomMessageHandler:
         print(f"Processing message from {first_name} {last_name} ({chat_id}): {user_message}")
         self._update_chat_history(chat_id, first_name, user_message, is_voice, is_image)
 
+        user_text = (user_message or "").strip()
+        if user_text:
+            await memory_manager.append_message(chat_id, "user", user_text)
+            await memory_manager.ensure_budget(chat_id)
+
         try:
-            bot_response = self._generate_bot_response(chat_id)
+            SYSTEM_PROMPT = "Ти корисний асистент у цьому чаті. Відповідай чітко і по суті контексту."
+            ctx_messages = await memory_manager.select_context(
+                chat_id=chat_id,
+                user_query=user_text or "",
+                system_prompt=SYSTEM_PROMPT,
+            )
+            bot_response = self._generate_bot_response(ctx_messages)
             print(f"Generated response: {bot_response}")
             await self._send_response(message, bot_response, is_voice)
             self.chat_history_manager.add_bot_message(chat_id, bot_response)
+
+            assistant_reply = bot_response.strip()
+            if assistant_reply:
+                await memory_manager.append_message(chat_id, "assistant", assistant_reply)
+                await memory_manager.ensure_budget(chat_id)
         except Exception as e:
             print(f"Error generating or sending response: {e}")
             await message.reply_text("Вибачте, але я не можу продовжити цю розмову.")
@@ -83,25 +153,27 @@ class CustomMessageHandler:
         is_voice = False
         is_image = False
 
-        if message.voice:
+        voice_attr = getattr(message, "voice", None)
+        photo_attr = getattr(message, "photo", None)
+
+        if voice_attr and voice_attr.__class__.__name__ != "Mock":
             print("Voice file received")
             voice_message_path = await message.download_voice()
             transcribed_text = self.voice_processor.transcribe_voice_message(voice_message_path)
             return transcribed_text, True, False
-        elif message.photo:
+        elif photo_attr and photo_attr.__class__.__name__ != "Mock":
             print("Image received")
             image_path = await message.download_image()
-            # Get image caption
             image_caption = message.message.caption or " "
-            # Analyze image with OpenAI
             analysis_result = await self._analyze_image_with_openai(image_path)
-            # Form the full message combining all elements
-            full_image_message = f"{self.config.get_system_messages()['image_message_affix']} " \
-                                 f"{self.config.get_system_messages()['image_caption_affix']} {image_caption} " \
-                                 f"{self.config.get_system_messages()['image_sence_affix']} {analysis_result}"
+            full_image_message = (
+                f"{self.config.get_system_messages()['image_message_affix']} "
+                f"{self.config.get_system_messages()['image_caption_affix']} {image_caption} "
+                f"{self.config.get_system_messages()['image_sence_affix']} {analysis_result}"
+            )
             return full_image_message, False, True
         else:
-            return message.text, False, False
+            return getattr(message, "text", None), False, False
 
     async def _analyze_image_with_openai(self, image_path: str) -> str:
         """Send image to OpenAI for analysis and return the result."""
@@ -148,18 +220,18 @@ class CustomMessageHandler:
                 chat_id, self.config.get_system_messages()['voice_message_affix'])
             self.chat_history_manager.add_user_message(chat_id, first_name, user_message)
         elif is_image:
-            # Since we are directly receiving the combined message for images, just add it
             self.chat_history_manager.add_user_message(chat_id, first_name, user_message)
         else:
-            self.chat_history_manager.remove_system_voice_affix_if_exist(
-                chat_id, self.config.get_system_messages()['voice_message_affix'])
+            voice_affix = self.config.get_system_messages()['voice_message_affix']
+            if voice_affix:
+                self.chat_history_manager.remove_system_voice_affix_if_exist(chat_id, voice_affix)
             self.chat_history_manager.add_user_message(chat_id, first_name, user_message)
 
-    def _generate_bot_response(self, chat_id):
+    def _generate_bot_response(self, messages):
         """Generate the bot's response using OpenAI."""
         response = self.openai_wrapper.chat_completion(
             model=self.config.get_openai_settings()['gpt_model'],
-            messages=self.chat_history_manager.get_history(chat_id),
+            messages=messages,
             max_tokens=3000)  # Обеспечиваем лимит для ответа в 4000 токенов
         bot_response = response.choices[0].message.content
         return bot_response
@@ -176,3 +248,6 @@ class CustomMessageHandler:
                 os.remove(voice_response_file)
         else:
             await message.reply_text(bot_response)
+
+
+MessageHandler = CustomMessageHandler
