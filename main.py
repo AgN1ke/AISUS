@@ -1,6 +1,7 @@
 #main.py
 
 from telegram.ext import ApplicationBuilder, MessageHandler, filters
+from db.bootstrap import bootstrap_db, bootstrap_db_sync
 from src.heroku_config_parser import ConfigReader
 from src.message_handler import CustomMessageHandler
 from src.voice_processor import VoiceProcessor
@@ -15,9 +16,9 @@ if __name__ == "__main__":
                                      tts_model=config.get_openai_settings()['tts_model'])
     chat_history_manager = ChatHistoryManager()
     openai_wrapper = OpenAIWrapper(config.get_openai_settings()['api_key'])
-    message_handler = CustomMessageHandler(config, voice_processor, chat_history_manager, openai_wrapper)
 
     app = ApplicationBuilder().token(config.get_api_settings()['bot_token']).build()
+    message_handler = CustomMessageHandler(config, app.bot, voice_processor, chat_history_manager, openai_wrapper)
 
     # Создание обработчиков сообщений для разных случаев
     private_message_handler = MessageHandler(
@@ -40,4 +41,5 @@ if __name__ == "__main__":
     app.add_handler(mentioned_message_handler)
     app.add_handler(reply_message_handler)
 
+    bootstrap_db_sync()
     app.run_polling()
