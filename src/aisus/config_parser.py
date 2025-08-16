@@ -1,6 +1,9 @@
 # config_parser.py
-import os
 from typing import Any, Dict, Optional
+from dotenv import load_dotenv
+import os
+
+load_dotenv()
 
 
 def _format_message(message: Optional[str]) -> str:
