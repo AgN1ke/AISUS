@@ -105,7 +105,7 @@ class CustomMessageHandler:
 
     def _update_chat_history(self, chat_id: int, first_name: str, user_message: str, is_voice: bool,
                              is_image: bool) -> None:
-        self.chat_history_manager.add_system_message(chat_id, self.config.get_system_messages()["welcome_message"])
+        self.chat_history_manager.add_system_message(chat_id, self.config.get_system_messages()["gpt_prompt"])
         if is_voice:
             self.chat_history_manager.add_system_voice_affix_if_not_exist(chat_id, self.config.get_system_messages()[
                 "voice_message_affix"])

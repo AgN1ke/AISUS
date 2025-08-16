@@ -1,5 +1,6 @@
 # tests/test_message_handler.py
 import asyncio
+import os
 import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, AsyncMock
@@ -8,9 +9,18 @@ from src.aisus.chat_history_manager import ChatHistoryManager
 from src.aisus.config_parser import ConfigReader
 from src.aisus.message_handler import CustomMessageHandler
 
+from typing import Any
+from unittest.mock import patch
+
 
 class TestMessageHandler(unittest.TestCase):
     def setUp(self) -> None:
+        self.env_patch: Any = patch.dict(os.environ, {
+            "SYSTEM_MESSAGES_GPT_PROMPT": "Welcome",
+            "SYSTEM_MESSAGES_VOICE_MESSAGE_AFFIX": "Voice:",
+            "PASSWORD": ""
+        }, clear=False)
+        self.env_patch.start()
         self.config: ConfigReader = ConfigReader()
         self.history: ChatHistoryManager = ChatHistoryManager()
         self.bot: Mock = Mock()
@@ -21,7 +31,11 @@ class TestMessageHandler(unittest.TestCase):
             config=self.config,
             voice_processor=self.voice,
             chat_history_manager=self.history,
-            openai_wrapper=self.openai)
+            openai_wrapper=self.openai
+        )
+
+    def tearDown(self) -> None:
+        self.env_patch.stop()
 
     def test_should_process_message(self) -> None:
         msg: Mock = Mock()

@@ -9,7 +9,7 @@ def _format_message(message: Optional[str]) -> str:
 
 class ConfigReader:
     def __init__(self) -> None:
-        self.welcome_message: str = _format_message(os.getenv("SYSTEM_MESSAGES_WELCOME_MESSAGE"))
+        self.gpt_prompt: str = _format_message(os.getenv("SYSTEM_MESSAGES_GPT_PROMPT"))
         self.voice_message_affix: str = _format_message(os.getenv("SYSTEM_MESSAGES_VOICE_MESSAGE_AFFIX"))
         self.image_message_affix: str = _format_message(
             os.getenv("SYSTEM_MESSAGES_IMAGE_MESSAGE_AFFIX", "Ти отримав зображення."))
@@ -34,7 +34,7 @@ class ConfigReader:
 
     def get_system_messages(self) -> Dict[str, str]:
         return {
-            "welcome_message": self.welcome_message,
+            "gpt_prompt": self.gpt_prompt,
             "voice_message_affix": self.voice_message_affix,
             "image_message_affix": self.image_message_affix,
             "image_caption_affix": self.image_caption_affix,
