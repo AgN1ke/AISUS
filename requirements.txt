@@ -1,6 +1,6 @@
 openai
 configparser
-python-telegram-bot==21.5
+python-telegram-bot
 python-dateutil
 heroku3
 requests

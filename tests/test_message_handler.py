@@ -1,59 +1,56 @@
-# test_message_handler.py
+# tests/test_message_handler.py
+import asyncio
 import unittest
-from unittest.mock import Mock
-from src.message_handler import MessageHandler
-from src.config_reader import ConfigReader
+from types import SimpleNamespace
+from unittest.mock import Mock, AsyncMock
+
+from src.message_handler import CustomMessageHandler
 from src.chat_history_manager import ChatHistoryManager
+from src.heroku_config_parser import ConfigReader
 
 
 class TestMessageHandler(unittest.TestCase):
-
-    def setUp(self):
-        self.config = ConfigReader("../configs/test_config.ini")
-        self.chat_history_manager = ChatHistoryManager()
-        self.client = Mock()
-        self.voice_processor = Mock()
-        self.openai_wrapper = Mock()
-        self.message_handler = MessageHandler(
+    def setUp(self) -> None:
+        self.config: ConfigReader = ConfigReader()
+        self.history: ChatHistoryManager = ChatHistoryManager()
+        self.bot: Mock = Mock()
+        self.bot.get_me = AsyncMock(return_value=SimpleNamespace(username="testbot"))
+        self.voice: Mock = Mock()
+        self.openai: Mock = Mock()
+        self.handler: CustomMessageHandler = CustomMessageHandler(
             config=self.config,
-            client=self.client,
-            voice_processor=self.voice_processor,
-            chat_history_manager=self.chat_history_manager,
-            openai_wrapper=self.openai_wrapper
+            voice_processor=self.voice,
+            chat_history_manager=self.history,
+            openai_wrapper=self.openai,
         )
 
-    def test_should_process_message(self):
-        # Setup
-        message = Mock()
-        message.voice = None
-        message.text = "Hello"
-        message.chat_id = 123
-        message.reply_to_message = None
-        message.from_user_first_name = "Test User"
+    def test_should_process_message(self) -> None:
+        msg: Mock = Mock()
+        msg.chat_type = "private"
+        msg.text = "Hello"
+        msg.reply_to_message = None
+        coro = self.handler._should_process_message(self.bot, msg)
+        self.assertTrue(asyncio.run(coro))
 
-        # Execution and Verification
-        self.assertTrue(self.message_handler._should_process_message(self.client, message))
+    def test_mock_text_dialog(self) -> None:
+        msg: Mock = Mock()
+        msg.voice = None
+        msg.photo = None
+        msg.text = "Hello"
+        msg.chat_id = 123
+        msg.message = Mock(caption=None)
+        msg.from_user_first_name = "Test User"
+        msg.from_user_last_name = None
+        msg.reply_text = AsyncMock()
+        msg.reply_voice = AsyncMock()
 
-    def test_mock_text_dialog(self):
-        # Setup
-        message = Mock()
-        message.voice = None
-        message.text = "Hello"
-        message.chat_id = 123
-        message.reply_to_message = None
-        message.from_user_first_name = "Test User"
+        self.openai.chat_completion.return_value = Mock(
+            choices=[Mock(message=Mock(content="Hi there!"))]
+        )
 
-        predefined_response = "Hi there!"
-        self.openai_wrapper.chat_completion.return_value = Mock(
-            choices=[Mock(message=Mock(content=predefined_response))])
+        self.handler.authenticated_users[123] = True
+        asyncio.run(self.handler._handle_user_message(msg))
 
-        # Execution
-        self.message_handler._handle_message(self.client, message)
-
-        # Verification
-        self.assertEqual(len(self.chat_history_manager.get_history(message.chat_id)), 3)
-        self.assertIn(predefined_response, self.chat_history_manager.get_history(message.chat_id)[-1]['content'])
-
-
-if __name__ == '__main__':
-    unittest.main()
+        history = self.history.get_history(msg.chat_id)
+        self.assertEqual(len(history), 3)
+        self.assertIn("Hi there!", history[-1]["content"])

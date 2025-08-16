@@ -7,3 +7,4 @@
 /.idea/
 *.session-journal
 .env
+.DS_Store

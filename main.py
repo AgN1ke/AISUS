@@ -19,7 +19,6 @@ if __name__ == "__main__":
 
     app = ApplicationBuilder().token(config.get_api_settings()['bot_token']).build()
 
-    # Создание обработчиков сообщений для разных случаев
     private_message_handler = MessageHandler(
         (filters.TEXT | filters.VOICE | filters.PHOTO) & filters.ChatType.PRIVATE,
         message_handler.handle_message
@@ -35,7 +34,6 @@ if __name__ == "__main__":
         message_handler.handle_message
     )
 
-    # Добавление обработчиков в приложение
     app.add_handler(private_message_handler)
     app.add_handler(mentioned_message_handler)
     app.add_handler(reply_message_handler)
