@@ -7,4 +7,3 @@ heroku3
 requests
 wheel
 setuptools
-dotenv

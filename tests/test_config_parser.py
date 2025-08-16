@@ -16,6 +16,7 @@ class TestConfigParser(unittest.TestCase):
             "OPENAI_GPT_MODEL": "gpt-x",
             "MYAPI_BOT_TOKEN": "token",
             "FILE_PATHS_AUDIO_FOLDER": "/tmp/a",
+            "FILE_PATHS_IMAGE_FOLDER": "/tmp/i",
             "LIMITS_MAX_TOKENS": "4096",
             "LIMITS_MAX_HISTORY_LENGTH": "200000",
         }, clear=False)
@@ -28,6 +29,7 @@ class TestConfigParser(unittest.TestCase):
         self.assertEqual(cfg.get_openai_settings()["gpt_model"], "gpt-x")
         self.assertEqual(cfg.get_api_settings()["bot_token"], "token")
         self.assertEqual(cfg.get_file_paths_and_limits()["audio_folder_path"], "/tmp/a")
+        self.assertEqual(cfg.get_file_paths_and_limits()["image_folder_path"], "/tmp/i")
         self.assertEqual(cfg.get_file_paths_and_limits()["max_tokens"], 4096)
         self.assertEqual(cfg.get_file_paths_and_limits()["max_history_length"], 200000)
         env_patch.stop()
@@ -39,6 +41,7 @@ class TestConfigParser(unittest.TestCase):
         self.assertEqual(cfg.get_system_messages()["image_message_affix"], "Ти отримав зображення.")
         self.assertEqual(cfg.get_system_messages()["image_caption_affix"], "Під ним такий підпис відправника:")
         self.assertEqual(cfg.get_system_messages()["image_sence_affix"], "На картинці зображено:")
+        self.assertIsNone(cfg.get_file_paths_and_limits()["image_folder_path"])
         self.assertEqual(cfg.get_file_paths_and_limits()["max_tokens"], 3000)
         self.assertEqual(cfg.get_file_paths_and_limits()["max_history_length"], 124000)
         env_patch.stop()

@@ -2,23 +2,31 @@
 import asyncio
 import os
 import unittest
+import tempfile
+import shutil
 from types import SimpleNamespace
-from unittest.mock import Mock, AsyncMock
+from typing import Any, Optional
+from unittest.mock import Mock, AsyncMock, patch
 
 from src.aisus.chat_history_manager import ChatHistoryManager
 from src.aisus.config_parser import ConfigReader
 from src.aisus.message_handler import CustomMessageHandler
 
-from typing import Any
-from unittest.mock import patch
-
 
 class TestMessageHandler(unittest.TestCase):
     def setUp(self) -> None:
+        self.tmp_root: str = tempfile.mkdtemp(prefix="aisus-tests-")
+        self.audio_dir: str = os.path.join(self.tmp_root, "audio")
+        self.image_dir: str = os.path.join(self.tmp_root, "images")
         self.env_patch: Any = patch.dict(os.environ, {
             "SYSTEM_MESSAGES_GPT_PROMPT": "Welcome",
             "SYSTEM_MESSAGES_VOICE_MESSAGE_AFFIX": "Voice:",
-            "PASSWORD": ""
+            "SYSTEM_MESSAGES_IMAGE_MESSAGE_AFFIX": "You sent an image.",
+            "SYSTEM_MESSAGES_IMAGE_CAPTION_AFFIX": "Caption:",
+            "SYSTEM_MESSAGES_IMAGE_SENCE_AFFIX": "Scene:",
+            "PASSWORD": "",
+            "FILE_PATHS_AUDIO_FOLDER": self.audio_dir,
+            "FILE_PATHS_IMAGE_FOLDER": self.image_dir,
         }, clear=False)
         self.env_patch.start()
         self.config: ConfigReader = ConfigReader()
@@ -36,6 +44,7 @@ class TestMessageHandler(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.env_patch.stop()
+        shutil.rmtree(self.tmp_root, ignore_errors=True)
 
     def test_should_process_message(self) -> None:
         msg: Mock = Mock()
@@ -65,3 +74,163 @@ class TestMessageHandler(unittest.TestCase):
         history = self.history.get_history(msg.chat_id)
         self.assertEqual(len(history), 3)
         self.assertIn("Hi there!", history[-1]["content"])
+
+    def test_voice_download_path_and_cleanup(self) -> None:
+        created_path: Optional[str] = None
+
+        async def download_voice(download_dir: str) -> str:
+            nonlocal created_path
+            os.makedirs(download_dir, exist_ok=True)
+            created_path = os.path.join(download_dir, "dummy_voice.ogg")
+            with open(created_path, "wb") as f:
+                f.write(b"ogg")
+            return created_path
+
+        self.voice.transcribe_voice_message = Mock(return_value="ok")
+
+        msg: Mock = Mock()
+        msg.voice = True
+        msg.photo = None
+        msg.text = None
+        msg.download_voice = AsyncMock(side_effect=download_voice)
+        msg.message = Mock(caption=None)
+
+        result_text, is_voice, is_image = asyncio.run(self.handler._process_message_content(msg))
+
+        self.assertEqual(result_text, "ok")
+        self.assertTrue(is_voice)
+        self.assertFalse(is_image)
+        self.assertIsNotNone(created_path)
+        self.assertTrue(created_path.startswith(self.audio_dir))
+        self.assertFalse(os.path.exists(created_path))
+
+    def test_image_download_path_and_cleanup(self) -> None:
+        created_path: Optional[str] = None
+
+        async def download_image(download_dir: str) -> str:
+            nonlocal created_path
+            os.makedirs(download_dir, exist_ok=True)
+            created_path = os.path.join(download_dir, "dummy_image.jpg")
+            with open(created_path, "wb") as f:
+                f.write(b"\xff\xd8\xff")
+            return created_path
+
+        self.handler._analyze_image_with_openai = AsyncMock(return_value="a cat")
+
+        msg: Mock = Mock()
+        msg.voice = None
+        msg.photo = [object()]
+        msg.text = None
+        msg.download_image = AsyncMock(side_effect=download_image)
+        msg.message = SimpleNamespace(caption="cap")
+
+        result_text, is_voice, is_image = asyncio.run(self.handler._process_message_content(msg))
+
+        self.assertIsInstance(result_text, str)
+        self.assertFalse(is_voice)
+        self.assertTrue(is_image)
+        self.assertIsNotNone(created_path)
+        self.assertTrue(created_path.startswith(self.image_dir))
+        self.assertFalse(os.path.exists(created_path))
+
+    def test_tts_response_cleanup(self) -> None:
+        os.makedirs(self.audio_dir, exist_ok=True)
+        tts_path: str = os.path.join(self.audio_dir, "tts.ogg")
+        with open(tts_path, "wb") as f:
+            f.write(b"ogg")
+        self.voice.generate_voice_response_and_save_file = Mock(return_value=tts_path)
+
+        msg: Mock = Mock()
+        msg.reply_voice = AsyncMock()
+        msg.reply_text = AsyncMock()
+
+        asyncio.run(self.handler._send_response(msg, "hello", is_voice=True))
+
+        msg.reply_voice.assert_awaited_once_with(tts_path)
+        self.assertFalse(os.path.exists(tts_path))
+
+    def test_tts_creates_audio_dir(self) -> None:
+        import shutil
+        if os.path.isdir(self.audio_dir):
+            shutil.rmtree(self.audio_dir)
+
+        async def reply_voice(*args, **kwargs):
+            return None
+
+        def generate_voice_response_and_save_file(text: str, voice: Optional[str], audio_dir: str) -> str:
+            self.assertTrue(os.path.isdir(audio_dir))
+            os.makedirs(audio_dir, exist_ok=True)
+            tts_path: str = os.path.join(audio_dir, "tts_created.ogg")
+            with open(tts_path, "wb") as f:
+                f.write(b"ogg")
+            return tts_path
+
+        self.voice.generate_voice_response_and_save_file = Mock(side_effect=generate_voice_response_and_save_file)
+
+        msg: Mock = Mock()
+        msg.reply_voice = AsyncMock(side_effect=reply_voice)
+        msg.reply_text = AsyncMock()
+
+        asyncio.run(self.handler._send_response(msg, "hello", is_voice=True))
+
+        self.assertTrue(os.path.isdir(self.audio_dir))
+
+
+def test_image_dir_falls_back_to_audio_dir(self) -> None:
+    created_path: Optional[str] = None
+
+    async def download_image(download_dir: str) -> str:
+        nonlocal created_path
+        os.makedirs(download_dir, exist_ok=True)
+        created_path = os.path.join(download_dir, "fallback.jpg")
+        with open(created_path, "wb") as f:
+            f.write(b"\xff\xd8\xff")
+        return created_path
+
+    with patch.dict(os.environ, {"FILE_PATHS_IMAGE_FOLDER": ""}, clear=False):
+        cfg_fallback: ConfigReader = ConfigReader()
+        handler_fallback: CustomMessageHandler = CustomMessageHandler(
+            config=cfg_fallback,
+            voice_processor=self.voice,
+            chat_history_manager=self.history,
+            openai_wrapper=self.openai
+        )
+
+    handler_fallback._analyze_image_with_openai = AsyncMock(return_value="ok")
+
+    msg: Mock = Mock()
+    msg.voice = None
+    msg.photo = [object()]
+    msg.text = None
+    msg.download_image = AsyncMock(side_effect=download_image)
+    msg.message = SimpleNamespace(caption=None)
+
+    result_text, is_voice, is_image = asyncio.run(handler_fallback._process_message_content(msg))
+
+    self.assertIsInstance(result_text, str)
+    self.assertFalse(is_voice)
+    self.assertTrue(is_image)
+    self.assertIsNotNone(created_path)
+    self.assertTrue(created_path.startswith(self.audio_dir))
+    self.assertFalse(os.path.exists(created_path))
+
+
+def test_tts_cleanup_oserror_logged(self) -> None:
+    import logging
+    tts_path: str = os.path.join(self.audio_dir, "tts.ogg")
+    os.makedirs(self.audio_dir, exist_ok=True)
+    with open(tts_path, "wb") as f:
+        f.write(b"ogg")
+
+    self.voice.generate_voice_response_and_save_file = Mock(return_value=tts_path)
+
+    msg: Mock = Mock()
+    msg.reply_voice = AsyncMock()
+    msg.reply_text = AsyncMock()
+
+    with patch("src.aisus.message_handler.os.remove", side_effect=OSError("boom")), \
+            self.assertLogs("src.aisus.message_handler", level="ERROR") as captured:
+        asyncio.run(self.handler._send_response(msg, "hello", is_voice=True))
+
+    msg.reply_voice.assert_awaited_once_with(tts_path)
+    self.assertTrue(any("failed to remove temp tts file" in rec for rec in captured.output))

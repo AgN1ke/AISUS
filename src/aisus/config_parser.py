@@ -31,6 +31,7 @@ class ConfigReader:
         self.bot_token: Optional[str] = os.getenv("MYAPI_BOT_TOKEN")
 
         self.audio_folder_path: Optional[str] = os.getenv("FILE_PATHS_AUDIO_FOLDER")
+        self.image_folder_path: Optional[str] = os.getenv("FILE_PATHS_IMAGE_FOLDER")
 
         self.max_tokens: int = int(os.getenv("LIMITS_MAX_TOKENS", "3000"))
         self.max_history_length: int = int(os.getenv("LIMITS_MAX_HISTORY_LENGTH", "124000"))
@@ -62,6 +63,7 @@ class ConfigReader:
     def get_file_paths_and_limits(self) -> Dict[str, Any]:
         return {
             "audio_folder_path": self.audio_folder_path,
+            "image_folder_path": self.image_folder_path,
             "max_tokens": self.max_tokens,
             "max_history_length": self.max_history_length,
         }

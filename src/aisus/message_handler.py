@@ -1,6 +1,7 @@
 # message_handler.py
 import os
 import base64
+import logging
 from typing import Tuple, Optional, Dict, Any
 import requests
 from telegram import Update
@@ -10,6 +11,8 @@ from src.aisus.config_parser import ConfigReader
 from src.aisus.voice_processor import VoiceProcessor
 from src.aisus.chat_history_manager import ChatHistoryManager
 from src.aisus.openai_wrapper import OpenAIWrapper
+
+logger: logging.Logger = logging.getLogger(__name__)
 
 
 class CustomMessageHandler:
@@ -37,8 +40,12 @@ class CustomMessageHandler:
         try:
             wrapped_message: MessageWrapper = MessageWrapper(update)
             await self._handle_user_message(wrapped_message)
-        except Exception as e:
-            print(f"Error handling message: {e}")
+        except Exception as exc:
+            logger.exception("handle_message failed: %s", exc)
+            try:
+                await update.message.reply_text("Сталася помилка. Спробуйте ще раз.")
+            except Exception as notify_exc:
+                logger.exception("failed to notify user: %s", notify_exc)
 
     @staticmethod
     async def _should_process_message(bot: Any, message: MessageWrapper) -> bool:
@@ -60,23 +67,53 @@ class CustomMessageHandler:
             bot_response: str = self._generate_bot_response(chat_id)
             await self._send_response(message, bot_response, is_voice)
             self.chat_history_manager.add_bot_message(chat_id, bot_response)
-        except Exception as e:
-            print(f"Error generating or sending response: {e}")
-            await message.reply_text("Вибачте, але я не можу продовжити цю розмову.")
+        except Exception as exc:
+            logger.exception("response generation/sending failed: %s", exc)
+            try:
+                await message.reply_text("Сталася помилка. Спробуйте ще раз.")
+            except Exception as notify_exc:
+                logger.exception("failed to notify user: %s", notify_exc)
         max_history_length: int = self.config.get_file_paths_and_limits()["max_history_length"]
         self.chat_history_manager.prune_history(chat_id, max_history_length)
 
     async def _process_message_content(self, message: MessageWrapper) -> Tuple[Optional[str], bool, bool]:
+        paths_and_limits: Dict[str, Any] = self.config.get_file_paths_and_limits()
+        audio_dir: Optional[str] = paths_and_limits.get("audio_folder_path")
+        image_dir: Optional[str] = paths_and_limits.get("image_folder_path") or audio_dir
         if message.voice:
-            voice_message_path: str = await message.download_voice()
-            transcribed_text: str = self.voice_processor.transcribe_voice_message(voice_message_path)
-            return transcribed_text, True, False
+            if not audio_dir:
+                return None, False, False
+            voice_message_path: Optional[str] = None
+            try:
+                voice_message_path = await message.download_voice(audio_dir)
+                transcribed_text: str = self.voice_processor.transcribe_voice_message(voice_message_path)
+                return transcribed_text, True, False
+            finally:
+                if voice_message_path and os.path.exists(voice_message_path):
+                    try:
+                        os.remove(voice_message_path)
+                    except OSError as exc:
+                        logger.exception("failed to remove temp voice file: %s", exc)
         if message.photo:
-            image_path: str = await message.download_image()
-            image_caption: str = message.message.caption or " "
-            analysis_result: str = await self._analyze_image_with_openai(image_path)
-            full_image_message: str = f"{self.config.get_system_messages()['image_message_affix']} {self.config.get_system_messages()['image_caption_affix']} {image_caption} {self.config.get_system_messages()['image_sence_affix']} {analysis_result}"
-            return full_image_message, False, True
+            if not image_dir:
+                return None, False, False
+            image_path: Optional[str] = None
+            try:
+                image_path = await message.download_image(image_dir)
+                image_caption: str = message.message.caption or " "
+                analysis_result: str = await self._analyze_image_with_openai(image_path)
+                full_image_message: str = (
+                    f"{self.config.get_system_messages()['image_message_affix']} "
+                    f"{self.config.get_system_messages()['image_caption_affix']} {image_caption} "
+                    f"{self.config.get_system_messages()['image_sence_affix']} {analysis_result}"
+                )
+                return full_image_message, False, True
+            finally:
+                if image_path and os.path.exists(image_path):
+                    try:
+                        os.remove(image_path)
+                    except OSError as exc:
+                        logger.exception("failed to remove temp image file: %s", exc)
         return message.text, False, False
 
     async def _analyze_image_with_openai(self, image_path: str) -> str:
@@ -107,15 +144,17 @@ class CustomMessageHandler:
                              is_image: bool) -> None:
         self.chat_history_manager.add_system_message(chat_id, self.config.get_system_messages()["gpt_prompt"])
         if is_voice:
-            self.chat_history_manager.add_system_voice_affix_if_not_exist(chat_id, self.config.get_system_messages()[
-                "voice_message_affix"])
+            self.chat_history_manager.add_system_voice_affix_if_not_exist(
+                chat_id, self.config.get_system_messages()["voice_message_affix"]
+            )
             self.chat_history_manager.add_user_message(chat_id, first_name, user_message)
             return
         if is_image:
             self.chat_history_manager.add_user_message(chat_id, first_name, user_message)
             return
-        self.chat_history_manager.remove_system_voice_affix_if_exist(chat_id, self.config.get_system_messages()[
-            "voice_message_affix"])
+        self.chat_history_manager.remove_system_voice_affix_if_exist(
+            chat_id, self.config.get_system_messages()["voice_message_affix"]
+        )
         self.chat_history_manager.add_user_message(chat_id, first_name, user_message)
 
     def _generate_bot_response(self, chat_id: int) -> str:
@@ -130,13 +169,19 @@ class CustomMessageHandler:
 
     async def _send_response(self, message: MessageWrapper, bot_response: str, is_voice: bool) -> None:
         if is_voice:
+            audio_dir_opt: Optional[str] = self.config.get_file_paths_and_limits().get("audio_folder_path")
+            if audio_dir_opt:
+                os.makedirs(audio_dir_opt, exist_ok=True)
             voice_response_file: str = self.voice_processor.generate_voice_response_and_save_file(
                 bot_response,
                 self.config.get_openai_settings()["vocalizer_voice"],
-                self.config.get_file_paths_and_limits()["audio_folder_path"]
+                audio_dir_opt or ""
             )
             await message.reply_voice(voice_response_file)
             if os.path.exists(voice_response_file):
-                os.remove(voice_response_file)
+                try:
+                    os.remove(voice_response_file)
+                except OSError as exc:
+                    logger.exception("failed to remove temp tts file: %s", exc)
             return
         await message.reply_text(bot_response)
