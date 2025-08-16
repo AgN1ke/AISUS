@@ -1,6 +1,7 @@
 # test_chat_history_manager.py
 import unittest
-from src.chat_history_manager import ChatHistoryManager  # replace 'your_module' with the actual module name
+
+from src.aisus.chat_history_manager import ChatHistoryManager
 
 
 class TestChatHistoryManager(unittest.TestCase):

@@ -5,11 +5,11 @@ from typing import Tuple, Optional, Dict, Any
 import requests
 from telegram import Update
 from telegram.ext import CallbackContext
-from src.message_wrapper import MessageWrapper
-from src.heroku_config_parser import ConfigReader
-from src.voice_processor import VoiceProcessor
-from src.chat_history_manager import ChatHistoryManager
-from src.openai_wrapper import OpenAIWrapper
+from src.aisus.message_wrapper import MessageWrapper
+from src.aisus.config_parser import ConfigReader
+from src.aisus.voice_processor import VoiceProcessor
+from src.aisus.chat_history_manager import ChatHistoryManager
+from src.aisus.openai_wrapper import OpenAIWrapper
 
 
 class CustomMessageHandler:
@@ -40,7 +40,8 @@ class CustomMessageHandler:
         except Exception as e:
             print(f"Error handling message: {e}")
 
-    async def _should_process_message(self, bot: Any, message: MessageWrapper) -> bool:
+    @staticmethod
+    async def _should_process_message(bot: Any, message: MessageWrapper) -> bool:
         bot_username: str = (await bot.get_me()).username
         return (
                 message.chat_type == "private" or

@@ -1,0 +1,15 @@
+[build-system]
+requires = ["setuptools>=80.9", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aisus"
+version = "1.0.0"
+description = "AISUS"
+readme = "README.md"
+requires-python = ">=3.9"
+authors = [{ name = "Your Name" }]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["aisus*"]

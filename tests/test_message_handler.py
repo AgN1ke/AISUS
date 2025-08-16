@@ -4,9 +4,9 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, AsyncMock
 
-from src.message_handler import CustomMessageHandler
-from src.chat_history_manager import ChatHistoryManager
-from src.heroku_config_parser import ConfigReader
+from src.aisus.chat_history_manager import ChatHistoryManager
+from src.aisus.config_parser import ConfigReader
+from src.aisus.message_handler import CustomMessageHandler
 
 
 class TestMessageHandler(unittest.TestCase):
@@ -21,8 +21,7 @@ class TestMessageHandler(unittest.TestCase):
             config=self.config,
             voice_processor=self.voice,
             chat_history_manager=self.history,
-            openai_wrapper=self.openai,
-        )
+            openai_wrapper=self.openai)
 
     def test_should_process_message(self) -> None:
         msg: Mock = Mock()
@@ -44,9 +43,7 @@ class TestMessageHandler(unittest.TestCase):
         msg.reply_text = AsyncMock()
         msg.reply_voice = AsyncMock()
 
-        self.openai.chat_completion.return_value = Mock(
-            choices=[Mock(message=Mock(content="Hi there!"))]
-        )
+        self.openai.chat_completion.return_value = Mock(choices=[Mock(message=Mock(content="Hi there!"))])
 
         self.handler.authenticated_users[123] = True
         asyncio.run(self.handler._handle_user_message(msg))

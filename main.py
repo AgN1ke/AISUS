@@ -1,11 +1,12 @@
 #main.py
 
 from telegram.ext import ApplicationBuilder, MessageHandler, filters
-from src.heroku_config_parser import ConfigReader
-from src.message_handler import CustomMessageHandler
-from src.voice_processor import VoiceProcessor
-from src.openai_wrapper import OpenAIWrapper
-from src.chat_history_manager import ChatHistoryManager
+
+from src.aisus.chat_history_manager import ChatHistoryManager
+from src.aisus.config_parser import ConfigReader
+from src.aisus.message_handler import CustomMessageHandler
+from src.aisus.openai_wrapper import OpenAIWrapper
+from src.aisus.voice_processor import VoiceProcessor
 
 if __name__ == "__main__":
     config = ConfigReader()

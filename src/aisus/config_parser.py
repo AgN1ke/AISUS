@@ -1,4 +1,4 @@
-# heroku_config_parser.py
+# config_parser.py
 import os
 from typing import Any, Dict, Optional
 
