@@ -34,11 +34,11 @@ if __name__ == "__main__":
         (filters.TEXT | filters.VOICE | filters.PHOTO) & filters.ChatType.GROUPS & filters.REPLY,
         message_handler.handle_message)
 
-    clear_history_handler: CommandHandler = CommandHandler(
-        "clear", message_handler.clear_history_command)
+    clear_history_handler: CommandHandler = (
+        CommandHandler(["clear", "c"], message_handler.clear_history_command))
 
-    resend_voice_handler: CommandHandler = CommandHandler(
-        "voice_last", message_handler.resend_last_as_voice_command)
+    resend_voice_handler: CommandHandler = (
+        CommandHandler(["voice_last", "v"], message_handler.resend_last_as_voice_command))
 
     app.add_handler(private_message_handler)
     app.add_handler(mentioned_message_handler)
