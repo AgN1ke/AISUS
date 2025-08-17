@@ -33,3 +33,12 @@ class OpenAIWrapper:
     @staticmethod
     def extract_text(response):
         return getattr(response, "output_text", None) or response.choices[0].message.content
+
+    @staticmethod
+    def extract_usage(response):
+        u = getattr(response, "usage", None)
+        if not u:
+            return 0, 0
+        tokens_in = getattr(u, "input_tokens", None) or getattr(u, "prompt_tokens", 0) or 0
+        tokens_out = getattr(u, "output_tokens", None) or getattr(u, "completion_tokens", 0) or 0
+        return int(tokens_in), int(tokens_out)

@@ -11,6 +11,7 @@ from src.aisus.config_parser import ConfigReader
 from src.aisus.voice_processor import VoiceProcessor
 from src.aisus.chat_history_manager import ChatHistoryManager
 from src.aisus.openai_wrapper import OpenAIWrapper
+import time
 
 logger: logging.Logger = logging.getLogger(__name__)
 
@@ -23,6 +24,12 @@ class CustomMessageHandler:
         self.chat_history_manager: ChatHistoryManager = chat_history_manager
         self.openai_wrapper: OpenAIWrapper = openai_wrapper
         self.authenticated_users: Dict[int, bool] = {}
+        self.started_at = time.monotonic()
+        self.tokens_in = 0
+        self.tokens_out = 0
+        self.messages_in = 0
+        self.messages_out = 0
+        self.per_message_stats = []
 
     async def handle_message(self, update: Update, context: CallbackContext) -> None:
         chat_id: int = update.effective_chat.id
@@ -68,20 +75,22 @@ class CustomMessageHandler:
         user_message, is_voice, is_image = await self._process_message_content(message)
         if not user_message:
             return
-        first_name: str = message.from_user_first_name
-        chat_id: int = message.chat_id
+        self.messages_in += 1
+        first_name = message.from_user_first_name
+        chat_id = message.chat_id
         self._update_chat_history(chat_id, first_name, user_message, is_voice, is_image)
         try:
-            bot_response: str = self._generate_bot_response(chat_id)
+            bot_response = self._generate_bot_response(chat_id)
             await self._send_response(message, bot_response, is_voice)
             self.chat_history_manager.add_bot_message(chat_id, bot_response)
+            self.messages_out += 1
         except Exception as exc:
             logger.exception("response generation/sending failed: %s", exc)
             try:
                 await message.reply_text("Сталася помилка. Спробуйте ще раз.")
             except Exception as notify_exc:
                 logger.exception("failed to notify user: %s", notify_exc)
-        max_history_length: int = self.config.get_file_paths_and_limits()["max_history_length"]
+        max_history_length = self.config.get_file_paths_and_limits()["max_history_length"]
         self.chat_history_manager.prune_history(chat_id, max_history_length)
 
     async def _process_message_content(self, message: MessageWrapper) -> Tuple[Optional[str], bool, bool]:
@@ -166,14 +175,33 @@ class CustomMessageHandler:
         self.chat_history_manager.add_user_message(chat_id, first_name, user_message)
 
     def _generate_bot_response(self, chat_id: int) -> str:
-        response_tokens_limit: int = self.config.get_file_paths_and_limits()["max_tokens"]
+        response_tokens_limit = self.config.get_file_paths_and_limits()["max_tokens"]
         response = self.openai_wrapper.generate(
             model=self.config.get_openai_settings()["gpt_model"],
             messages=self.chat_history_manager.get_history(chat_id),
             max_tokens=response_tokens_limit,
         )
-        bot_response: str = self.openai_wrapper.extract_text(response)
-        return bot_response
+
+        ti = to = 0
+        extract_usage = getattr(self.openai_wrapper, "extract_usage", None)
+        if callable(extract_usage):
+            try:
+                ti, to = extract_usage(response) or (0, 0)
+                ti = int(ti or 0)
+                to = int(to or 0)
+            except (TypeError, AttributeError, ValueError):
+                ti = to = 0
+
+        self.tokens_in += ti
+        self.tokens_out += to
+        self.per_message_stats.append({
+            "chat_id": chat_id,
+            "tokens_in": ti,
+            "tokens_out": to,
+            "tokens_total": ti + to
+        })
+
+        return self.openai_wrapper.extract_text(response)
 
     async def _send_response(self, message: MessageWrapper, bot_response: str, is_voice: bool) -> None:
         if is_voice:
@@ -230,3 +258,30 @@ class CustomMessageHandler:
                 os.remove(voice_file)
             except OSError as exc:
                 logger.exception("failed to remove temp tts file: %s", exc)
+
+    def get_stats(self) -> Dict[str, Any]:
+        total_messages = max(1, self.messages_out)  # avoid div/0
+        avg_in = self.tokens_in // total_messages
+        avg_out = self.tokens_out // total_messages
+        return {
+            "uptime_seconds": int(time.monotonic() - self.started_at),
+            "messages_in": self.messages_in,
+            "messages_out": self.messages_out,
+            "total_tokens_in": self.tokens_in,
+            "total_tokens_out": self.tokens_out,
+            "avg_tokens_in_per_message": avg_in,
+            "avg_tokens_out_per_message": avg_out,
+        }
+
+    async def stats_command(self, update: Update, context: CallbackContext) -> None:
+        s = self.get_stats()
+        secs = s["uptime_seconds"]
+        h, m, sec = secs // 3600, (secs % 3600) // 60, secs % 60
+        lines = [
+            f"uptime: {h:02d}:{m:02d}:{sec:02d}",
+            f"messages in: {s['messages_in']}",
+            f"messages out: {s['messages_out']}",
+            f"tokens in: {s['total_tokens_in']} (avg {s['avg_tokens_in_per_message']})",
+            f"tokens out: {s['total_tokens_out']} (avg {s['avg_tokens_out_per_message']})",
+        ]
+        await update.message.reply_text("\n".join(lines))
