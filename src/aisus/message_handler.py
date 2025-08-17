@@ -4,7 +4,7 @@ import base64
 import logging
 from typing import Tuple, Optional, Dict, Any
 import requests
-from telegram import Update
+from telegram import Update, Bot
 from telegram.ext import CallbackContext
 from src.aisus.message_wrapper import MessageWrapper
 from src.aisus.config_parser import ConfigReader
@@ -26,12 +26,14 @@ class CustomMessageHandler:
 
     async def handle_message(self, update: Update, context: CallbackContext) -> None:
         chat_id: int = update.effective_chat.id
-        message_text: str = update.message.text if update.message and update.message.text else ""
+        bot_username: str = (await context.bot.get_me()).username
+        raw_text: str = (update.message.text or update.message.caption or "")
+        message_text_for_auth: str = raw_text.replace(f"@{bot_username}", "").strip()
         if not await self._should_process_message(context.bot, MessageWrapper(update)):
             return
         if not self.authenticated_users.get(chat_id):
-            if message_text == self.config.get_system_messages().get(
-                    "password") or self.config.get_system_messages().get("password") == "":
+            password: str = self.config.get_system_messages().get("password", "")
+            if message_text_for_auth == password or password == "":
                 self.authenticated_users[chat_id] = True
                 await update.message.reply_text("Автентифікація успішна. Ви можете почати спілкування.")
             else:
@@ -48,13 +50,19 @@ class CustomMessageHandler:
                 logger.exception("failed to notify user: %s", notify_exc)
 
     @staticmethod
-    async def _should_process_message(bot: Any, message: MessageWrapper) -> bool:
+    async def _should_process_message(bot: Bot, message: MessageWrapper) -> bool:
         bot_username: str = (await bot.get_me()).username
-        return (
-                message.chat_type == "private" or
-                (message.text and f"@{bot_username}" in message.text) or
-                (message.reply_to_message and message.reply_to_message_from_user_username == bot_username)
+        is_private_chat: bool = getattr(message, "chat_type", None) == "private"
+        text_attr: Any = getattr(message, "text", None)
+        caption_attr: Any = getattr(message, "caption", None)
+        text_content: str = text_attr if isinstance(text_attr, str) else ""
+        caption_text: str = caption_attr if isinstance(caption_attr, str) else ""
+        has_mention: bool = (f"@{bot_username}" in text_content) or (f"@{bot_username}" in caption_text)
+        is_reply_to_bot: bool = bool(
+            getattr(message, "reply_to_message", None)
+            and getattr(message, "reply_to_message_from_user_username", None) == bot_username
         )
+        return is_private_chat or has_mention or is_reply_to_bot
 
     async def _handle_user_message(self, message: MessageWrapper) -> None:
         user_message, is_voice, is_image = await self._process_message_content(message)

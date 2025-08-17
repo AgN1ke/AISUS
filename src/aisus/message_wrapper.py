@@ -22,6 +22,10 @@ class MessageWrapper:
         return self.message.text
 
     @property
+    def caption(self) -> Optional[str]:
+        return self.message.caption
+
+    @property
     def voice(self):
         return self.message.voice
 

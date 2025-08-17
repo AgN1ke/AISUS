@@ -8,6 +8,9 @@ from types import SimpleNamespace
 from typing import Any, Optional
 from unittest.mock import Mock, AsyncMock, patch
 
+from telegram import Update
+from telegram.ext import CallbackContext
+
 from src.aisus.chat_history_manager import ChatHistoryManager
 from src.aisus.config_parser import ConfigReader
 from src.aisus.message_handler import CustomMessageHandler
@@ -175,62 +178,141 @@ class TestMessageHandler(unittest.TestCase):
 
         self.assertTrue(os.path.isdir(self.audio_dir))
 
+    def test_image_dir_falls_back_to_audio_dir(self) -> None:
+        created_path: Optional[str] = None
 
-def test_image_dir_falls_back_to_audio_dir(self) -> None:
-    created_path: Optional[str] = None
+        async def download_image(download_dir: str) -> str:
+            nonlocal created_path
+            os.makedirs(download_dir, exist_ok=True)
+            created_path = os.path.join(download_dir, "fallback.jpg")
+            with open(created_path, "wb") as f:
+                f.write(b"\xff\xd8\xff")
+            return created_path
 
-    async def download_image(download_dir: str) -> str:
-        nonlocal created_path
-        os.makedirs(download_dir, exist_ok=True)
-        created_path = os.path.join(download_dir, "fallback.jpg")
-        with open(created_path, "wb") as f:
-            f.write(b"\xff\xd8\xff")
-        return created_path
+        with patch.dict(os.environ, {"FILE_PATHS_IMAGE_FOLDER": ""}, clear=False):
+            cfg_fallback: ConfigReader = ConfigReader()
+            handler_fallback: CustomMessageHandler = CustomMessageHandler(
+                config=cfg_fallback,
+                voice_processor=self.voice,
+                chat_history_manager=self.history,
+                openai_wrapper=self.openai
+            )
 
-    with patch.dict(os.environ, {"FILE_PATHS_IMAGE_FOLDER": ""}, clear=False):
-        cfg_fallback: ConfigReader = ConfigReader()
-        handler_fallback: CustomMessageHandler = CustomMessageHandler(
-            config=cfg_fallback,
-            voice_processor=self.voice,
-            chat_history_manager=self.history,
-            openai_wrapper=self.openai
-        )
+        handler_fallback._analyze_image_with_openai = AsyncMock(return_value="ok")
 
-    handler_fallback._analyze_image_with_openai = AsyncMock(return_value="ok")
+        msg: Mock = Mock()
+        msg.voice = None
+        msg.photo = [object()]
+        msg.text = None
+        msg.download_image = AsyncMock(side_effect=download_image)
+        msg.message = SimpleNamespace(caption=None)
 
-    msg: Mock = Mock()
-    msg.voice = None
-    msg.photo = [object()]
-    msg.text = None
-    msg.download_image = AsyncMock(side_effect=download_image)
-    msg.message = SimpleNamespace(caption=None)
+        result_text, is_voice, is_image = asyncio.run(handler_fallback._process_message_content(msg))
 
-    result_text, is_voice, is_image = asyncio.run(handler_fallback._process_message_content(msg))
+        self.assertIsInstance(result_text, str)
+        self.assertFalse(is_voice)
+        self.assertTrue(is_image)
+        self.assertIsNotNone(created_path)
+        self.assertTrue(created_path.startswith(self.audio_dir))
+        self.assertFalse(os.path.exists(created_path))
 
-    self.assertIsInstance(result_text, str)
-    self.assertFalse(is_voice)
-    self.assertTrue(is_image)
-    self.assertIsNotNone(created_path)
-    self.assertTrue(created_path.startswith(self.audio_dir))
-    self.assertFalse(os.path.exists(created_path))
+    def test_tts_cleanup_oserror_logged(self) -> None:
+        import logging
+        tts_path: str = os.path.join(self.audio_dir, "tts.ogg")
+        os.makedirs(self.audio_dir, exist_ok=True)
+        with open(tts_path, "wb") as f:
+            f.write(b"ogg")
 
+        self.voice.generate_voice_response_and_save_file = Mock(return_value=tts_path)
 
-def test_tts_cleanup_oserror_logged(self) -> None:
-    import logging
-    tts_path: str = os.path.join(self.audio_dir, "tts.ogg")
-    os.makedirs(self.audio_dir, exist_ok=True)
-    with open(tts_path, "wb") as f:
-        f.write(b"ogg")
+        msg: Mock = Mock()
+        msg.reply_voice = AsyncMock()
+        msg.reply_text = AsyncMock()
 
-    self.voice.generate_voice_response_and_save_file = Mock(return_value=tts_path)
+        with patch("src.aisus.message_handler.os.remove", side_effect=OSError("boom")), \
+                self.assertLogs("src.aisus.message_handler", level="ERROR") as captured:
+            asyncio.run(self.handler._send_response(msg, "hello", is_voice=True))
 
-    msg: Mock = Mock()
-    msg.reply_voice = AsyncMock()
-    msg.reply_text = AsyncMock()
+        msg.reply_voice.assert_awaited_once_with(tts_path)
+        self.assertTrue(any("failed to remove temp tts file" in rec for rec in captured.output))
 
-    with patch("src.aisus.message_handler.os.remove", side_effect=OSError("boom")), \
-            self.assertLogs("src.aisus.message_handler", level="ERROR") as captured:
-        asyncio.run(self.handler._send_response(msg, "hello", is_voice=True))
+    def test_auth_with_text_mention_in_group(self) -> None:
+        with patch.dict(os.environ, {"PASSWORD": "secret"}, clear=False):
+            cfg: ConfigReader = ConfigReader()
+            handler: CustomMessageHandler = CustomMessageHandler(cfg, self.voice, self.history, self.openai)
 
-    msg.reply_voice.assert_awaited_once_with(tts_path)
-    self.assertTrue(any("failed to remove temp tts file" in rec for rec in captured.output))
+        update = Mock(spec=Update)
+        update.effective_chat = SimpleNamespace(id=1001)
+        update.message = Mock()
+        update.message.text = "@testbot secret"
+        update.message.caption = None
+        update.message.chat = SimpleNamespace(type="group")
+        update.message.reply_to_message = None
+        update.message.reply_text = AsyncMock()
+
+        context = Mock(spec=CallbackContext)
+        context.bot = self.bot
+
+        asyncio.run(handler.handle_message(update, context))
+
+        self.assertTrue(handler.authenticated_users.get(1001))
+        update.message.reply_text.assert_awaited()
+
+    def test_auth_with_text_reply_in_group(self) -> None:
+        with patch.dict(os.environ, {"PASSWORD": "secret"}, clear=False):
+            cfg: ConfigReader = ConfigReader()
+            handler: CustomMessageHandler = CustomMessageHandler(cfg, self.voice, self.history, self.openai)
+        update = Mock(spec=Update)
+        update.effective_chat = SimpleNamespace(id=1002)
+        update.message = Mock()
+        update.message.text = "secret"
+        update.message.caption = None
+        update.message.chat = SimpleNamespace(type="group")
+        update.message.reply_to_message = SimpleNamespace(from_user=SimpleNamespace(username="testbot"))
+        update.message.reply_text = AsyncMock()
+
+        context = Mock(spec=CallbackContext)
+        context.bot = self.bot
+        asyncio.run(handler.handle_message(update, context))
+        self.assertTrue(handler.authenticated_users.get(1002))
+        update.message.reply_text.assert_awaited()
+
+    def test_auth_with_image_caption_mention_in_group(self) -> None:
+        with patch.dict(os.environ, {"PASSWORD": "secret"}, clear=False):
+            cfg: ConfigReader = ConfigReader()
+            handler: CustomMessageHandler = CustomMessageHandler(cfg, self.voice, self.history, self.openai)
+        update = Mock(spec=Update)
+        update.effective_chat = SimpleNamespace(id=1003)
+        update.message = Mock()
+        update.message.text = None
+        update.message.caption = "@testbot secret"
+        update.message.chat = SimpleNamespace(type="group")
+        update.message.reply_to_message = None
+        update.message.reply_text = AsyncMock()
+        update.message.photo = [object()]
+
+        context = Mock(spec=CallbackContext)
+        context.bot = self.bot
+        asyncio.run(handler.handle_message(update, context))
+        self.assertTrue(handler.authenticated_users.get(1003))
+        update.message.reply_text.assert_awaited()
+
+    def test_auth_with_image_caption_reply_in_group(self) -> None:
+        with patch.dict(os.environ, {"PASSWORD": "secret"}, clear=False):
+            cfg: ConfigReader = ConfigReader()
+            handler: CustomMessageHandler = CustomMessageHandler(cfg, self.voice, self.history, self.openai)
+        update = Mock(spec=Update)
+        update.effective_chat = SimpleNamespace(id=1004)
+        update.message = Mock()
+        update.message.text = None
+        update.message.caption = "secret"
+        update.message.chat = SimpleNamespace(type="group")
+        update.message.reply_to_message = SimpleNamespace(from_user=SimpleNamespace(username="testbot"))
+        update.message.reply_text = AsyncMock()
+        update.message.photo = [object()]
+
+        context = Mock(spec=CallbackContext)
+        context.bot = self.bot
+        asyncio.run(handler.handle_message(update, context))
+        self.assertTrue(handler.authenticated_users.get(1004))
+        update.message.reply_text.assert_awaited()

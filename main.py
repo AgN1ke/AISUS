@@ -1,4 +1,4 @@
-#main.py
+# main.py
 
 from telegram.ext import ApplicationBuilder, MessageHandler, filters
 
@@ -25,8 +25,10 @@ if __name__ == "__main__":
         message_handler.handle_message
     )
 
-    mentioned_message_handler = MessageHandler(
-        (filters.TEXT | filters.VOICE | filters.PHOTO) & filters.ChatType.GROUPS & filters.Entity("mention"),
+    mentioned_message_handler: MessageHandler = MessageHandler(
+        (filters.TEXT | filters.VOICE | filters.PHOTO)
+        & filters.ChatType.GROUPS
+        & (filters.Entity("mention") | filters.CaptionEntity("mention")),
         message_handler.handle_message
     )
 
