@@ -24,6 +24,8 @@ class ConfigReader:
 
         self.api_key: Optional[str] = os.getenv("OPENAI_API_KEY")
         self.gpt_model: Optional[str] = os.getenv("OPENAI_GPT_MODEL")
+        self.api_mode: str = os.getenv("OPENAI_API_MODE", "responses")
+        self.reasoning_effort: Optional[str] = os.getenv("OPENAI_REASONING_EFFORT")
         self.whisper_model: Optional[str] = os.getenv("OPENAI_WHISPER_MODEL")
         self.tts_model: Optional[str] = os.getenv("OPENAI_TTS_MODEL")
         self.vocalizer_voice: Optional[str] = os.getenv("OPENAI_VOCALIZER_VOICE")
@@ -53,6 +55,8 @@ class ConfigReader:
             "whisper_model": self.whisper_model,
             "tts_model": self.tts_model,
             "vocalizer_voice": self.vocalizer_voice,
+            "api_mode": self.api_mode,
+            "reasoning_effort": self.reasoning_effort,
         }
 
     def get_api_settings(self) -> Dict[str, Optional[str]]:

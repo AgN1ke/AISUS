@@ -167,12 +167,12 @@ class CustomMessageHandler:
 
     def _generate_bot_response(self, chat_id: int) -> str:
         response_tokens_limit: int = self.config.get_file_paths_and_limits()["max_tokens"]
-        response = self.openai_wrapper.chat_completion(
+        response = self.openai_wrapper.generate(
             model=self.config.get_openai_settings()["gpt_model"],
             messages=self.chat_history_manager.get_history(chat_id),
-            max_tokens=response_tokens_limit
+            max_tokens=response_tokens_limit,
         )
-        bot_response: str = response.choices[0].message.content
+        bot_response: str = self.openai_wrapper.extract_text(response)
         return bot_response
 
     async def _send_response(self, message: MessageWrapper, bot_response: str, is_voice: bool) -> None:

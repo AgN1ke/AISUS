@@ -69,7 +69,8 @@ class TestMessageHandler(unittest.TestCase):
         msg.reply_text = AsyncMock()
         msg.reply_voice = AsyncMock()
 
-        self.openai.chat_completion.return_value = Mock(choices=[Mock(message=Mock(content="Hi there!"))])
+        self.openai.generate.return_value = Mock()
+        self.openai.extract_text.return_value = "Hi there!"
 
         self.handler.authenticated_users[123] = True
         asyncio.run(self.handler._handle_user_message(msg))
