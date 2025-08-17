@@ -8,6 +8,9 @@ class ChatHistoryManager:
             self.chat_histories[chat_id] = []
         self.chat_histories[chat_id].append({"role": role, "content": content})
 
+    def clear_history(self, chat_id) -> None:
+        self.chat_histories.pop(chat_id, None)
+
     def add_user_message(self, chat_id, name, content):
         self._add_message(chat_id, 'user', f"{name}: {content}")
 

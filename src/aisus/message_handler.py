@@ -193,3 +193,8 @@ class CustomMessageHandler:
                     logger.exception("failed to remove temp tts file: %s", exc)
             return
         await message.reply_text(bot_response)
+
+    async def clear_history_command(self, update: Update, context: CallbackContext) -> None:
+        chat_id: int = update.effective_chat.id
+        self.chat_history_manager.clear_history(chat_id)
+        await update.message.reply_text("Історію чату очищено.")

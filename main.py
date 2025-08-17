@@ -1,6 +1,6 @@
 # main.py
 
-from telegram.ext import ApplicationBuilder, MessageHandler, filters
+from telegram.ext import ApplicationBuilder, MessageHandler, filters, CommandHandler
 
 from src.aisus.chat_history_manager import ChatHistoryManager
 from src.aisus.config_parser import ConfigReader
@@ -22,23 +22,24 @@ if __name__ == "__main__":
 
     private_message_handler = MessageHandler(
         (filters.TEXT | filters.VOICE | filters.PHOTO) & filters.ChatType.PRIVATE,
-        message_handler.handle_message
-    )
+        message_handler.handle_message)
 
     mentioned_message_handler: MessageHandler = MessageHandler(
         (filters.TEXT | filters.VOICE | filters.PHOTO)
         & filters.ChatType.GROUPS
         & (filters.Entity("mention") | filters.CaptionEntity("mention")),
-        message_handler.handle_message
-    )
+        message_handler.handle_message)
 
-    reply_message_handler = MessageHandler(
+    reply_message_handler: MessageHandler = MessageHandler(
         (filters.TEXT | filters.VOICE | filters.PHOTO) & filters.ChatType.GROUPS & filters.REPLY,
-        message_handler.handle_message
-    )
+        message_handler.handle_message)
+
+    clear_history_handler: CommandHandler = CommandHandler(
+        "clear", message_handler.clear_history_command)
 
     app.add_handler(private_message_handler)
     app.add_handler(mentioned_message_handler)
     app.add_handler(reply_message_handler)
+    app.add_handler(clear_history_handler)
 
     app.run_polling()

@@ -131,6 +131,16 @@ class TestChatHistoryManager(unittest.TestCase):
         self.assertEqual(len(history_1), 4)
         self.assertEqual(history_1[1]['content'], voice_message_affix)
 
+    def test_clear_history(self):
+        chat_id = "test_chat_clear"
+        self.manager.add_user_message(chat_id, "dude", "Hello")
+        self.manager.add_bot_message(chat_id, "World")
+        self.assertGreater(len(self.manager.get_history(chat_id)), 0)
+
+        self.manager.clear_history(chat_id)
+        history = self.manager.get_history(chat_id)
+        self.assertEqual(history, [])
+
 
 if __name__ == "__main__":
     unittest.main()
