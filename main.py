@@ -37,9 +37,13 @@ if __name__ == "__main__":
     clear_history_handler: CommandHandler = CommandHandler(
         "clear", message_handler.clear_history_command)
 
+    resend_voice_handler: CommandHandler = CommandHandler(
+        "voice_last", message_handler.resend_last_as_voice_command)
+
     app.add_handler(private_message_handler)
     app.add_handler(mentioned_message_handler)
     app.add_handler(reply_message_handler)
     app.add_handler(clear_history_handler)
+    app.add_handler(resend_voice_handler)
 
     app.run_polling()

@@ -198,3 +198,35 @@ class CustomMessageHandler:
         chat_id: int = update.effective_chat.id
         self.chat_history_manager.clear_history(chat_id)
         await update.message.reply_text("Історію чату очищено.")
+
+    async def resend_last_as_voice_command(self, update: Update, context: CallbackContext) -> None:
+        chat_id: int = update.effective_chat.id
+        history = self.chat_history_manager.get_history(chat_id)
+
+        last_bot_text: Optional[str] = None
+        for entry in reversed(history):
+            role: str = str(entry.get("role", ""))
+            content: Any = entry.get("content", "")
+            if role == "assistant" and isinstance(content, str) and content.strip():
+                last_bot_text = content
+                break
+
+        if not last_bot_text:
+            await update.message.reply_text("Немає попереднього повідомлення бота для цього чату.")
+            return
+
+        audio_dir_opt: Optional[str] = self.config.get_file_paths_and_limits().get("audio_folder_path")
+        if audio_dir_opt:
+            os.makedirs(audio_dir_opt, exist_ok=True)
+
+        voice_file: str = self.voice_processor.generate_voice_response_and_save_file(
+            last_bot_text,
+            self.config.get_openai_settings()["vocalizer_voice"],
+            audio_dir_opt or ""
+        )
+        await update.message.reply_voice(voice_file)
+        if os.path.exists(voice_file):
+            try:
+                os.remove(voice_file)
+            except OSError as exc:
+                logger.exception("failed to remove temp tts file: %s", exc)

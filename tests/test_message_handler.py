@@ -316,3 +316,31 @@ class TestMessageHandler(unittest.TestCase):
         asyncio.run(handler.handle_message(update, context))
         self.assertTrue(handler.authenticated_users.get(1004))
         update.message.reply_text.assert_awaited()
+
+    def test_resend_last_as_voice_command_sends_last_bot_message_as_voice(self) -> None:
+        chat_id: int = 555
+        last_text: str = "Previous bot reply"
+        self.history.add_bot_message(chat_id, last_text)
+
+        os.makedirs(self.audio_dir, exist_ok=True)
+        tts_path: str = os.path.join(self.audio_dir, "last.ogg")
+
+        def generate(text: str, voice: Optional[str], audio_dir: str) -> str:
+            with open(tts_path, "wb") as f:
+                f.write(b"ogg")
+            return tts_path
+
+        self.voice.generate_voice_response_and_save_file = Mock(side_effect=generate)
+
+        update: Mock = Mock(spec=Update)
+        update.effective_chat = SimpleNamespace(id=chat_id)
+        update.message = Mock()
+        update.message.reply_voice = AsyncMock()
+        update.message.reply_text = AsyncMock()
+
+        context: Mock = Mock(spec=CallbackContext)
+
+        asyncio.run(self.handler.resend_last_as_voice_command(update, context))
+
+        update.message.reply_voice.assert_awaited_once_with(tts_path)
+        self.assertFalse(os.path.exists(tts_path))
