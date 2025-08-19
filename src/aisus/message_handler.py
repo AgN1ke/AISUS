@@ -285,3 +285,25 @@ class CustomMessageHandler:
             f"tokens out: {s['total_tokens_out']} (avg {s['avg_tokens_out_per_message']})",
         ]
         await update.message.reply_text("\n".join(lines))
+
+    async def audio_command(self, update: Update, context: CallbackContext) -> None:
+        text_to_speak = " ".join(getattr(context, "args", [])).strip()
+        if not text_to_speak:
+            await update.message.reply_text("Немає тексту для озвучення.")
+            return
+
+        audio_dir = self.config.get_file_paths_and_limits().get("audio_folder_path") or ""
+        if audio_dir:
+            os.makedirs(audio_dir, exist_ok=True)
+
+        voice_file = self.voice_processor.generate_voice_response_and_save_file(
+            text_to_speak,
+            self.config.get_openai_settings().get("vocalizer_voice"),
+            audio_dir,
+        )
+        await update.message.reply_voice(voice_file)
+        if os.path.exists(voice_file):
+            try:
+                os.remove(voice_file)
+            except OSError as exc:
+                logger.exception("failed to remove temp tts file: %s", exc)

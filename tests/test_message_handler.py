@@ -345,3 +345,41 @@ class TestMessageHandler(unittest.TestCase):
 
         update.message.reply_voice.assert_awaited_once_with(tts_path)
         self.assertFalse(os.path.exists(tts_path))
+
+    def test_audio_command_with_text(self) -> None:
+        os.makedirs(self.audio_dir, exist_ok=True)
+        tts_path = os.path.join(self.audio_dir, "audio.ogg")
+
+        def gen(text: str, voice: Optional[str], audio_dir: str) -> str:
+            with open(tts_path, "wb") as f:
+                f.write(b"ogg")
+            return tts_path
+
+        self.voice.generate_voice_response_and_save_file = Mock(side_effect=gen)
+
+        update = Mock()
+        update.message = Mock()
+        update.message.reply_voice = AsyncMock()
+        update.message.reply_text = AsyncMock()
+
+        context = Mock(spec=CallbackContext)
+        context.args = ["Test", "1", "2", "3"]
+
+        asyncio.run(self.handler.audio_command(update, context))
+
+        update.message.reply_voice.assert_awaited_once_with(tts_path)
+        self.assertFalse(os.path.exists(tts_path))
+
+    def test_audio_command_without_text(self) -> None:
+        update = Mock()
+        update.message = Mock()
+        update.message.reply_voice = AsyncMock()
+        update.message.reply_text = AsyncMock()
+
+        context = Mock(spec=CallbackContext)
+        context.args = []
+
+        asyncio.run(self.handler.audio_command(update, context))
+
+        update.message.reply_text.assert_awaited_once()
+        update.message.reply_voice.assert_not_awaited()

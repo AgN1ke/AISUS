@@ -42,11 +42,14 @@ if __name__ == "__main__":
 
     stats_handler: CommandHandler = CommandHandler(["stats", "s"], message_handler.stats_command)
 
+    audio_handler: CommandHandler = CommandHandler(["audio", "a"], message_handler.audio_command)
+
     app.add_handler(private_message_handler)
     app.add_handler(mentioned_message_handler)
     app.add_handler(reply_message_handler)
     app.add_handler(clear_history_handler)
     app.add_handler(resend_voice_handler)
     app.add_handler(stats_handler)
+    app.add_handler(audio_handler)
 
     app.run_polling()
