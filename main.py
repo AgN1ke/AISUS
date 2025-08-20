@@ -21,7 +21,7 @@ if __name__ == "__main__":
     app = ApplicationBuilder().token(config.get_api_settings()['bot_token']).build()
 
     private_message_handler = MessageHandler(
-        (filters.TEXT | filters.VOICE | filters.PHOTO) & filters.ChatType.PRIVATE,
+        ((filters.TEXT | filters.VOICE | filters.PHOTO) & filters.ChatType.PRIVATE) & ~filters.COMMAND,
         message_handler.handle_message)
 
     mentioned_message_handler: MessageHandler = MessageHandler(
