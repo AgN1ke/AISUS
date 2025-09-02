@@ -6,7 +6,7 @@ import tempfile
 import shutil
 from types import SimpleNamespace
 from typing import Any, Optional
-from unittest.mock import Mock, AsyncMock, patch
+from unittest.mock import Mock, AsyncMock, patch, call
 
 from telegram import Update
 from telegram.ext import CallbackContext
@@ -21,6 +21,7 @@ class TestMessageHandler(unittest.TestCase):
         self.tmp_root: str = tempfile.mkdtemp(prefix="aisus-tests-")
         self.audio_dir: str = os.path.join(self.tmp_root, "audio")
         self.image_dir: str = os.path.join(self.tmp_root, "images")
+        self.files_dir: str = os.path.join(self.tmp_root, "files")
         self.env_patch: Any = patch.dict(os.environ, {
             "SYSTEM_MESSAGES_GPT_PROMPT": "Welcome",
             "SYSTEM_MESSAGES_VOICE_MESSAGE_AFFIX": "Voice:",
@@ -30,6 +31,7 @@ class TestMessageHandler(unittest.TestCase):
             "PASSWORD": "",
             "FILE_PATHS_AUDIO_FOLDER": self.audio_dir,
             "FILE_PATHS_IMAGE_FOLDER": self.image_dir,
+            "FILE_PATHS_FILES_FOLDER": self.files_dir,
         }, clear=False)
         self.env_patch.start()
         self.config: ConfigReader = ConfigReader()
@@ -57,7 +59,7 @@ class TestMessageHandler(unittest.TestCase):
         coro = self.handler._should_process_message(self.bot, msg)
         self.assertTrue(asyncio.run(coro))
 
-    def test_mock_text_dialog(self) -> None:
+    def test_mock_text_dialog_uses_generate(self) -> None:
         msg: Mock = Mock()
         msg.voice = None
         msg.photo = None
@@ -74,6 +76,10 @@ class TestMessageHandler(unittest.TestCase):
 
         self.handler.authenticated_users[123] = True
         asyncio.run(self.handler._handle_user_message(msg))
+
+        self.openai.generate.assert_called()
+        _, kwargs = self.openai.generate.call_args
+        assert kwargs.get("chat_id") == 123
 
         history = self.history.get_history(msg.chat_id)
         self.assertEqual(len(history), 3)
@@ -136,6 +142,36 @@ class TestMessageHandler(unittest.TestCase):
         self.assertIsNotNone(created_path)
         self.assertTrue(created_path.startswith(self.image_dir))
         self.assertFalse(os.path.exists(created_path))
+
+    def test_document_upload_and_cleanup(self) -> None:
+        created_path: Optional[str] = None
+
+        async def download_document(download_dir: str) -> str:
+            nonlocal created_path
+            os.makedirs(download_dir, exist_ok=True)
+            created_path = os.path.join(download_dir, "doc.txt")
+            with open(created_path, "wb") as f:
+                f.write(b"hello")
+            return created_path
+
+        self.openai.upload_file_to_chat = Mock(return_value=("file_1", "vs_1"))
+
+        msg: Mock = Mock()
+        msg.voice = None
+        msg.photo = None
+        msg.text = None
+        msg.document = True
+        msg.chat_id = 777
+        msg.download_document = AsyncMock(side_effect=download_document)
+        msg.message = SimpleNamespace(caption=None)
+
+        result_text, is_voice, is_image = asyncio.run(self.handler._process_message_content(msg))
+
+        self.assertIn("Файл додано:", result_text)
+        self.openai.upload_file_to_chat.assert_called_once_with(777, created_path)
+        self.assertFalse(os.path.exists(created_path))
+        self.assertFalse(is_voice)
+        self.assertFalse(is_image)
 
     def test_tts_response_cleanup(self) -> None:
         os.makedirs(self.audio_dir, exist_ok=True)
@@ -383,3 +419,69 @@ class TestMessageHandler(unittest.TestCase):
 
         update.message.reply_text.assert_awaited_once()
         update.message.reply_voice.assert_not_awaited()
+
+    def test_showfiles_no_store(self) -> None:
+        update = Mock(spec=Update)
+        update.effective_chat = SimpleNamespace(id=42)
+        update.message = Mock()
+        update.message.reply_text = AsyncMock()
+        self.openai.chat_vector_stores = {}
+
+        context = Mock(spec=CallbackContext)
+
+        asyncio.run(self.handler.show_files_command(update, context))
+
+        update.message.reply_text.assert_awaited_once()
+
+    def test_showfiles_with_files(self) -> None:
+        update = Mock(spec=Update)
+        update.effective_chat = SimpleNamespace(id=43)
+        update.message = Mock()
+        update.message.reply_text = AsyncMock()
+
+        self.openai.chat_vector_stores = {43: "vs_43"}
+        self.openai.list_files_in_chat = Mock(return_value=[
+            {"id": "f1", "filename": "a.txt"},
+            {"id": "f2", "filename": "b.pdf"},
+        ])
+
+        context = Mock(spec=CallbackContext)
+        asyncio.run(self.handler.show_files_command(update, context))
+
+        self.openai.list_files_in_chat.assert_called_once_with(43)
+        args, kwargs = update.message.reply_text.await_args
+        self.assertIn("a.txt", args[0])
+        self.assertIn("b.pdf", args[0])
+
+    def test_removefile_success_and_arg_required(self) -> None:
+        update = Mock(spec=Update)
+        update.effective_chat = SimpleNamespace(id=44)
+        update.message = Mock()
+        update.message.reply_text = AsyncMock()
+        context = Mock(spec=CallbackContext)
+
+        context.args = []
+        asyncio.run(self.handler.remove_file_command(update, context))
+        update.message.reply_text.assert_awaited()
+        update.message.reply_text.reset_mock()
+
+        context.args = ["f123"]
+        self.openai.remove_file_from_chat = Mock(return_value=True)
+        asyncio.run(self.handler.remove_file_command(update, context))
+        self.openai.remove_file_from_chat.assert_called_once_with(44, "f123")
+        args, kwargs = update.message.reply_text.await_args
+        self.assertIn("видалено", args[0])
+
+    def test_clearfiles_success(self) -> None:
+        update = Mock(spec=Update)
+        update.effective_chat = SimpleNamespace(id=45)
+        update.message = Mock()
+        update.message.reply_text = AsyncMock()
+        context = Mock(spec=CallbackContext)
+
+        self.openai.clear_files_in_chat = Mock(return_value=True)
+        asyncio.run(self.handler.clear_files_command(update, context))
+
+        self.openai.clear_files_in_chat.assert_called_once_with(45)
+        args, kwargs = update.message.reply_text.await_args
+        self.assertIn("очищено", args[0])

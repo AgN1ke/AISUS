@@ -12,6 +12,7 @@ from src.aisus.voice_processor import VoiceProcessor
 from src.aisus.chat_history_manager import ChatHistoryManager
 from src.aisus.openai_wrapper import OpenAIWrapper
 import time
+import inspect
 
 logger: logging.Logger = logging.getLogger(__name__)
 
@@ -58,18 +59,18 @@ class CustomMessageHandler:
 
     @staticmethod
     async def _should_process_message(bot: Bot, message: MessageWrapper) -> bool:
-        bot_username: str = (await bot.get_me()).username
-        is_private_chat: bool = getattr(message, "chat_type", None) == "private"
-        text_attr: Any = getattr(message, "text", None)
-        caption_attr: Any = getattr(message, "caption", None)
-        text_content: str = text_attr if isinstance(text_attr, str) else ""
-        caption_text: str = caption_attr if isinstance(caption_attr, str) else ""
-        has_mention: bool = (f"@{bot_username}" in text_content) or (f"@{bot_username}" in caption_text)
-        is_reply_to_bot: bool = bool(
+        is_private = getattr(message, "chat_type", None) == "private"
+        if getattr(message, "document", None):  # always handle file uploads
+            return True
+        text = getattr(message, "text", "") or ""
+        caption = getattr(message, "caption", "") or ""
+        bot_username = (await bot.get_me()).username
+        has_mention = (f"@{bot_username}" in text) or (f"@{bot_username}" in caption)
+        is_reply_to_bot = bool(
             getattr(message, "reply_to_message", None)
             and getattr(message, "reply_to_message_from_user_username", None) == bot_username
         )
-        return is_private_chat or has_mention or is_reply_to_bot
+        return is_private or has_mention or is_reply_to_bot
 
     async def _handle_user_message(self, message: MessageWrapper) -> None:
         user_message, is_voice, is_image = await self._process_message_content(message)
@@ -97,6 +98,8 @@ class CustomMessageHandler:
         paths_and_limits: Dict[str, Any] = self.config.get_file_paths_and_limits()
         audio_dir: Optional[str] = paths_and_limits.get("audio_folder_path")
         image_dir: Optional[str] = paths_and_limits.get("image_folder_path") or audio_dir
+        files_dir: Optional[str] = paths_and_limits.get("files_folder_path") or audio_dir
+
         if message.voice:
             if not audio_dir:
                 return None, False, False
@@ -111,6 +114,7 @@ class CustomMessageHandler:
                         os.remove(voice_message_path)
                     except OSError as exc:
                         logger.exception("failed to remove temp voice file: %s", exc)
+
         if message.photo:
             if not image_dir:
                 return None, False, False
@@ -131,6 +135,24 @@ class CustomMessageHandler:
                         os.remove(image_path)
                     except OSError as exc:
                         logger.exception("failed to remove temp image file: %s", exc)
+
+        if getattr(message, "document", None) and inspect.iscoroutinefunction(getattr(message, "download_document", None)):
+            if not files_dir:
+                return None, False, False
+            file_path: Optional[str] = None
+            try:
+                file_path = await message.download_document(files_dir)
+                chat_id = message.chat_id
+                self.openai_wrapper.upload_file_to_chat(chat_id, file_path)
+                file_name = os.path.basename(file_path)
+                return f"Файл додано: {file_name}. Тепер можу посилатись на нього у відповідях.", False, False
+            finally:
+                if file_path and os.path.exists(file_path):
+                    try:
+                        os.remove(file_path)
+                    except OSError as exc:
+                        logger.exception("failed to remove temp doc file: %s", exc)
+
         return message.text, False, False
 
     async def _analyze_image_with_openai(self, image_path: str) -> str:
@@ -180,6 +202,7 @@ class CustomMessageHandler:
             model=self.config.get_openai_settings()["gpt_model"],
             messages=self.chat_history_manager.get_history(chat_id),
             max_tokens=response_tokens_limit,
+            chat_id=chat_id,
         )
 
         ti = to = 0
@@ -260,7 +283,7 @@ class CustomMessageHandler:
                 logger.exception("failed to remove temp tts file: %s", exc)
 
     def get_stats(self) -> Dict[str, Any]:
-        total_messages = max(1, self.messages_out)  # avoid div/0
+        total_messages = max(1, self.messages_out)
         avg_in = self.tokens_in // total_messages
         avg_out = self.tokens_out // total_messages
         return {
@@ -307,3 +330,53 @@ class CustomMessageHandler:
                 os.remove(voice_file)
             except OSError as exc:
                 logger.exception("failed to remove temp tts file: %s", exc)
+
+    async def show_files_command(self, update: Update, context: CallbackContext) -> None:
+        chat_id = update.effective_chat.id
+        vs_id = self.openai_wrapper.chat_vector_stores.get(chat_id)
+        if not vs_id:
+            await update.message.reply_text("Немає завантажених файлів у цьому чаті.")
+            return
+        files = self.openai_wrapper.list_files_in_chat(chat_id)
+        if not files:
+            await update.message.reply_text("Немає завантажених файлів у цьому чаті.")
+            return
+        lines = [f"{f['id']} – {f['filename']}" for f in files]
+        await update.message.reply_text("Файли:\n" + "\n".join(lines))
+
+    async def remove_file_command(self, update: Update, context: CallbackContext) -> None:
+        chat_id = update.effective_chat.id
+        if not context.args:
+            await update.message.reply_text("Вкажіть file_id після команди.")
+            return
+        file_id = context.args[0].strip()
+        ok = self.openai_wrapper.remove_file_from_chat(chat_id, file_id)
+        if ok:
+            await update.message.reply_text(f"Файл {file_id} видалено.")
+        else:
+            await update.message.reply_text(f"Не вдалося видалити {file_id}.")
+
+    async def clear_files_command(self, update: Update, context: CallbackContext) -> None:
+        chat_id = update.effective_chat.id
+        ok = self.openai_wrapper.clear_files_in_chat(chat_id)
+        if ok:
+            await update.message.reply_text("Усі файли очищено для цього чату.")
+        else:
+            await update.message.reply_text("Не вдалося очистити файли.")
+
+    async def filesearch_debug_command(self, update, context):
+        chat_id = update.effective_chat.id
+        query = " ".join(getattr(context, "args", [])).strip() or "List the sources you will use."
+        response = self.openai_wrapper.generate(
+            model=self.config.get_openai_settings()["gpt_model"],
+            messages=[{"role": "user", "content": query}],
+            max_tokens=300,
+            chat_id=chat_id,
+            extra_overrides={
+                "tools": [{"type": "file_search"}],
+                "tool_choice": "file_search",
+                "citations": {"enabled": True},
+            },
+        )
+        text = self.openai_wrapper.extract_text(response) or "(no text)"
+        await update.message.reply_text(text)

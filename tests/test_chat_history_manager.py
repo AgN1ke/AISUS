@@ -140,7 +140,3 @@ class TestChatHistoryManager(unittest.TestCase):
         self.manager.clear_history(chat_id)
         history = self.manager.get_history(chat_id)
         self.assertEqual(history, [])
-
-
-if __name__ == "__main__":
-    unittest.main()

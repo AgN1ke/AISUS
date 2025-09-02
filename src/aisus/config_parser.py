@@ -14,12 +14,9 @@ class ConfigReader:
     def __init__(self) -> None:
         self.gpt_prompt: str = _format_message(os.getenv("SYSTEM_MESSAGES_GPT_PROMPT"))
         self.voice_message_affix: str = _format_message(os.getenv("SYSTEM_MESSAGES_VOICE_MESSAGE_AFFIX"))
-        self.image_message_affix: str = _format_message(
-            os.getenv("SYSTEM_MESSAGES_IMAGE_MESSAGE_AFFIX", "Ти отримав зображення."))
-        self.image_caption_affix: str = _format_message(
-            os.getenv("SYSTEM_MESSAGES_IMAGE_CAPTION_AFFIX", "Під ним такий підпис відправника:"))
-        self.image_sence_affix: str = _format_message(
-            os.getenv("SYSTEM_MESSAGES_IMAGE_SENCE_AFFIX", "На картинці зображено:"))
+        self.image_message_affix: str = _format_message(os.getenv("SYSTEM_MESSAGES_IMAGE_MESSAGE_AFFIX", "Ти отримав зображення."))
+        self.image_caption_affix: str = _format_message(os.getenv("SYSTEM_MESSAGES_IMAGE_CAPTION_AFFIX", "Під ним такий підпис відправника:"))
+        self.image_sence_affix: str = _format_message(os.getenv("SYSTEM_MESSAGES_IMAGE_SENCE_AFFIX", "На картинці зображено:"))
         self.password: str = _format_message(os.getenv("PASSWORD"))
 
         self.api_key: Optional[str] = os.getenv("OPENAI_API_KEY")
@@ -34,6 +31,7 @@ class ConfigReader:
 
         self.audio_folder_path: Optional[str] = os.getenv("FILE_PATHS_AUDIO_FOLDER")
         self.image_folder_path: Optional[str] = os.getenv("FILE_PATHS_IMAGE_FOLDER")
+        self.files_folder_path: Optional[str] = os.getenv("FILE_PATHS_FILES_FOLDER")
 
         self.max_tokens: int = int(os.getenv("LIMITS_MAX_TOKENS", "3000"))
         self.max_history_length: int = int(os.getenv("LIMITS_MAX_HISTORY_LENGTH", "124000"))
@@ -68,6 +66,7 @@ class ConfigReader:
         return {
             "audio_folder_path": self.audio_folder_path,
             "image_folder_path": self.image_folder_path,
+            "files_folder_path": self.files_folder_path,
             "max_tokens": self.max_tokens,
             "max_history_length": self.max_history_length,
         }

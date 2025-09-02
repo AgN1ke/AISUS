@@ -22,6 +22,7 @@ class TestConfigParser(unittest.TestCase):
             "MYAPI_BOT_TOKEN": "token",
             "FILE_PATHS_AUDIO_FOLDER": "/tmp/a",
             "FILE_PATHS_IMAGE_FOLDER": "/tmp/i",
+            "FILE_PATHS_FILES_FOLDER": "/tmp/f",
             "LIMITS_MAX_TOKENS": "4096",
             "LIMITS_MAX_HISTORY_LENGTH": "200000",
         }, clear=False)
@@ -48,6 +49,7 @@ class TestConfigParser(unittest.TestCase):
         paths = cfg.get_file_paths_and_limits()
         self.assertEqual(paths["audio_folder_path"], "/tmp/a")
         self.assertEqual(paths["image_folder_path"], "/tmp/i")
+        self.assertEqual(paths["files_folder_path"], "/tmp/f")
         self.assertEqual(paths["max_tokens"], 4096)
         self.assertEqual(paths["max_history_length"], 200000)
         env_patch.stop()
@@ -68,6 +70,7 @@ class TestConfigParser(unittest.TestCase):
 
         paths = cfg.get_file_paths_and_limits()
         self.assertIsNone(paths["image_folder_path"])
+        self.assertIsNone(paths["files_folder_path"])
         self.assertEqual(paths["max_tokens"], 3000)
         self.assertEqual(paths["max_history_length"], 124000)
         env_patch.stop()
