@@ -86,53 +86,59 @@ class OpenAIWrapper:
                 for v in d.values():
                     yield from self._walk_nodes(v, depth + 1)
 
-    def _used_file_search(self, resp) -> bool:
-        for it in self._walk_nodes(resp):
-            name = getattr(it, "tool_name", None)
-            if name == "file_search":
-                return True
-            tool = getattr(it, "tool", None)
-            if getattr(tool, "name", None) == "file_search":
-                return True
-            if isinstance(it, dict):
-                if it.get("tool_name") == "file_search":
+    def used_file_search(self, resp) -> bool:
+        ni = getattr(resp, "new_items", None)
+        if ni and hasattr(ni, "__iter__"):
+            for it in ni:
+                raw = getattr(it, "raw_item", None)
+                if getattr(raw, "type", None) == "file_search_call":
                     return True
-                tool = it.get("tool") or {}
-                if isinstance(tool, dict) and tool.get("name") == "file_search":
-                    return True
+
+        rr = getattr(resp, "raw_responses", None)
+        if rr and hasattr(rr, "__iter__"):
+            try:
+                out = rr[0].output
+                if out and hasattr(out, "__iter__"):
+                    for part in out:
+                        if getattr(part, "type", None) == "file_search_call":
+                            return True
+            except Exception:
+                pass
+
         return False
 
     def extract_text(self, response):
         if hasattr(response, "final_output"):
-            text = "" if getattr(response, "final_output") is None else str(response.final_output)
-            return ("[FS] " + text) if self._used_file_search(response) else text
+            return "" if getattr(response, "final_output") is None else str(response.final_output)
         return getattr(response, "output_text", None) or response.choices[0].message.content
 
     @staticmethod
     def extract_usage(response):
+        def to_int(x):
+            try:
+                return int(x)
+            except Exception:
+                return 0
+
+        cw = getattr(response, "context_wrapper", None)
+        u = getattr(cw, "usage", None) if cw else None
+        if u:
+            return to_int(getattr(u, "input_tokens", 0)), to_int(getattr(u, "output_tokens", 0))
+
+        rr = getattr(response, "raw_responses", None)
+        if rr and hasattr(rr, "__iter__"):
+            ti = sum(to_int(getattr(getattr(r, "usage", None), "input_tokens", 0)) for r in rr)
+            to = sum(to_int(getattr(getattr(r, "usage", None), "output_tokens", 0)) for r in rr)
+            if ti or to:
+                return ti, to
+
         u = getattr(response, "usage", None)
-        if not u:
-            return 0, 0
-        tokens_in = getattr(u, "input_tokens", None) or getattr(u, "prompt_tokens", 0) or 0
-        tokens_out = getattr(u, "output_tokens", None) or getattr(u, "completion_tokens", 0) or 0
-        return int(tokens_in), int(tokens_out)
+        if u:
+            ti = to_int(getattr(u, "input_tokens", None) or getattr(u, "prompt_tokens", 0))
+            to = to_int(getattr(u, "output_tokens", None) or getattr(u, "completion_tokens", 0))
+            return ti, to
 
-    def list_files_in_chat(self, chat_id: int) -> list[dict]:
-        vs_id = self.chat_vector_stores.get(chat_id)
-        if not vs_id:
-            return []
-        files = self.client.vector_stores.files.list(vector_store_id=vs_id).data
-        return [{"id": f.id, "filename": getattr(f, "filename", "?")} for f in files]
-
-    def remove_file_from_chat(self, chat_id: int, file_id: str) -> bool:
-        vs_id = self.chat_vector_stores.get(chat_id)
-        if not vs_id:
-            return False
-        try:
-            self.client.vector_stores.files.delete(vector_store_id=vs_id, file_id=file_id)
-            return True
-        except Exception:
-            return False
+        return 0, 0
 
     def clear_files_in_chat(self, chat_id: int) -> bool:
         vs_id = self.chat_vector_stores.get(chat_id)
@@ -144,3 +150,10 @@ class OpenAIWrapper:
             return True
         except Exception:
             return False
+
+    def list_files_in_chat(self, chat_id: int) -> list[dict]:
+        vs_id = self.chat_vector_stores.get(chat_id)
+        if not vs_id:
+            return []
+        files = self.client.vector_stores.files.list(vector_store_id=vs_id).data
+        return [{"id": f.id, "filename": getattr(f, "filename", "?")} for f in files]

@@ -207,26 +207,30 @@ class CustomMessageHandler:
         self.chat_history_manager.add_user_message(chat_id, first_name, user_message)
 
     def _sum_usage(self, obj) -> tuple[int, int]:
-        ti = to = 0
+        def to_int(x):
+            try:
+                return int(x)
+            except Exception:
+                return 0
 
-        def take(u):
-            nonlocal ti, to
-            if not u:
-                return
-            gi = (lambda src, k: getattr(src, k, None)) if hasattr(u, "__dict__") else (lambda src, k: src.get(k))
-            ti += int(gi(u, "input_tokens") or gi(u, "prompt_tokens") or 0)
-            to += int(gi(u, "output_tokens") or gi(u, "completion_tokens") or 0)
+        cw = getattr(obj, "context_wrapper", None)
+        u = getattr(cw, "usage", None) if cw else None
+        if u:
+            return to_int(getattr(u, "input_tokens", 0)), to_int(getattr(u, "output_tokens", 0))
 
-        take(getattr(obj, "usage", None) or (obj.get("usage") if isinstance(obj, dict) else None))
+        rr = getattr(obj, "raw_responses", None)
+        if rr and hasattr(rr, "__iter__"):
+            ti = sum(to_int(getattr(getattr(r, "usage", None), "input_tokens", 0)) for r in rr)
+            to = sum(to_int(getattr(getattr(r, "usage", None), "output_tokens", 0)) for r in rr)
+            return ti, to
 
-        for key in ("model_responses", "responses", "items", "new_items", "events"):
-            seq = getattr(obj, key, None) if hasattr(obj, key) else (obj.get(key) if isinstance(obj, dict) else None)
-            if not seq:
-                continue
-            for it in seq:
-                take(getattr(it, "usage", None) or (it.get("usage") if isinstance(it, dict) else None))
+        u = getattr(obj, "usage", None)
+        if u:
+            ti = to_int(getattr(u, "input_tokens", None) or getattr(u, "prompt_tokens", 0))
+            to = to_int(getattr(u, "output_tokens", None) or getattr(u, "completion_tokens", 0))
+            return ti, to
 
-        return ti, to
+        return 0, 0
 
     async def _generate_bot_response(self, chat_id: int) -> str:
         limit = self.config.get_file_paths_and_limits()["max_tokens"]
@@ -237,11 +241,12 @@ class CustomMessageHandler:
             chat_id=chat_id,
         )
         response = await maybe_coro if inspect.isawaitable(maybe_coro) else maybe_coro
-
         ti, to = self._sum_usage(response)
+        used_fs = bool(getattr(self.openai_wrapper, "used_file_search", lambda _: False)(response))
         self.tokens_in += ti
         self.tokens_out += to
-        self.per_message_stats.append({"chat_id": chat_id, "tokens_in": ti, "tokens_out": to, "tokens_total": ti + to})
+        self.per_message_stats.append({"chat_id": chat_id, "tokens_in": ti, "tokens_out": to, "tokens_total": ti + to,
+                                       "used_file_search": used_fs})
         return self.openai_wrapper.extract_text(response)
 
     async def _send_response(self, message: MessageWrapper, bot_response: str, is_voice: bool) -> None:
@@ -304,6 +309,7 @@ class CustomMessageHandler:
         total_messages = max(1, self.messages_out)
         avg_in = self.tokens_in // total_messages
         avg_out = self.tokens_out // total_messages
+        file_search_uses = sum(1 for it in self.per_message_stats if it.get("used_file_search"))
         return {
             "uptime_seconds": int(time.monotonic() - self.started_at),
             "messages_in": self.messages_in,
@@ -312,18 +318,22 @@ class CustomMessageHandler:
             "total_tokens_out": self.tokens_out,
             "avg_tokens_in_per_message": avg_in,
             "avg_tokens_out_per_message": avg_out,
+            "file_search_uses": file_search_uses,
         }
 
     async def stats_command(self, update: Update, context: CallbackContext) -> None:
         s = self.get_stats()
         secs = s["uptime_seconds"]
         h, m, sec = secs // 3600, (secs % 3600) // 60, secs % 60
+        uses_total = sum(1 for it in self.per_message_stats if it.get("used_file_search"))
+        uses_recent = sum(1 for it in self.per_message_stats[-10:] if it.get("used_file_search"))
         lines = [
             f"uptime: {h:02d}:{m:02d}:{sec:02d}",
             f"messages in: {s['messages_in']}",
             f"messages out: {s['messages_out']}",
             f"tokens in: {s['total_tokens_in']} (avg {s['avg_tokens_in_per_message']})",
             f"tokens out: {s['total_tokens_out']} (avg {s['avg_tokens_out_per_message']})",
+            f"file search used: {uses_total}",
         ]
         await update.message.reply_text("\n".join(lines))
 
