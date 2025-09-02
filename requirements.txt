@@ -1,5 +1,6 @@
 python-dotenv
 openai
+openai-agents
 configparser
 python-telegram-bot
 python-dateutil

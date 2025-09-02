@@ -1,10 +1,14 @@
 # openai_wrapper.py
+import os
+import asyncio
 from openai import OpenAI
+from agents import Agent, Runner, FileSearchTool
 
 
 class OpenAIWrapper:
     def __init__(self, api_key: str, api_mode: str = "responses", reasoning_effort: str | None = None):
         self.client = OpenAI(api_key=api_key)
+        os.environ.setdefault("OPENAI_API_KEY", api_key)
         self.api_mode = api_mode
         self.reasoning_effort = reasoning_effort
         self.chat_vector_stores: dict[int, str] = {}
@@ -44,37 +48,64 @@ class OpenAIWrapper:
         self.client.vector_stores.files.create(vector_store_id=vs_id, file_id=f.id)
         return f.id, vs_id
 
-    def generate(self, model: str, messages: list, max_tokens: int, chat_id: int | None = None,
-                 extra_overrides: dict | None = None):
+    async def generate(self, model: str, messages: list, max_tokens: int, chat_id: int | None = None,
+                       extra_overrides: dict | None = None):
         vector_store_id = self.chat_vector_stores.get(chat_id) if chat_id is not None else None
-
-        if self.api_mode == "responses":
-            kwargs = {"model": model, "input": messages, "max_output_tokens": max_tokens}
-            if self.reasoning_effort:
-                kwargs["reasoning"] = {"effort": self.reasoning_effort}
-
-            tools = [{"type": "file_search"}] if vector_store_id else []
-            extra_body = {
-                "tool_resources": {"file_search": {"vector_store_ids": [vector_store_id]}}} if vector_store_id else {}
-
-            if extra_overrides:
-                kwargs.update({k: v for k, v in extra_overrides.items() if k not in ("tool_resources", "resources")})
-                if "tool_resources" in extra_overrides:
-                    extra_body.setdefault("tool_resources", {}).update(extra_overrides["tool_resources"])
-                if "resources" in extra_overrides:
-                    extra_body.setdefault("tool_resources", {}).update(extra_overrides["resources"])
-
-            if tools:
-                kwargs["tools"] = tools
-            if extra_body:
-                kwargs["extra_body"] = extra_body
-
-            return self.client.responses.create(**kwargs)
-
-        return self.client.chat.completions.create(model=model, messages=messages, max_tokens=max_tokens)
+        if self.api_mode == "agents":
+            include_results = bool(extra_overrides.get("citations", {}).get("enabled")) if extra_overrides else False
+            tools = []
+            if vector_store_id:
+                tools.append(FileSearchTool(vector_store_ids=[vector_store_id], include_search_results=include_results))
+            system_text = next((m.get("content", "") for m in messages if m.get("role") == "system"), "")
+            user_messages = [m for m in messages if m.get("role") != "system"]
+            agent = Agent(name="TG Assistant", instructions=system_text, tools=tools, model=model)
+            return await Runner.run(agent, user_messages)
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            None, lambda: self.client.chat.completions.create(model=model, messages=messages, max_tokens=max_tokens)
+        )
 
     @staticmethod
-    def extract_text(response):
+    def _get_text_from_final_output(resp) -> str:
+        fo = getattr(resp, "final_output", None)
+        return "" if fo is None else str(fo)
+
+    def _walk_nodes(self, node, depth=0):
+        if depth > 6 or node is None:
+            return
+        yield node
+        if isinstance(node, (list, tuple, set)):
+            for it in node:
+                yield from self._walk_nodes(it, depth + 1)
+        elif isinstance(node, dict):
+            for v in node.values():
+                yield from self._walk_nodes(v, depth + 1)
+        else:
+            d = getattr(node, "__dict__", None)
+            if d:
+                for v in d.values():
+                    yield from self._walk_nodes(v, depth + 1)
+
+    def _used_file_search(self, resp) -> bool:
+        for it in self._walk_nodes(resp):
+            name = getattr(it, "tool_name", None)
+            if name == "file_search":
+                return True
+            tool = getattr(it, "tool", None)
+            if getattr(tool, "name", None) == "file_search":
+                return True
+            if isinstance(it, dict):
+                if it.get("tool_name") == "file_search":
+                    return True
+                tool = it.get("tool") or {}
+                if isinstance(tool, dict) and tool.get("name") == "file_search":
+                    return True
+        return False
+
+    def extract_text(self, response):
+        if hasattr(response, "final_output"):
+            text = "" if getattr(response, "final_output") is None else str(response.final_output)
+            return ("[FS] " + text) if self._used_file_search(response) else text
         return getattr(response, "output_text", None) or response.choices[0].message.content
 
     @staticmethod

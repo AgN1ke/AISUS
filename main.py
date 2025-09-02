@@ -64,7 +64,4 @@ if __name__ == "__main__":
     app.add_handler(remove_file_handler)
     app.add_handler(clear_files_handler)
 
-    filesearch_debug = CommandHandler(["fs","filesearch"], message_handler.filesearch_debug_command)
-    app.add_handler(filesearch_debug)
-
     app.run_polling()

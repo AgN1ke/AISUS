@@ -60,7 +60,7 @@ class CustomMessageHandler:
     @staticmethod
     async def _should_process_message(bot: Bot, message: MessageWrapper) -> bool:
         is_private = getattr(message, "chat_type", None) == "private"
-        if getattr(message, "document", None):  # always handle file uploads
+        if getattr(message, "document", None):
             return True
         text = getattr(message, "text", "") or ""
         caption = getattr(message, "caption", "") or ""
@@ -79,9 +79,17 @@ class CustomMessageHandler:
         self.messages_in += 1
         first_name = message.from_user_first_name
         chat_id = message.chat_id
+
+        hist = self.chat_history_manager.get_history(chat_id)
+        if not hist or hist[0].get("role") != "system":
+            self.chat_history_manager.add_system_message(
+                chat_id, self.config.get_system_messages().get("gpt_prompt", "")
+            )
+
         self._update_chat_history(chat_id, first_name, user_message, is_voice, is_image)
+
         try:
-            bot_response = self._generate_bot_response(chat_id)
+            bot_response = await self._generate_bot_response(chat_id)
             await self._send_response(message, bot_response, is_voice)
             self.chat_history_manager.add_bot_message(chat_id, bot_response)
             self.messages_out += 1
@@ -91,8 +99,9 @@ class CustomMessageHandler:
                 await message.reply_text("Сталася помилка. Спробуйте ще раз.")
             except Exception as notify_exc:
                 logger.exception("failed to notify user: %s", notify_exc)
-        max_history_length = self.config.get_file_paths_and_limits()["max_history_length"]
-        self.chat_history_manager.prune_history(chat_id, max_history_length)
+        max_history_length = self.config.get_file_paths_and_limits().get("max_history_length", 1000)
+        if isinstance(max_history_length, int) and max_history_length >= 3:
+            self.chat_history_manager.prune_history(chat_id, max_history_length)
 
     async def _process_message_content(self, message: MessageWrapper) -> Tuple[Optional[str], bool, bool]:
         paths_and_limits: Dict[str, Any] = self.config.get_file_paths_and_limits()
@@ -181,49 +190,58 @@ class CustomMessageHandler:
 
     def _update_chat_history(self, chat_id: int, first_name: str, user_message: str, is_voice: bool,
                              is_image: bool) -> None:
-        self.chat_history_manager.add_system_message(chat_id, self.config.get_system_messages()["gpt_prompt"])
         if is_voice:
             self.chat_history_manager.add_system_voice_affix_if_not_exist(
                 chat_id, self.config.get_system_messages()["voice_message_affix"]
             )
             self.chat_history_manager.add_user_message(chat_id, first_name, user_message)
             return
+
         if is_image:
             self.chat_history_manager.add_user_message(chat_id, first_name, user_message)
             return
+
         self.chat_history_manager.remove_system_voice_affix_if_exist(
             chat_id, self.config.get_system_messages()["voice_message_affix"]
         )
         self.chat_history_manager.add_user_message(chat_id, first_name, user_message)
 
-    def _generate_bot_response(self, chat_id: int) -> str:
-        response_tokens_limit = self.config.get_file_paths_and_limits()["max_tokens"]
-        response = self.openai_wrapper.generate(
+    def _sum_usage(self, obj) -> tuple[int, int]:
+        ti = to = 0
+
+        def take(u):
+            nonlocal ti, to
+            if not u:
+                return
+            gi = (lambda src, k: getattr(src, k, None)) if hasattr(u, "__dict__") else (lambda src, k: src.get(k))
+            ti += int(gi(u, "input_tokens") or gi(u, "prompt_tokens") or 0)
+            to += int(gi(u, "output_tokens") or gi(u, "completion_tokens") or 0)
+
+        take(getattr(obj, "usage", None) or (obj.get("usage") if isinstance(obj, dict) else None))
+
+        for key in ("model_responses", "responses", "items", "new_items", "events"):
+            seq = getattr(obj, key, None) if hasattr(obj, key) else (obj.get(key) if isinstance(obj, dict) else None)
+            if not seq:
+                continue
+            for it in seq:
+                take(getattr(it, "usage", None) or (it.get("usage") if isinstance(it, dict) else None))
+
+        return ti, to
+
+    async def _generate_bot_response(self, chat_id: int) -> str:
+        limit = self.config.get_file_paths_and_limits()["max_tokens"]
+        maybe_coro = self.openai_wrapper.generate(
             model=self.config.get_openai_settings()["gpt_model"],
             messages=self.chat_history_manager.get_history(chat_id),
-            max_tokens=response_tokens_limit,
+            max_tokens=limit,
             chat_id=chat_id,
         )
+        response = await maybe_coro if inspect.isawaitable(maybe_coro) else maybe_coro
 
-        ti = to = 0
-        extract_usage = getattr(self.openai_wrapper, "extract_usage", None)
-        if callable(extract_usage):
-            try:
-                ti, to = extract_usage(response) or (0, 0)
-                ti = int(ti or 0)
-                to = int(to or 0)
-            except (TypeError, AttributeError, ValueError):
-                ti = to = 0
-
+        ti, to = self._sum_usage(response)
         self.tokens_in += ti
         self.tokens_out += to
-        self.per_message_stats.append({
-            "chat_id": chat_id,
-            "tokens_in": ti,
-            "tokens_out": to,
-            "tokens_total": ti + to
-        })
-
+        self.per_message_stats.append({"chat_id": chat_id, "tokens_in": ti, "tokens_out": to, "tokens_total": ti + to})
         return self.openai_wrapper.extract_text(response)
 
     async def _send_response(self, message: MessageWrapper, bot_response: str, is_voice: bool) -> None:
@@ -354,7 +372,7 @@ class CustomMessageHandler:
         if ok:
             await update.message.reply_text(f"Файл {file_id} видалено.")
         else:
-            await update.message.reply_text(f"Не вдалося видалити {file_id}.")
+            await update.message.reply_text(f"Не вдалося видалити файли {file_id}.")
 
     async def clear_files_command(self, update: Update, context: CallbackContext) -> None:
         chat_id = update.effective_chat.id
@@ -363,20 +381,3 @@ class CustomMessageHandler:
             await update.message.reply_text("Усі файли очищено для цього чату.")
         else:
             await update.message.reply_text("Не вдалося очистити файли.")
-
-    async def filesearch_debug_command(self, update, context):
-        chat_id = update.effective_chat.id
-        query = " ".join(getattr(context, "args", [])).strip() or "List the sources you will use."
-        response = self.openai_wrapper.generate(
-            model=self.config.get_openai_settings()["gpt_model"],
-            messages=[{"role": "user", "content": query}],
-            max_tokens=300,
-            chat_id=chat_id,
-            extra_overrides={
-                "tools": [{"type": "file_search"}],
-                "tool_choice": "file_search",
-                "citations": {"enabled": True},
-            },
-        )
-        text = self.openai_wrapper.extract_text(response) or "(no text)"
-        await update.message.reply_text(text)

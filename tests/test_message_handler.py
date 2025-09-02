@@ -82,7 +82,7 @@ class TestMessageHandler(unittest.TestCase):
         assert kwargs.get("chat_id") == 123
 
         history = self.history.get_history(msg.chat_id)
-        self.assertEqual(len(history), 3)
+        self.assertEqual(3, len(history))
         self.assertIn("Hi there!", history[-1]["content"])
 
     def test_voice_download_path_and_cleanup(self) -> None:
