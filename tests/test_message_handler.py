@@ -11,9 +11,9 @@ from unittest.mock import Mock, AsyncMock, patch, call
 from telegram import Update
 from telegram.ext import CallbackContext
 
-from src.aisus.chat_history_manager import ChatHistoryManager
-from src.aisus.config_parser import ConfigReader
-from src.aisus.message_handler import CustomMessageHandler
+from src.store.memory_store import ChatHistoryManager
+from src.adapters.config_reader import ConfigReader
+from src.app.process_message import CustomMessageHandler
 
 
 class TestMessageHandler(unittest.TestCase):
@@ -39,7 +39,7 @@ class TestMessageHandler(unittest.TestCase):
         self.bot: Mock = Mock()
         self.bot.get_me = AsyncMock(return_value=SimpleNamespace(username="testbot"))
         self.voice: Mock = Mock()
-        self.openai: Mock = Mock()
+        self.openai: Mock = Mock(); self.openai.extract_usage.return_value = (0, 0); self.openai.used_file_search.return_value = False; self.openai.chat_vector_stores = {}
         self.handler: CustomMessageHandler = CustomMessageHandler(
             config=self.config,
             voice_processor=self.voice,
@@ -84,7 +84,7 @@ class TestMessageHandler(unittest.TestCase):
 
         history = self.history.get_history(msg.chat_id)
         self.assertEqual(3, len(history))
-        self.assertIn("Hi there!", history[-1]["content"])
+        self.assertIn("Hi there!", history[-1].content)
 
     def test_voice_download_path_and_cleanup(self) -> None:
         created_path: Optional[str] = None
@@ -267,8 +267,8 @@ class TestMessageHandler(unittest.TestCase):
         msg.reply_voice = AsyncMock()
         msg.reply_text = AsyncMock()
 
-        with patch("src.aisus.message_handler.os.remove", side_effect=OSError("boom")), \
-                self.assertLogs("src.aisus.message_handler", level="ERROR") as captured:
+        with patch("src.app.process_message.os.remove", side_effect=OSError("boom")), \
+                self.assertLogs("src.app.process_message", level="ERROR") as captured:
             asyncio.run(self.handler._send_response(msg, "hello", is_voice=True))
 
         msg.reply_voice.assert_awaited_once_with(tts_path)

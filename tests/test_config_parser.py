@@ -3,7 +3,7 @@ import os
 import unittest
 from typing import Any
 from unittest.mock import patch
-from src.aisus.config_parser import ConfigReader
+from src.adapters.config_reader import ConfigReader
 
 
 class TestConfigParser(unittest.TestCase):

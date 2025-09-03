@@ -1,0 +1,13 @@
+from typing import Any, Dict, Optional, Protocol
+
+
+class ConfigPort(Protocol):
+    """Port exposing configuration values."""
+
+    def get_system_messages(self) -> Dict[str, str]: ...
+
+    def get_openai_settings(self) -> Dict[str, Optional[str]]: ...
+
+    def get_api_settings(self) -> Dict[str, Optional[str]]: ...
+
+    def get_file_paths_and_limits(self) -> Dict[str, Any]: ...

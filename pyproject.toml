@@ -12,4 +12,4 @@ authors = [{ name = "gpt" }]
 
 [tool.setuptools.packages.find]
 where = ["src"]
-include = ["aisus*"]
+include = ["*"]
