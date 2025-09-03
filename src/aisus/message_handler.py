@@ -1,14 +1,11 @@
 # message_handler.py
 import os
-import base64
 import logging
 from typing import Tuple, Optional, Dict, Any
-import requests
 from telegram import Update, Bot
 from telegram.ext import CallbackContext
 from src.aisus.message_wrapper import MessageWrapper
 from src.aisus.config_parser import ConfigReader
-from src.aisus.voice_processor import VoiceProcessor
 from src.aisus.chat_history_manager import ChatHistoryManager
 from src.aisus.openai_wrapper import OpenAIWrapper
 import time
@@ -18,10 +15,8 @@ logger: logging.Logger = logging.getLogger(__name__)
 
 
 class CustomMessageHandler:
-    def __init__(self, config: ConfigReader, voice_processor: VoiceProcessor, chat_history_manager: ChatHistoryManager,
-                 openai_wrapper: OpenAIWrapper) -> None:
+    def __init__(self, config: ConfigReader, chat_history_manager: ChatHistoryManager, openai_wrapper: OpenAIWrapper) -> None:
         self.config: ConfigReader = config
-        self.voice_processor: VoiceProcessor = voice_processor
         self.chat_history_manager: ChatHistoryManager = chat_history_manager
         self.openai_wrapper: OpenAIWrapper = openai_wrapper
         self.authenticated_users: Dict[int, bool] = {}
@@ -118,7 +113,7 @@ class CustomMessageHandler:
             voice_message_path: Optional[str] = None
             try:
                 voice_message_path = await message.download_voice(audio_dir)
-                transcribed_text: str = self.voice_processor.transcribe_voice_message(voice_message_path)
+                transcribed_text: str = self.openai_wrapper.transcribe_voice_message(voice_message_path)
                 return transcribed_text, True, False
             finally:
                 if voice_message_path and os.path.exists(voice_message_path):
@@ -168,28 +163,13 @@ class CustomMessageHandler:
         return message.text, False, False
 
     async def _analyze_image_with_openai(self, image_path: str) -> str:
-        headers: Dict[str, str] = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {self.config.get_openai_settings()['api_key']}"
-        }
-        with open(image_path, "rb") as image_file:
-            base64_image: str = base64.b64encode(image_file.read()).decode("utf-8")
-        response_tokens_limit: int = self.config.get_file_paths_and_limits()["max_tokens"]
-        payload: Dict[str, Any] = {
-            "model": "gpt-4o-mini",
-            "messages": [
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": "What's in this image?"},
-                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
-                    ]
-                }
-            ],
-            "max_tokens": response_tokens_limit
-        }
-        response = requests.post("https://api.openai.com/v1/chat/completions", headers=headers, json=payload)
-        return response.json()["choices"][0]["message"]["content"]
+        limit = self.config.get_file_paths_and_limits()["max_tokens"]
+        return await self.openai_wrapper.analyze_image(
+            image_path=image_path,
+            prompt="What's in this image?",
+            model="gpt-4o-mini",
+            max_tokens=limit
+        )
 
     def _update_chat_history(self, chat_id: int, first_name: str, user_message: str, is_voice: bool,
                              is_image: bool) -> None:
@@ -268,7 +248,7 @@ class CustomMessageHandler:
             audio_dir_opt: Optional[str] = self.config.get_file_paths_and_limits().get("audio_folder_path")
             if audio_dir_opt:
                 os.makedirs(audio_dir_opt, exist_ok=True)
-            voice_response_file: str = self.voice_processor.generate_voice_response_and_save_file(
+            voice_response_file: str = self.openai_wrapper.generate_voice_response_and_save_file(
                 bot_response,
                 self.config.get_openai_settings()["vocalizer_voice"],
                 audio_dir_opt or ""
@@ -313,7 +293,7 @@ class CustomMessageHandler:
         if audio_dir_opt:
             os.makedirs(audio_dir_opt, exist_ok=True)
 
-        voice_file: str = self.voice_processor.generate_voice_response_and_save_file(
+        voice_file: str = self.openai_wrapper.generate_voice_response_and_save_file(
             last_bot_text,
             self.config.get_openai_settings()["vocalizer_voice"],
             audio_dir_opt or ""
@@ -348,7 +328,6 @@ class CustomMessageHandler:
         secs = s["uptime_seconds"]
         h, m, sec = secs // 3600, (secs % 3600) // 60, secs % 60
         uses_total = sum(1 for it in self.per_message_stats if it.get("used_file_search"))
-        uses_recent = sum(1 for it in self.per_message_stats[-10:] if it.get("used_file_search"))
         lines = [
             f"uptime: {h:02d}:{m:02d}:{sec:02d}",
             f"messages in: {s['messages_in']}",
@@ -371,7 +350,7 @@ class CustomMessageHandler:
         if audio_dir:
             os.makedirs(audio_dir, exist_ok=True)
 
-        voice_file = self.voice_processor.generate_voice_response_and_save_file(
+        voice_file = self.openai_wrapper.generate_voice_response_and_save_file(
             text_to_speak,
             self.config.get_openai_settings().get("vocalizer_voice"),
             audio_dir,

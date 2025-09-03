@@ -11,16 +11,27 @@ from openai import (
     AuthenticationError,
 )
 from agents import Agent, Runner, FileSearchTool
+import base64
+from datetime import datetime
 
 
 class OpenAIWrapper:
-    def __init__(self, api_key, api_mode="responses", reasoning_effort=None, search_enabled=False):
+    def __init__(
+        self,
+        api_key: str,
+        api_mode: str = "responses",
+        reasoning_effort: str | None = None,
+        search_enabled: bool = False,
+        whisper_model: str | None = None,
+        tts_model: str | None = None,
+    ):
         self.client = OpenAI(api_key=api_key)
-        os.environ.setdefault("OPENAI_API_KEY", api_key)
         self.api_mode = api_mode
         self.reasoning_effort = reasoning_effort
         self.search_enabled = search_enabled
-        self.chat_vector_stores = {}
+        self.chat_vector_stores: dict[int, str] = {}
+        self.whisper_model = whisper_model
+        self.tts_model = tts_model
 
     @staticmethod
     def _messages_to_input(messages):
@@ -237,3 +248,37 @@ class OpenAIWrapper:
             return out
         except (APIConnectionError, APIStatusError, RateLimitError, OpenAIError):
             return []
+
+    async def analyze_image(self, image_path, prompt="What's in this image?", model="gpt-4o-mini", max_tokens=300):
+        with open(image_path, "rb") as fh:
+            base64_image = base64.b64encode(fh.read()).decode("utf-8")
+        payload = {
+            "model": model,
+            "input": [{
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": prompt},
+                    {"type": "input_image", "image_url": f"data:image/jpeg;base64,{base64_image}"}
+                ]
+            }],
+            "max_output_tokens": max_tokens
+        }
+        try:
+            resp = await asyncio.to_thread(self.client.responses.create, **payload)
+        except (APIConnectionError, APIStatusError, RateLimitError, BadRequestError, AuthenticationError, OpenAIError):
+            return ""
+        return self.extract_text(resp)
+
+    def transcribe_voice_message(self, voice_message_path):
+        with open(voice_message_path, "rb") as audio_file:
+            r = self.client.audio.transcriptions.create(model=self.whisper_model, file=audio_file)
+        return r.text
+
+    def generate_voice_response_and_save_file(self, text, voice, folder_path):
+        if not folder_path or not os.path.isdir(folder_path):
+            folder_path = os.getcwd()
+        r = self.client.audio.speech.create(model=self.tts_model, voice=voice, input=text)
+        file_name = os.path.join(folder_path, f"response_{datetime.now().strftime('%Y%m%d%H%M%S')}.mp3")
+        with open(file_name, "wb") as f:
+            f.write(r.read())
+        return file_name

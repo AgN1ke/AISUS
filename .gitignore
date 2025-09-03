@@ -1,6 +1,5 @@
 # created by virtualenv automatically
 /venv/
-/audio/
 /downloads/
 /configs/config.ini
 *.session

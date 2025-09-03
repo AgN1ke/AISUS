@@ -6,7 +6,7 @@ import tempfile
 import shutil
 from types import SimpleNamespace
 from typing import Any, Optional
-from unittest.mock import Mock, AsyncMock, patch, call
+from unittest.mock import Mock, AsyncMock, patch
 
 from telegram import Update
 from telegram.ext import CallbackContext
@@ -38,11 +38,9 @@ class TestMessageHandler(unittest.TestCase):
         self.history: ChatHistoryManager = ChatHistoryManager()
         self.bot: Mock = Mock()
         self.bot.get_me = AsyncMock(return_value=SimpleNamespace(username="testbot"))
-        self.voice: Mock = Mock()
         self.openai: Mock = Mock()
         self.handler: CustomMessageHandler = CustomMessageHandler(
             config=self.config,
-            voice_processor=self.voice,
             chat_history_manager=self.history,
             openai_wrapper=self.openai
         )
@@ -97,7 +95,7 @@ class TestMessageHandler(unittest.TestCase):
                 f.write(b"ogg")
             return created_path
 
-        self.voice.transcribe_voice_message = Mock(return_value="ok")
+        self.openai.transcribe_voice_message = Mock(return_value="ok")
 
         msg: Mock = Mock()
         msg.voice = True
@@ -179,7 +177,7 @@ class TestMessageHandler(unittest.TestCase):
         tts_path: str = os.path.join(self.audio_dir, "tts.ogg")
         with open(tts_path, "wb") as f:
             f.write(b"ogg")
-        self.voice.generate_voice_response_and_save_file = Mock(return_value=tts_path)
+        self.openai.generate_voice_response_and_save_file = Mock(return_value=tts_path)
 
         msg: Mock = Mock()
         msg.reply_voice = AsyncMock()
@@ -206,7 +204,7 @@ class TestMessageHandler(unittest.TestCase):
                 f.write(b"ogg")
             return tts_path
 
-        self.voice.generate_voice_response_and_save_file = Mock(side_effect=generate_voice_response_and_save_file)
+        self.openai.generate_voice_response_and_save_file = Mock(side_effect=generate_voice_response_and_save_file)
 
         msg: Mock = Mock()
         msg.reply_voice = AsyncMock(side_effect=reply_voice)
@@ -231,7 +229,6 @@ class TestMessageHandler(unittest.TestCase):
             cfg_fallback: ConfigReader = ConfigReader()
             handler_fallback: CustomMessageHandler = CustomMessageHandler(
                 config=cfg_fallback,
-                voice_processor=self.voice,
                 chat_history_manager=self.history,
                 openai_wrapper=self.openai
             )
@@ -255,13 +252,12 @@ class TestMessageHandler(unittest.TestCase):
         self.assertFalse(os.path.exists(created_path))
 
     def test_tts_cleanup_oserror_logged(self) -> None:
-        import logging
         tts_path: str = os.path.join(self.audio_dir, "tts.ogg")
         os.makedirs(self.audio_dir, exist_ok=True)
         with open(tts_path, "wb") as f:
             f.write(b"ogg")
 
-        self.voice.generate_voice_response_and_save_file = Mock(return_value=tts_path)
+        self.openai.generate_voice_response_and_save_file = Mock(return_value=tts_path)
 
         msg: Mock = Mock()
         msg.reply_voice = AsyncMock()
@@ -277,7 +273,7 @@ class TestMessageHandler(unittest.TestCase):
     def test_auth_with_text_mention_in_group(self) -> None:
         with patch.dict(os.environ, {"PASSWORD": "secret"}, clear=False):
             cfg: ConfigReader = ConfigReader()
-            handler: CustomMessageHandler = CustomMessageHandler(cfg, self.voice, self.history, self.openai)
+            handler: CustomMessageHandler = CustomMessageHandler(cfg, self.history, self.openai)
 
         update = Mock(spec=Update)
         update.effective_chat = SimpleNamespace(id=1001)
@@ -299,7 +295,7 @@ class TestMessageHandler(unittest.TestCase):
     def test_auth_with_text_reply_in_group(self) -> None:
         with patch.dict(os.environ, {"PASSWORD": "secret"}, clear=False):
             cfg: ConfigReader = ConfigReader()
-            handler: CustomMessageHandler = CustomMessageHandler(cfg, self.voice, self.history, self.openai)
+            handler: CustomMessageHandler = CustomMessageHandler(cfg, self.history, self.openai)
         update = Mock(spec=Update)
         update.effective_chat = SimpleNamespace(id=1002)
         update.message = Mock()
@@ -318,7 +314,7 @@ class TestMessageHandler(unittest.TestCase):
     def test_auth_with_image_caption_mention_in_group(self) -> None:
         with patch.dict(os.environ, {"PASSWORD": "secret"}, clear=False):
             cfg: ConfigReader = ConfigReader()
-            handler: CustomMessageHandler = CustomMessageHandler(cfg, self.voice, self.history, self.openai)
+            handler: CustomMessageHandler = CustomMessageHandler(cfg, self.history, self.openai)
         update = Mock(spec=Update)
         update.effective_chat = SimpleNamespace(id=1003)
         update.message = Mock()
@@ -338,7 +334,7 @@ class TestMessageHandler(unittest.TestCase):
     def test_auth_with_image_caption_reply_in_group(self) -> None:
         with patch.dict(os.environ, {"PASSWORD": "secret"}, clear=False):
             cfg: ConfigReader = ConfigReader()
-            handler: CustomMessageHandler = CustomMessageHandler(cfg, self.voice, self.history, self.openai)
+            handler: CustomMessageHandler = CustomMessageHandler(cfg, self.history, self.openai)
         update = Mock(spec=Update)
         update.effective_chat = SimpleNamespace(id=1004)
         update.message = Mock()
@@ -368,7 +364,7 @@ class TestMessageHandler(unittest.TestCase):
                 f.write(b"ogg")
             return tts_path
 
-        self.voice.generate_voice_response_and_save_file = Mock(side_effect=generate)
+        self.openai.generate_voice_response_and_save_file = Mock(side_effect=generate)
 
         update: Mock = Mock(spec=Update)
         update.effective_chat = SimpleNamespace(id=chat_id, type="private")
@@ -392,7 +388,7 @@ class TestMessageHandler(unittest.TestCase):
                 f.write(b"ogg")
             return tts_path
 
-        self.voice.generate_voice_response_and_save_file = Mock(side_effect=gen)
+        self.openai.generate_voice_response_and_save_file = Mock(side_effect=gen)
 
         update = Mock()
         update.effective_chat = SimpleNamespace(id=123, type="private")
