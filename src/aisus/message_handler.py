@@ -60,16 +60,18 @@ class CustomMessageHandler:
     @staticmethod
     async def _should_process_message(bot: Bot, message: MessageWrapper) -> bool:
         is_private = getattr(message, "chat_type", None) == "private"
-        if getattr(message, "document", None):
-            return True
+
         text = getattr(message, "text", "") or ""
         caption = getattr(message, "caption", "") or ""
+
         bot_username = (await bot.get_me()).username
         has_mention = (f"@{bot_username}" in text) or (f"@{bot_username}" in caption)
+
         is_reply_to_bot = bool(
             getattr(message, "reply_to_message", None)
             and getattr(message, "reply_to_message_from_user_username", None) == bot_username
         )
+
         return is_private or has_mention or is_reply_to_bot
 
     async def _handle_user_message(self, message: MessageWrapper) -> None:
@@ -283,11 +285,15 @@ class CustomMessageHandler:
         await message.reply_text(text_to_send)
 
     async def clear_history_command(self, update: Update, context: CallbackContext) -> None:
+        if not await self._is_command_for_me(update, context):
+            return
         chat_id: int = update.effective_chat.id
         self.chat_history_manager.clear_history(chat_id)
         await update.message.reply_text("Історію чату очищено.")
 
     async def resend_last_as_voice_command(self, update: Update, context: CallbackContext) -> None:
+        if not await self._is_command_for_me(update, context):
+            return
         chat_id: int = update.effective_chat.id
         history = self.chat_history_manager.get_history(chat_id)
 
@@ -336,6 +342,8 @@ class CustomMessageHandler:
         }
 
     async def stats_command(self, update: Update, context: CallbackContext) -> None:
+        if not await self._is_command_for_me(update, context):
+            return
         s = self.get_stats()
         secs = s["uptime_seconds"]
         h, m, sec = secs // 3600, (secs % 3600) // 60, secs % 60
@@ -352,6 +360,8 @@ class CustomMessageHandler:
         await update.message.reply_text("\n".join(lines))
 
     async def audio_command(self, update: Update, context: CallbackContext) -> None:
+        if not await self._is_command_for_me(update, context):
+            return
         text_to_speak = " ".join(getattr(context, "args", [])).strip()
         if not text_to_speak:
             await update.message.reply_text("Немає тексту для озвучення.")
@@ -374,6 +384,8 @@ class CustomMessageHandler:
                 logger.exception("failed to remove temp tts file: %s", exc)
 
     async def show_files_command(self, update: Update, context: CallbackContext) -> None:
+        if not await self._is_command_for_me(update, context):
+            return
         chat_id = update.effective_chat.id
         vs_id = self.openai_wrapper.chat_vector_stores.get(chat_id)
         if not vs_id:
@@ -387,6 +399,8 @@ class CustomMessageHandler:
         await update.message.reply_text("Файли:\n" + "\n".join(lines))
 
     async def remove_file_command(self, update: Update, context: CallbackContext) -> None:
+        if not await self._is_command_for_me(update, context):
+            return
         chat_id = update.effective_chat.id
         if not context.args:
             await update.message.reply_text("Вкажіть file_id після команди.")
@@ -399,9 +413,22 @@ class CustomMessageHandler:
             await update.message.reply_text(f"Не вдалося видалити файли {file_id}.")
 
     async def clear_files_command(self, update: Update, context: CallbackContext) -> None:
+        if not await self._is_command_for_me(update, context):
+            return
         chat_id = update.effective_chat.id
         ok = self.openai_wrapper.clear_files_in_chat(chat_id)
         if ok:
             await update.message.reply_text("Усі файли очищено для цього чату.")
         else:
             await update.message.reply_text("Не вдалося очистити файли.")
+
+    async def _is_command_for_me(self, update: Update, context: CallbackContext) -> bool:
+        chat_type = update.effective_chat.type
+        if chat_type in ("group", "supergroup"):
+            text = (update.effective_message.text or "").strip()
+            if not text.startswith("/"):
+                return False
+            bot_username = (await context.bot.get_me()).username
+            first_token = text.split()[0]
+            return f"@{bot_username}" in first_token
+        return True

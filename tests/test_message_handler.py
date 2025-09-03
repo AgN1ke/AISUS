@@ -55,6 +55,7 @@ class TestMessageHandler(unittest.TestCase):
         msg: Mock = Mock()
         msg.chat_type = "private"
         msg.text = "Hello"
+        msg.caption = None
         msg.reply_to_message = None
         coro = self.handler._should_process_message(self.bot, msg)
         self.assertTrue(asyncio.run(coro))
@@ -370,7 +371,7 @@ class TestMessageHandler(unittest.TestCase):
         self.voice.generate_voice_response_and_save_file = Mock(side_effect=generate)
 
         update: Mock = Mock(spec=Update)
-        update.effective_chat = SimpleNamespace(id=chat_id)
+        update.effective_chat = SimpleNamespace(id=chat_id, type="private")
         update.message = Mock()
         update.message.reply_voice = AsyncMock()
         update.message.reply_text = AsyncMock()
@@ -394,6 +395,7 @@ class TestMessageHandler(unittest.TestCase):
         self.voice.generate_voice_response_and_save_file = Mock(side_effect=gen)
 
         update = Mock()
+        update.effective_chat = SimpleNamespace(id=123, type="private")
         update.message = Mock()
         update.message.reply_voice = AsyncMock()
         update.message.reply_text = AsyncMock()
@@ -422,7 +424,7 @@ class TestMessageHandler(unittest.TestCase):
 
     def test_showfiles_no_store(self) -> None:
         update = Mock(spec=Update)
-        update.effective_chat = SimpleNamespace(id=42)
+        update.effective_chat = SimpleNamespace(id=42, type="private")
         update.message = Mock()
         update.message.reply_text = AsyncMock()
         self.openai.chat_vector_stores = {}
@@ -435,7 +437,7 @@ class TestMessageHandler(unittest.TestCase):
 
     def test_showfiles_with_files(self) -> None:
         update = Mock(spec=Update)
-        update.effective_chat = SimpleNamespace(id=43)
+        update.effective_chat = SimpleNamespace(id=43, type="private")
         update.message = Mock()
         update.message.reply_text = AsyncMock()
 
@@ -455,7 +457,7 @@ class TestMessageHandler(unittest.TestCase):
 
     def test_removefile_success_and_arg_required(self) -> None:
         update = Mock(spec=Update)
-        update.effective_chat = SimpleNamespace(id=44)
+        update.effective_chat = SimpleNamespace(id=44, type="private")
         update.message = Mock()
         update.message.reply_text = AsyncMock()
         context = Mock(spec=CallbackContext)
@@ -474,7 +476,7 @@ class TestMessageHandler(unittest.TestCase):
 
     def test_clearfiles_success(self) -> None:
         update = Mock(spec=Update)
-        update.effective_chat = SimpleNamespace(id=45)
+        update.effective_chat = SimpleNamespace(id=45, type="private")
         update.message = Mock()
         update.message.reply_text = AsyncMock()
         context = Mock(spec=CallbackContext)
@@ -485,3 +487,25 @@ class TestMessageHandler(unittest.TestCase):
         self.openai.clear_files_in_chat.assert_called_once_with(45)
         args, kwargs = update.message.reply_text.await_args
         self.assertIn("очищено", args[0])
+
+    def test_group_document_without_mention_is_ignored(self) -> None:
+        update = Mock(spec=Update)
+        update.effective_chat = SimpleNamespace(id=2001)
+        update.message = Mock()
+        update.message.text = None
+        update.message.caption = None
+        update.message.chat = SimpleNamespace(type="group")
+        update.message.reply_to_message = None
+        update.message.reply_text = AsyncMock()
+        update.message.photo = None
+        update.message.document = True
+
+        context = Mock(spec=CallbackContext)
+        context.bot = self.bot
+
+        self.openai.generate = Mock()
+
+        asyncio.run(self.handler.handle_message(update, context))
+
+        self.openai.generate.assert_not_called()
+        update.message.reply_text.assert_not_awaited()
