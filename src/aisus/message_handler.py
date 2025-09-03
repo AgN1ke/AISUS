@@ -430,5 +430,16 @@ class CustomMessageHandler:
                 return False
             bot_username = (await context.bot.get_me()).username
             first_token = text.split()[0]
-            return f"@{bot_username}" in first_token
+            if f"@{bot_username}" not in first_token:
+                return False
+
+        chat_id = update.effective_chat.id
+        if not self.authenticated_users.get(chat_id):
+            password = self.config.get_system_messages().get("password", "")
+            if password == "":
+                self.authenticated_users[chat_id] = True
+            else:
+                await update.message.reply_text("Будь ласка, введіть пароль для продовження.")
+                return False
+
         return True
