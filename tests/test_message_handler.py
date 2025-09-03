@@ -14,6 +14,10 @@ from telegram.ext import CallbackContext
 from src.aisus.chat_history_manager import ChatHistoryManager
 from src.aisus.config_parser import ConfigReader
 from src.aisus.message_handler import CustomMessageHandler
+from src.aisus.handlers.command_handler import CommandHandler
+from src.aisus.handlers.message_router import MessageRouter
+from src.aisus.services.auth import AuthService
+from src.aisus.services.stats import StatsService
 
 
 class TestMessageHandler(unittest.TestCase):
@@ -34,17 +38,31 @@ class TestMessageHandler(unittest.TestCase):
             "FILE_PATHS_FILES_FOLDER": self.files_dir,
         }, clear=False)
         self.env_patch.start()
-        self.config: ConfigReader = ConfigReader()
-        self.history: ChatHistoryManager = ChatHistoryManager()
+        self.config = ConfigReader()
+        self.history = ChatHistoryManager()
         self.bot: Mock = Mock()
         self.bot.get_me = AsyncMock(return_value=SimpleNamespace(username="testbot"))
         self.voice: Mock = Mock()
         self.openai: Mock = Mock()
-        self.handler: CustomMessageHandler = CustomMessageHandler(
+        self.auth = AuthService(self.config)
+        self.stats = StatsService()
+        self.router = MessageRouter()
+        self.command_handler = CommandHandler(
             config=self.config,
             voice_processor=self.voice,
             chat_history_manager=self.history,
-            openai_wrapper=self.openai
+            openai_wrapper=self.openai,
+            auth_service=self.auth,
+            stats_service=self.stats,
+        )
+        self.handler = CustomMessageHandler(
+            config=self.config,
+            voice_processor=self.voice,
+            chat_history_manager=self.history,
+            openai_wrapper=self.openai,
+            message_router=self.router,
+            auth_service=self.auth,
+            stats=self.stats,
         )
 
     def tearDown(self) -> None:
@@ -57,7 +75,7 @@ class TestMessageHandler(unittest.TestCase):
         msg.text = "Hello"
         msg.caption = None
         msg.reply_to_message = None
-        coro = self.handler._should_process_message(self.bot, msg)
+        coro = self.router.should_process(self.bot, msg)
         self.assertTrue(asyncio.run(coro))
 
     def test_mock_text_dialog_uses_generate(self) -> None:
@@ -75,7 +93,7 @@ class TestMessageHandler(unittest.TestCase):
         self.openai.generate.return_value = Mock()
         self.openai.extract_text.return_value = "Hi there!"
 
-        self.handler.authenticated_users[123] = True
+        self.auth.authenticated_users[123] = True
         asyncio.run(self.handler._handle_user_message(msg))
 
         self.openai.generate.assert_called()
@@ -228,12 +246,18 @@ class TestMessageHandler(unittest.TestCase):
             return created_path
 
         with patch.dict(os.environ, {"FILE_PATHS_IMAGE_FOLDER": ""}, clear=False):
-            cfg_fallback: ConfigReader = ConfigReader()
-            handler_fallback: CustomMessageHandler = CustomMessageHandler(
+            cfg_fallback = ConfigReader()
+            auth_fb = AuthService(cfg_fallback)
+            stats_fb = StatsService()
+            router_fb = MessageRouter()
+            handler_fallback = CustomMessageHandler(
                 config=cfg_fallback,
                 voice_processor=self.voice,
                 chat_history_manager=self.history,
-                openai_wrapper=self.openai
+                openai_wrapper=self.openai,
+                message_router=router_fb,
+                auth_service=auth_fb,
+                stats=stats_fb,
             )
 
         handler_fallback._analyze_image_with_openai = AsyncMock(return_value="ok")
@@ -276,8 +300,11 @@ class TestMessageHandler(unittest.TestCase):
 
     def test_auth_with_text_mention_in_group(self) -> None:
         with patch.dict(os.environ, {"PASSWORD": "secret"}, clear=False):
-            cfg: ConfigReader = ConfigReader()
-            handler: CustomMessageHandler = CustomMessageHandler(cfg, self.voice, self.history, self.openai)
+            cfg = ConfigReader()
+            auth = AuthService(cfg)
+            stats = StatsService()
+            router = MessageRouter()
+            handler = CustomMessageHandler(cfg, self.voice, self.history, self.openai, router, auth, stats)
 
         update = Mock(spec=Update)
         update.effective_chat = SimpleNamespace(id=1001)
@@ -293,13 +320,16 @@ class TestMessageHandler(unittest.TestCase):
 
         asyncio.run(handler.handle_message(update, context))
 
-        self.assertTrue(handler.authenticated_users.get(1001))
+        self.assertTrue(auth.authenticated_users.get(1001))
         update.message.reply_text.assert_awaited()
 
     def test_auth_with_text_reply_in_group(self) -> None:
         with patch.dict(os.environ, {"PASSWORD": "secret"}, clear=False):
-            cfg: ConfigReader = ConfigReader()
-            handler: CustomMessageHandler = CustomMessageHandler(cfg, self.voice, self.history, self.openai)
+            cfg = ConfigReader()
+            auth = AuthService(cfg)
+            stats = StatsService()
+            router = MessageRouter()
+            handler = CustomMessageHandler(cfg, self.voice, self.history, self.openai, router, auth, stats)
         update = Mock(spec=Update)
         update.effective_chat = SimpleNamespace(id=1002)
         update.message = Mock()
@@ -312,13 +342,16 @@ class TestMessageHandler(unittest.TestCase):
         context = Mock(spec=CallbackContext)
         context.bot = self.bot
         asyncio.run(handler.handle_message(update, context))
-        self.assertTrue(handler.authenticated_users.get(1002))
+        self.assertTrue(auth.authenticated_users.get(1002))
         update.message.reply_text.assert_awaited()
 
     def test_auth_with_image_caption_mention_in_group(self) -> None:
         with patch.dict(os.environ, {"PASSWORD": "secret"}, clear=False):
-            cfg: ConfigReader = ConfigReader()
-            handler: CustomMessageHandler = CustomMessageHandler(cfg, self.voice, self.history, self.openai)
+            cfg = ConfigReader()
+            auth = AuthService(cfg)
+            stats = StatsService()
+            router = MessageRouter()
+            handler = CustomMessageHandler(cfg, self.voice, self.history, self.openai, router, auth, stats)
         update = Mock(spec=Update)
         update.effective_chat = SimpleNamespace(id=1003)
         update.message = Mock()
@@ -332,13 +365,16 @@ class TestMessageHandler(unittest.TestCase):
         context = Mock(spec=CallbackContext)
         context.bot = self.bot
         asyncio.run(handler.handle_message(update, context))
-        self.assertTrue(handler.authenticated_users.get(1003))
+        self.assertTrue(auth.authenticated_users.get(1003))
         update.message.reply_text.assert_awaited()
 
     def test_auth_with_image_caption_reply_in_group(self) -> None:
         with patch.dict(os.environ, {"PASSWORD": "secret"}, clear=False):
-            cfg: ConfigReader = ConfigReader()
-            handler: CustomMessageHandler = CustomMessageHandler(cfg, self.voice, self.history, self.openai)
+            cfg = ConfigReader()
+            auth = AuthService(cfg)
+            stats = StatsService()
+            router = MessageRouter()
+            handler = CustomMessageHandler(cfg, self.voice, self.history, self.openai, router, auth, stats)
         update = Mock(spec=Update)
         update.effective_chat = SimpleNamespace(id=1004)
         update.message = Mock()
@@ -352,7 +388,7 @@ class TestMessageHandler(unittest.TestCase):
         context = Mock(spec=CallbackContext)
         context.bot = self.bot
         asyncio.run(handler.handle_message(update, context))
-        self.assertTrue(handler.authenticated_users.get(1004))
+        self.assertTrue(auth.authenticated_users.get(1004))
         update.message.reply_text.assert_awaited()
 
     def test_resend_last_as_voice_command_sends_last_bot_message_as_voice(self) -> None:
@@ -378,7 +414,7 @@ class TestMessageHandler(unittest.TestCase):
 
         context: Mock = Mock(spec=CallbackContext)
 
-        asyncio.run(self.handler.resend_last_as_voice_command(update, context))
+        asyncio.run(self.command_handler.resend_last_as_voice_command(update, context))
 
         update.message.reply_voice.assert_awaited_once_with(tts_path)
         self.assertFalse(os.path.exists(tts_path))
@@ -403,7 +439,7 @@ class TestMessageHandler(unittest.TestCase):
         context = Mock(spec=CallbackContext)
         context.args = ["Test", "1", "2", "3"]
 
-        asyncio.run(self.handler.audio_command(update, context))
+        asyncio.run(self.command_handler.audio_command(update, context))
 
         update.message.reply_voice.assert_awaited_once_with(tts_path)
         self.assertFalse(os.path.exists(tts_path))
@@ -417,7 +453,7 @@ class TestMessageHandler(unittest.TestCase):
         context = Mock(spec=CallbackContext)
         context.args = []
 
-        asyncio.run(self.handler.audio_command(update, context))
+        asyncio.run(self.command_handler.audio_command(update, context))
 
         update.message.reply_text.assert_awaited_once()
         update.message.reply_voice.assert_not_awaited()
@@ -431,7 +467,7 @@ class TestMessageHandler(unittest.TestCase):
 
         context = Mock(spec=CallbackContext)
 
-        asyncio.run(self.handler.show_files_command(update, context))
+        asyncio.run(self.command_handler.show_files_command(update, context))
 
         update.message.reply_text.assert_awaited_once()
 
@@ -448,7 +484,7 @@ class TestMessageHandler(unittest.TestCase):
         ])
 
         context = Mock(spec=CallbackContext)
-        asyncio.run(self.handler.show_files_command(update, context))
+        asyncio.run(self.command_handler.show_files_command(update, context))
 
         self.openai.list_files_in_chat.assert_called_once_with(43)
         args, kwargs = update.message.reply_text.await_args
@@ -463,13 +499,13 @@ class TestMessageHandler(unittest.TestCase):
         context = Mock(spec=CallbackContext)
 
         context.args = []
-        asyncio.run(self.handler.remove_file_command(update, context))
+        asyncio.run(self.command_handler.remove_file_command(update, context))
         update.message.reply_text.assert_awaited()
         update.message.reply_text.reset_mock()
 
         context.args = ["f123"]
         self.openai.remove_file_from_chat = Mock(return_value=True)
-        asyncio.run(self.handler.remove_file_command(update, context))
+        asyncio.run(self.command_handler.remove_file_command(update, context))
         self.openai.remove_file_from_chat.assert_called_once_with(44, "f123")
         args, kwargs = update.message.reply_text.await_args
         self.assertIn("видалено", args[0])
@@ -482,7 +518,7 @@ class TestMessageHandler(unittest.TestCase):
         context = Mock(spec=CallbackContext)
 
         self.openai.clear_files_in_chat = Mock(return_value=True)
-        asyncio.run(self.handler.clear_files_command(update, context))
+        asyncio.run(self.command_handler.clear_files_command(update, context))
 
         self.openai.clear_files_in_chat.assert_called_once_with(45)
         args, kwargs = update.message.reply_text.await_args

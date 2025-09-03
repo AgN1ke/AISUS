@@ -4,51 +4,48 @@ import base64
 import logging
 from typing import Tuple, Optional, Dict, Any
 import requests
-from telegram import Update, Bot
+from telegram import Update
 from telegram.ext import CallbackContext
 from src.aisus.message_wrapper import MessageWrapper
 from src.aisus.config_parser import ConfigReader
 from src.aisus.voice_processor import VoiceProcessor
 from src.aisus.chat_history_manager import ChatHistoryManager
 from src.aisus.openai_wrapper import OpenAIWrapper
-import time
 import inspect
+from src.aisus.handlers.message_router import MessageRouter
+from src.aisus.services.auth import AuthService
+from src.aisus.services.stats import StatsService
 
 logger: logging.Logger = logging.getLogger(__name__)
 
 
 class CustomMessageHandler:
-    def __init__(self, config: ConfigReader, voice_processor: VoiceProcessor, chat_history_manager: ChatHistoryManager,
-                 openai_wrapper: OpenAIWrapper) -> None:
-        self.config: ConfigReader = config
-        self.voice_processor: VoiceProcessor = voice_processor
-        self.chat_history_manager: ChatHistoryManager = chat_history_manager
-        self.openai_wrapper: OpenAIWrapper = openai_wrapper
-        self.authenticated_users: Dict[int, bool] = {}
-        self.started_at = time.monotonic()
-        self.tokens_in = 0
-        self.tokens_out = 0
-        self.messages_in = 0
-        self.messages_out = 0
-        self.per_message_stats = []
+    def __init__(
+        self,
+        config: ConfigReader,
+        voice_processor: VoiceProcessor,
+        chat_history_manager: ChatHistoryManager,
+        openai_wrapper: OpenAIWrapper,
+        message_router: MessageRouter,
+        auth_service: AuthService,
+        stats: StatsService,
+    ) -> None:
+        self.config = config
+        self.voice_processor = voice_processor
+        self.chat_history_manager = chat_history_manager
+        self.openai_wrapper = openai_wrapper
+        self.message_router = message_router
+        self.auth = auth_service
+        self.stats = stats
 
     async def handle_message(self, update: Update, context: CallbackContext) -> None:
-        chat_id: int = update.effective_chat.id
-        bot_username: str = (await context.bot.get_me()).username
-        raw_text: str = (update.message.text or update.message.caption or "")
-        message_text_for_auth: str = raw_text.replace(f"@{bot_username}", "").strip()
-        if not await self._should_process_message(context.bot, MessageWrapper(update)):
+        if not await self.message_router.should_process(context.bot, MessageWrapper(update)):
             return
-        if not self.authenticated_users.get(chat_id):
-            password: str = self.config.get_system_messages().get("password", "")
-            if message_text_for_auth == password or password == "":
-                self.authenticated_users[chat_id] = True
-                await update.message.reply_text("Автентифікація успішна. Ви можете почати спілкування.")
-            else:
-                await update.message.reply_text("Будь ласка, введіть пароль для продовження.")
+        bot_username: str = (await context.bot.get_me()).username
+        if not await self.auth.authenticate(update, bot_username):
             return
         try:
-            wrapped_message: MessageWrapper = MessageWrapper(update)
+            wrapped_message = MessageWrapper(update)
             await self._handle_user_message(wrapped_message)
         except Exception as exc:
             logger.exception("handle_message failed: %s", exc)
@@ -57,28 +54,11 @@ class CustomMessageHandler:
             except Exception as notify_exc:
                 logger.exception("failed to notify user: %s", notify_exc)
 
-    @staticmethod
-    async def _should_process_message(bot: Bot, message: MessageWrapper) -> bool:
-        is_private = getattr(message, "chat_type", None) == "private"
-
-        text = getattr(message, "text", "") or ""
-        caption = getattr(message, "caption", "") or ""
-
-        bot_username = (await bot.get_me()).username
-        has_mention = (f"@{bot_username}" in text) or (f"@{bot_username}" in caption)
-
-        is_reply_to_bot = bool(
-            getattr(message, "reply_to_message", None)
-            and getattr(message, "reply_to_message_from_user_username", None) == bot_username
-        )
-
-        return is_private or has_mention or is_reply_to_bot
-
     async def _handle_user_message(self, message: MessageWrapper) -> None:
         user_message, is_voice, is_image = await self._process_message_content(message)
         if not user_message:
             return
-        self.messages_in += 1
+        self.stats.record_incoming()
         first_name = message.from_user_first_name
         chat_id = message.chat_id
 
@@ -91,10 +71,10 @@ class CustomMessageHandler:
         self._update_chat_history(chat_id, first_name, user_message, is_voice, is_image)
 
         try:
-            bot_response, used_fs = await self._generate_bot_response(chat_id)
+            bot_response, used_fs, ti, to = await self._generate_bot_response(chat_id)
             await self._send_response(message, bot_response, is_voice, used_fs)
             self.chat_history_manager.add_bot_message(chat_id, bot_response)
-            self.messages_out += 1
+            self.stats.record_outgoing(chat_id, ti, to, used_fs)
         except Exception as exc:
             logger.exception("response generation/sending failed: %s", exc)
             try:
@@ -236,7 +216,7 @@ class CustomMessageHandler:
 
         return 0, 0
 
-    async def _generate_bot_response(self, chat_id: int) -> tuple[str, bool]:
+    async def _generate_bot_response(self, chat_id: int) -> tuple[str, bool, int, int]:
         limit = self.config.get_file_paths_and_limits()["max_tokens"]
         maybe_coro = self.openai_wrapper.generate(
             model=self.config.get_openai_settings()["gpt_model"],
@@ -247,13 +227,8 @@ class CustomMessageHandler:
         response = await maybe_coro if inspect.isawaitable(maybe_coro) else maybe_coro
         ti, to = self._sum_usage(response)
         used_fs = bool(getattr(self.openai_wrapper, "used_file_search", lambda _: False)(response))
-        self.tokens_in += ti
-        self.tokens_out += to
-        self.per_message_stats.append({
-            "chat_id": chat_id, "tokens_in": ti, "tokens_out": to,
-            "tokens_total": ti + to, "used_file_search": used_fs
-        })
-        return self.openai_wrapper.extract_text(response), used_fs
+        text = self.openai_wrapper.extract_text(response)
+        return text, used_fs, ti, to
 
     async def _send_response(
             self,
@@ -284,162 +259,3 @@ class CustomMessageHandler:
         text_to_send = bot_response if not used_file_search else "[search:on]\n" + bot_response
         await message.reply_text(text_to_send)
 
-    async def clear_history_command(self, update: Update, context: CallbackContext) -> None:
-        if not await self._is_command_for_me(update, context):
-            return
-        chat_id: int = update.effective_chat.id
-        self.chat_history_manager.clear_history(chat_id)
-        await update.message.reply_text("Історію чату очищено.")
-
-    async def resend_last_as_voice_command(self, update: Update, context: CallbackContext) -> None:
-        if not await self._is_command_for_me(update, context):
-            return
-        chat_id: int = update.effective_chat.id
-        history = self.chat_history_manager.get_history(chat_id)
-
-        last_bot_text: Optional[str] = None
-        for entry in reversed(history):
-            role: str = str(entry.get("role", ""))
-            content: Any = entry.get("content", "")
-            if role == "assistant" and isinstance(content, str) and content.strip():
-                last_bot_text = content
-                break
-
-        if not last_bot_text:
-            await update.message.reply_text("Немає попереднього повідомлення бота для цього чату.")
-            return
-
-        audio_dir_opt: Optional[str] = self.config.get_file_paths_and_limits().get("audio_folder_path")
-        if audio_dir_opt:
-            os.makedirs(audio_dir_opt, exist_ok=True)
-
-        voice_file: str = self.voice_processor.generate_voice_response_and_save_file(
-            last_bot_text,
-            self.config.get_openai_settings()["vocalizer_voice"],
-            audio_dir_opt or ""
-        )
-        await update.message.reply_voice(voice_file)
-        if os.path.exists(voice_file):
-            try:
-                os.remove(voice_file)
-            except OSError as exc:
-                logger.exception("failed to remove temp tts file: %s", exc)
-
-    def get_stats(self) -> Dict[str, Any]:
-        total_messages = max(1, self.messages_out)
-        avg_in = self.tokens_in // total_messages
-        avg_out = self.tokens_out // total_messages
-        file_search_uses = sum(1 for it in self.per_message_stats if it.get("used_file_search"))
-        return {
-            "uptime_seconds": int(time.monotonic() - self.started_at),
-            "messages_in": self.messages_in,
-            "messages_out": self.messages_out,
-            "total_tokens_in": self.tokens_in,
-            "total_tokens_out": self.tokens_out,
-            "avg_tokens_in_per_message": avg_in,
-            "avg_tokens_out_per_message": avg_out,
-            "file_search_uses": file_search_uses,
-        }
-
-    async def stats_command(self, update: Update, context: CallbackContext) -> None:
-        if not await self._is_command_for_me(update, context):
-            return
-        s = self.get_stats()
-        secs = s["uptime_seconds"]
-        h, m, sec = secs // 3600, (secs % 3600) // 60, secs % 60
-        uses_total = sum(1 for it in self.per_message_stats if it.get("used_file_search"))
-        uses_recent = sum(1 for it in self.per_message_stats[-10:] if it.get("used_file_search"))
-        lines = [
-            f"uptime: {h:02d}:{m:02d}:{sec:02d}",
-            f"messages in: {s['messages_in']}",
-            f"messages out: {s['messages_out']}",
-            f"tokens in: {s['total_tokens_in']} (avg {s['avg_tokens_in_per_message']})",
-            f"tokens out: {s['total_tokens_out']} (avg {s['avg_tokens_out_per_message']})",
-            f"file search used: {uses_total}",
-        ]
-        await update.message.reply_text("\n".join(lines))
-
-    async def audio_command(self, update: Update, context: CallbackContext) -> None:
-        if not await self._is_command_for_me(update, context):
-            return
-        text_to_speak = " ".join(getattr(context, "args", [])).strip()
-        if not text_to_speak:
-            await update.message.reply_text("Немає тексту для озвучення.")
-            return
-
-        audio_dir = self.config.get_file_paths_and_limits().get("audio_folder_path") or ""
-        if audio_dir:
-            os.makedirs(audio_dir, exist_ok=True)
-
-        voice_file = self.voice_processor.generate_voice_response_and_save_file(
-            text_to_speak,
-            self.config.get_openai_settings().get("vocalizer_voice"),
-            audio_dir,
-        )
-        await update.message.reply_voice(voice_file)
-        if os.path.exists(voice_file):
-            try:
-                os.remove(voice_file)
-            except OSError as exc:
-                logger.exception("failed to remove temp tts file: %s", exc)
-
-    async def show_files_command(self, update: Update, context: CallbackContext) -> None:
-        if not await self._is_command_for_me(update, context):
-            return
-        chat_id = update.effective_chat.id
-        vs_id = self.openai_wrapper.chat_vector_stores.get(chat_id)
-        if not vs_id:
-            await update.message.reply_text("Немає завантажених файлів у цьому чаті.")
-            return
-        files = self.openai_wrapper.list_files_in_chat(chat_id)
-        if not files:
-            await update.message.reply_text("Немає завантажених файлів у цьому чаті.")
-            return
-        lines = [f"{f['id']} – {f['filename']}" for f in files]
-        await update.message.reply_text("Файли:\n" + "\n".join(lines))
-
-    async def remove_file_command(self, update: Update, context: CallbackContext) -> None:
-        if not await self._is_command_for_me(update, context):
-            return
-        chat_id = update.effective_chat.id
-        if not context.args:
-            await update.message.reply_text("Вкажіть file_id після команди.")
-            return
-        file_id = context.args[0].strip()
-        ok = self.openai_wrapper.remove_file_from_chat(chat_id, file_id)
-        if ok:
-            await update.message.reply_text(f"Файл {file_id} видалено.")
-        else:
-            await update.message.reply_text(f"Не вдалося видалити файли {file_id}.")
-
-    async def clear_files_command(self, update: Update, context: CallbackContext) -> None:
-        if not await self._is_command_for_me(update, context):
-            return
-        chat_id = update.effective_chat.id
-        ok = self.openai_wrapper.clear_files_in_chat(chat_id)
-        if ok:
-            await update.message.reply_text("Усі файли очищено для цього чату.")
-        else:
-            await update.message.reply_text("Не вдалося очистити файли.")
-
-    async def _is_command_for_me(self, update: Update, context: CallbackContext) -> bool:
-        chat_type = update.effective_chat.type
-        if chat_type in ("group", "supergroup"):
-            text = (update.effective_message.text or "").strip()
-            if not text.startswith("/"):
-                return False
-            bot_username = (await context.bot.get_me()).username
-            first_token = text.split()[0]
-            if f"@{bot_username}" not in first_token:
-                return False
-
-        chat_id = update.effective_chat.id
-        if not self.authenticated_users.get(chat_id):
-            password = self.config.get_system_messages().get("password", "")
-            if password == "":
-                self.authenticated_users[chat_id] = True
-            else:
-                await update.message.reply_text("Будь ласка, введіть пароль для продовження.")
-                return False
-
-        return True
