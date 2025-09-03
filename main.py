@@ -15,6 +15,7 @@ if __name__ == "__main__":
         api_mode=config.get_openai_settings()["api_mode"],
         reasoning_effort=config.get_openai_settings()["reasoning_effort"],
         search_enabled=str(config.get_openai_settings()["search_enabled"]).lower() in ("1", "true", "yes"),
+        web_search_enabled=str(config.get_openai_settings()["web_search_enabled"]).lower() in ("1", "true", "yes"),
         whisper_model=config.get_openai_settings()["whisper_model"],
         tts_model=config.get_openai_settings()["tts_model"],
     )

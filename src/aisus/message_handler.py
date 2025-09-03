@@ -44,9 +44,23 @@ class CustomMessageHandler:
             return
         try:
             wrapped_message: MessageWrapper = MessageWrapper(update)
-            await self._handle_user_message(wrapped_message)
+            user_message, is_voice, is_image = await self._process_message_content(wrapped_message)
+            if not user_message:
+                return
+            self.messages_in += 1
+            first_name = wrapped_message.from_user_first_name
+            history = self.chat_history_manager.get_history(chat_id)
+            if not history or history[0].get("role") != "system":
+                self.chat_history_manager.add_system_message(
+                    chat_id, self.config.get_system_messages().get("gpt_prompt", "")
+                )
+            self._update_chat_history(chat_id, first_name, user_message, is_voice, is_image)
+            bot_response, used_fs, used_ws = await self._generate_bot_response(chat_id)
+            await self._send_response(wrapped_message, bot_response, is_voice, used_fs, used_ws)
+            self.chat_history_manager.add_bot_message(chat_id, bot_response)
+            self.messages_out += 1
         except Exception as exc:
-            logger.exception("handle_message failed: %s", exc)
+            logger.exception("response generation/sending failed: %s", exc)
             try:
                 await update.message.reply_text("Сталася помилка. Спробуйте ще раз.")
             except Exception as notify_exc:
@@ -73,6 +87,7 @@ class CustomMessageHandler:
         user_message, is_voice, is_image = await self._process_message_content(message)
         if not user_message:
             return
+
         self.messages_in += 1
         first_name = message.from_user_first_name
         chat_id = message.chat_id
@@ -86,8 +101,8 @@ class CustomMessageHandler:
         self._update_chat_history(chat_id, first_name, user_message, is_voice, is_image)
 
         try:
-            bot_response, used_fs = await self._generate_bot_response(chat_id)
-            await self._send_response(message, bot_response, is_voice, used_fs)
+            bot_response, used_fs, used_ws = await self._generate_bot_response(chat_id)
+            await self._send_response(message, bot_response, is_voice, used_fs, used_ws)
             self.chat_history_manager.add_bot_message(chat_id, bot_response)
             self.messages_out += 1
         except Exception as exc:
@@ -216,7 +231,7 @@ class CustomMessageHandler:
 
         return 0, 0
 
-    async def _generate_bot_response(self, chat_id: int) -> tuple[str, bool]:
+    async def _generate_bot_response(self, chat_id: int) -> tuple[str, bool, bool]:
         limit = self.config.get_file_paths_and_limits()["max_tokens"]
         maybe_coro = self.openai_wrapper.generate(
             model=self.config.get_openai_settings()["gpt_model"],
@@ -226,14 +241,19 @@ class CustomMessageHandler:
         )
         response = await maybe_coro if inspect.isawaitable(maybe_coro) else maybe_coro
         ti, to = self._sum_usage(response)
-        used_fs = bool(getattr(self.openai_wrapper, "used_file_search", lambda _: False)(response))
+        used_fs = self.openai_wrapper.used_file_search(response)
+        used_ws = self.openai_wrapper.used_web_search(response)
         self.tokens_in += ti
         self.tokens_out += to
         self.per_message_stats.append({
-            "chat_id": chat_id, "tokens_in": ti, "tokens_out": to,
-            "tokens_total": ti + to, "used_file_search": used_fs
+            "chat_id": chat_id,
+            "tokens_in": ti,
+            "tokens_out": to,
+            "tokens_total": ti + to,
+            "used_file_search": used_fs,
+            "used_web_search": used_ws,
         })
-        return self.openai_wrapper.extract_text(response), used_fs
+        return self.openai_wrapper.extract_text(response), used_fs, used_ws
 
     async def _send_response(
             self,
@@ -241,10 +261,17 @@ class CustomMessageHandler:
             bot_response: str,
             is_voice: bool,
             used_file_search: bool = False,
+            used_web_search: bool = False,
     ) -> None:
+        tags = []
+        if used_file_search:
+            tags.append("[filesearch:on]")
+        if used_web_search:
+            tags.append("[websearch:on]")
+        tag_block = "\n".join(tags)
         if is_voice:
-            if used_file_search:
-                await message.reply_text("[search:on]")
+            if tag_block:
+                await message.reply_text(tag_block)
             audio_dir_opt: Optional[str] = self.config.get_file_paths_and_limits().get("audio_folder_path")
             if audio_dir_opt:
                 os.makedirs(audio_dir_opt, exist_ok=True)
@@ -260,8 +287,7 @@ class CustomMessageHandler:
                 except OSError as exc:
                     logger.exception("failed to remove temp tts file: %s", exc)
             return
-
-        text_to_send = bot_response if not used_file_search else "[search:on]\n" + bot_response
+        text_to_send = f"{tag_block}\n{bot_response}" if tag_block else bot_response
         await message.reply_text(text_to_send)
 
     async def clear_history_command(self, update: Update, context: CallbackContext) -> None:
@@ -310,6 +336,7 @@ class CustomMessageHandler:
         avg_in = self.tokens_in // total_messages
         avg_out = self.tokens_out // total_messages
         file_search_uses = sum(1 for it in self.per_message_stats if it.get("used_file_search"))
+        web_search_uses = sum(1 for it in self.per_message_stats if it.get("used_web_search"))
         return {
             "uptime_seconds": int(time.monotonic() - self.started_at),
             "messages_in": self.messages_in,
@@ -319,6 +346,7 @@ class CustomMessageHandler:
             "avg_tokens_in_per_message": avg_in,
             "avg_tokens_out_per_message": avg_out,
             "file_search_uses": file_search_uses,
+            "web_search_uses": web_search_uses,
         }
 
     async def stats_command(self, update: Update, context: CallbackContext) -> None:
@@ -327,14 +355,14 @@ class CustomMessageHandler:
         s = self.get_stats()
         secs = s["uptime_seconds"]
         h, m, sec = secs // 3600, (secs % 3600) // 60, secs % 60
-        uses_total = sum(1 for it in self.per_message_stats if it.get("used_file_search"))
         lines = [
             f"uptime: {h:02d}:{m:02d}:{sec:02d}",
             f"messages in: {s['messages_in']}",
             f"messages out: {s['messages_out']}",
             f"tokens in: {s['total_tokens_in']} (avg {s['avg_tokens_in_per_message']})",
             f"tokens out: {s['total_tokens_out']} (avg {s['avg_tokens_out_per_message']})",
-            f"file search used: {uses_total}",
+            f"file search used: {s['file_search_uses']}",
+            f"web search used: {s['web_search_uses']}",
         ]
         await update.message.reply_text("\n".join(lines))
 

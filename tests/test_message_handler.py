@@ -505,3 +505,29 @@ class TestMessageHandler(unittest.TestCase):
 
         self.openai.generate.assert_not_called()
         update.message.reply_text.assert_not_awaited()
+
+    def test_send_response_adds_tags(self) -> None:
+        msg: Mock = Mock()
+        msg.reply_text = AsyncMock()
+        msg.reply_voice = AsyncMock()
+
+        asyncio.run(self.handler._send_response(msg, "hello", is_voice=False,
+                                                used_file_search=True, used_web_search=False))
+        msg.reply_text.assert_awaited()
+        args, kwargs = msg.reply_text.await_args
+        self.assertIn("[filesearch:on]", args[0])
+        msg.reply_text.reset_mock()
+
+        asyncio.run(self.handler._send_response(msg, "hello", is_voice=False,
+                                                used_file_search=False, used_web_search=True))
+        msg.reply_text.assert_awaited()
+        args, kwargs = msg.reply_text.await_args
+        self.assertIn("[websearch:on]", args[0])
+        msg.reply_text.reset_mock()
+
+        asyncio.run(self.handler._send_response(msg, "hello", is_voice=False,
+                                                used_file_search=True, used_web_search=True))
+        msg.reply_text.assert_awaited()
+        args, kwargs = msg.reply_text.await_args
+        self.assertIn("[filesearch:on]", args[0])
+        self.assertIn("[websearch:on]", args[0])

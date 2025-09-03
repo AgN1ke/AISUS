@@ -2,6 +2,7 @@
 import os
 from typing import Optional
 from telegram import Update
+from telegram.error import BadRequest
 
 
 class MessageWrapper:
@@ -79,7 +80,10 @@ class MessageWrapper:
         return path
 
     async def reply_text(self, text: str):
-        return await self.message.reply_text(text, parse_mode="Markdown")
+        try:
+            return await self.message.reply_text(text, parse_mode="Markdown")
+        except BadRequest:
+            return await self.message.reply_text(text, parse_mode=None)
 
     async def reply_voice(self, voice):
         return await self.message.reply_voice(voice)

@@ -10,7 +10,7 @@ from openai import (
     BadRequestError,
     AuthenticationError,
 )
-from agents import Agent, Runner, FileSearchTool
+from agents import Agent, Runner, FileSearchTool, WebSearchTool
 import base64
 from datetime import datetime
 
@@ -22,6 +22,7 @@ class OpenAIWrapper:
         api_mode: str = "responses",
         reasoning_effort: str | None = None,
         search_enabled: bool = False,
+        web_search_enabled: bool = False,
         whisper_model: str | None = None,
         tts_model: str | None = None,
     ):
@@ -29,6 +30,7 @@ class OpenAIWrapper:
         self.api_mode = api_mode
         self.reasoning_effort = reasoning_effort
         self.search_enabled = search_enabled
+        self.web_search_enabled = web_search_enabled
         self.chat_vector_stores: dict[int, str] = {}
         self.whisper_model = whisper_model
         self.tts_model = tts_model
@@ -86,9 +88,6 @@ class OpenAIWrapper:
         except (OpenAIError, OSError, BadRequestError, AuthenticationError):
             return None, vs_id
 
-    def set_search_enabled(self, enabled):
-        self.search_enabled = enabled
-
     async def generate(self, model, messages, max_tokens, chat_id=None, extra_overrides=None):
         vector_store_id = self.chat_vector_stores.get(chat_id) if chat_id is not None else None
 
@@ -96,7 +95,14 @@ class OpenAIWrapper:
             include_results = bool(extra_overrides.get("citations", {}).get("enabled")) if extra_overrides else False
             tools = []
             if self.search_enabled and vector_store_id:
-                tools.append(FileSearchTool(vector_store_ids=[vector_store_id], include_search_results=include_results))
+                tools.append(
+                    FileSearchTool(
+                        vector_store_ids=[vector_store_id],
+                        include_search_results=include_results
+                    )
+                )
+            if self.web_search_enabled:
+                tools.append(WebSearchTool())
 
             system_text = next((m.get("content", "") for m in messages if m.get("role") == "system"), "")
             user_messages = [m for m in messages if m.get("role") != "system"]
@@ -156,6 +162,27 @@ class OpenAIWrapper:
                         if getattr(part, "type", None) == "file_search_call":
                             return True
             except (AttributeError, IndexError, TypeError):
+                pass
+        return False
+
+    @staticmethod
+    def used_web_search(resp):
+        ni = getattr(resp, "new_items", None)
+        if ni and hasattr(ni, "__iter__"):
+            for it in ni:
+                raw = getattr(it, "raw_item", None)
+                if getattr(raw, "type", None) == "web_search_call":
+                    return True
+        rr = getattr(resp, "raw_responses", None)
+        if rr and hasattr(rr, "__iter__"):
+            try:
+                out = rr[0].output
+                if out and hasattr(out, "__iter__"):
+                    for part in out:
+                        if getattr(part, "type", None) in {"web_search_call", "tool_call"} and \
+                                getattr(part, "name", None) in {"web_search_preview", "web_search"}:
+                            return True
+            except Exception:
                 pass
         return False
 

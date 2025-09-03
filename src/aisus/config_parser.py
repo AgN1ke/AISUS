@@ -31,6 +31,8 @@ class ConfigReader:
         self.vocalizer_voice: Optional[str] = os.getenv("OPENAI_VOCALIZER_VOICE")
         self.search_enabled: bool = os.getenv("OPENAI_SEARCH_ENABLED", "true").strip().lower() in {"1", "true", "yes",
                                                                                                    "on"}
+        self.web_search_enabled: bool = os.getenv("OPENAI_WEB_SEARCH_ENABLED", "true").strip().lower() in {"1", "true",
+                                                                                                           "yes", "on"}
 
         self.bot_token: Optional[str] = os.getenv("MYAPI_BOT_TOKEN")
 
@@ -61,6 +63,7 @@ class ConfigReader:
             "api_mode": self.api_mode,
             "reasoning_effort": self.reasoning_effort,
             "search_enabled": self.search_enabled,
+            "web_search_enabled": self.web_search_enabled,
         }
 
     def get_api_settings(self) -> Dict[str, Optional[str]]:
