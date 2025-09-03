@@ -80,8 +80,8 @@ class CustomMessageHandler:
         first_name = message.from_user_first_name
         chat_id = message.chat_id
 
-        hist = self.chat_history_manager.get_history(chat_id)
-        if not hist or hist[0].get("role") != "system":
+        history = self.chat_history_manager.get_history(chat_id)
+        if not history or history[0].get("role") != "system":
             self.chat_history_manager.add_system_message(
                 chat_id, self.config.get_system_messages().get("gpt_prompt", "")
             )
@@ -89,8 +89,8 @@ class CustomMessageHandler:
         self._update_chat_history(chat_id, first_name, user_message, is_voice, is_image)
 
         try:
-            bot_response = await self._generate_bot_response(chat_id)
-            await self._send_response(message, bot_response, is_voice)
+            bot_response, used_fs = await self._generate_bot_response(chat_id)
+            await self._send_response(message, bot_response, is_voice, used_fs)
             self.chat_history_manager.add_bot_message(chat_id, bot_response)
             self.messages_out += 1
         except Exception as exc:
@@ -99,6 +99,7 @@ class CustomMessageHandler:
                 await message.reply_text("Сталася помилка. Спробуйте ще раз.")
             except Exception as notify_exc:
                 logger.exception("failed to notify user: %s", notify_exc)
+
         max_history_length = self.config.get_file_paths_and_limits().get("max_history_length", 1000)
         if isinstance(max_history_length, int) and max_history_length >= 3:
             self.chat_history_manager.prune_history(chat_id, max_history_length)
@@ -206,7 +207,8 @@ class CustomMessageHandler:
         )
         self.chat_history_manager.add_user_message(chat_id, first_name, user_message)
 
-    def _sum_usage(self, obj) -> tuple[int, int]:
+    @staticmethod
+    def _sum_usage(obj) -> tuple[int, int]:
         def to_int(x):
             try:
                 return int(x)
@@ -232,7 +234,7 @@ class CustomMessageHandler:
 
         return 0, 0
 
-    async def _generate_bot_response(self, chat_id: int) -> str:
+    async def _generate_bot_response(self, chat_id: int) -> tuple[str, bool]:
         limit = self.config.get_file_paths_and_limits()["max_tokens"]
         maybe_coro = self.openai_wrapper.generate(
             model=self.config.get_openai_settings()["gpt_model"],
@@ -245,12 +247,22 @@ class CustomMessageHandler:
         used_fs = bool(getattr(self.openai_wrapper, "used_file_search", lambda _: False)(response))
         self.tokens_in += ti
         self.tokens_out += to
-        self.per_message_stats.append({"chat_id": chat_id, "tokens_in": ti, "tokens_out": to, "tokens_total": ti + to,
-                                       "used_file_search": used_fs})
-        return self.openai_wrapper.extract_text(response)
+        self.per_message_stats.append({
+            "chat_id": chat_id, "tokens_in": ti, "tokens_out": to,
+            "tokens_total": ti + to, "used_file_search": used_fs
+        })
+        return self.openai_wrapper.extract_text(response), used_fs
 
-    async def _send_response(self, message: MessageWrapper, bot_response: str, is_voice: bool) -> None:
+    async def _send_response(
+            self,
+            message: MessageWrapper,
+            bot_response: str,
+            is_voice: bool,
+            used_file_search: bool = False,
+    ) -> None:
         if is_voice:
+            if used_file_search:
+                await message.reply_text("[search:on]")
             audio_dir_opt: Optional[str] = self.config.get_file_paths_and_limits().get("audio_folder_path")
             if audio_dir_opt:
                 os.makedirs(audio_dir_opt, exist_ok=True)
@@ -266,7 +278,9 @@ class CustomMessageHandler:
                 except OSError as exc:
                     logger.exception("failed to remove temp tts file: %s", exc)
             return
-        await message.reply_text(bot_response)
+
+        text_to_send = bot_response if not used_file_search else "[search:on]\n" + bot_response
+        await message.reply_text(text_to_send)
 
     async def clear_history_command(self, update: Update, context: CallbackContext) -> None:
         chat_id: int = update.effective_chat.id

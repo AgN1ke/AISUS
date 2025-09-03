@@ -19,7 +19,8 @@ if __name__ == "__main__":
     openai_wrapper = OpenAIWrapper(
         api_key=config.get_openai_settings()['api_key'],
         api_mode=config.get_openai_settings()['api_mode'],
-        reasoning_effort=config.get_openai_settings()['reasoning_effort']
+        reasoning_effort=config.get_openai_settings()['reasoning_effort'],
+        search_enabled=config.get_openai_settings()["search_enabled"]
     )
 
     openai_wrapper.restore_vector_stores()

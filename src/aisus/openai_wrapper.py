@@ -2,18 +2,41 @@
 import os
 import asyncio
 from openai import OpenAI
+from openai import (
+    OpenAIError,
+    APIConnectionError,
+    APIStatusError,
+    RateLimitError,
+    BadRequestError,
+    AuthenticationError,
+)
 from agents import Agent, Runner, FileSearchTool
 
 
 class OpenAIWrapper:
-    def __init__(self, api_key: str, api_mode: str = "responses", reasoning_effort: str | None = None):
+    def __init__(self, api_key, api_mode="responses", reasoning_effort=None, search_enabled=False):
         self.client = OpenAI(api_key=api_key)
         os.environ.setdefault("OPENAI_API_KEY", api_key)
         self.api_mode = api_mode
         self.reasoning_effort = reasoning_effort
-        self.chat_vector_stores: dict[int, str] = {}
+        self.search_enabled = search_enabled
+        self.chat_vector_stores = {}
 
-    def restore_vector_stores(self, name_prefix: str = "tg-chat-") -> int:
+    @staticmethod
+    def _messages_to_input(messages):
+        items = []
+        for m in messages:
+            role = m.get("role", "user")
+            content = m.get("content", "")
+            if isinstance(content, str):
+                items.append({"role": role, "content": [{"type": "input_text", "text": content}]})
+            elif isinstance(content, list):
+                items.append({"role": role, "content": content})
+            else:
+                items.append({"role": role, "content": [{"type": "input_text", "text": str(content)}]})
+        return items
+
+    def restore_vector_stores(self, name_prefix="tg-chat-"):
         restored = 0
         cursor = None
         while True:
@@ -34,7 +57,7 @@ class OpenAIWrapper:
                 break
         return restored
 
-    def ensure_vector_store(self, chat_id: int) -> str:
+    def ensure_vector_store(self, chat_id):
         vs_id = self.chat_vector_stores.get(chat_id)
         if vs_id:
             return vs_id
@@ -42,31 +65,50 @@ class OpenAIWrapper:
         self.chat_vector_stores[chat_id] = vs.id
         return vs.id
 
-    def upload_file_to_chat(self, chat_id: int, file_path: str) -> tuple[str, str]:
+    def upload_file_to_chat(self, chat_id, file_path):
         vs_id = self.ensure_vector_store(chat_id)
-        f = self.client.files.create(file=open(file_path, "rb"), purpose="assistants")
-        self.client.vector_stores.files.create(vector_store_id=vs_id, file_id=f.id)
-        return f.id, vs_id
+        try:
+            with open(file_path, "rb") as fh:
+                f = self.client.files.create(file=fh, purpose="assistants")
+            self.client.vector_stores.files.create(vector_store_id=vs_id, file_id=f.id)
+            return f.id, vs_id
+        except (OpenAIError, OSError, BadRequestError, AuthenticationError):
+            return None, vs_id
 
-    async def generate(self, model: str, messages: list, max_tokens: int, chat_id: int | None = None,
-                       extra_overrides: dict | None = None):
+    def set_search_enabled(self, enabled):
+        self.search_enabled = enabled
+
+    async def generate(self, model, messages, max_tokens, chat_id=None, extra_overrides=None):
         vector_store_id = self.chat_vector_stores.get(chat_id) if chat_id is not None else None
+
         if self.api_mode == "agents":
             include_results = bool(extra_overrides.get("citations", {}).get("enabled")) if extra_overrides else False
             tools = []
-            if vector_store_id:
+            if self.search_enabled and vector_store_id:
                 tools.append(FileSearchTool(vector_store_ids=[vector_store_id], include_search_results=include_results))
+
             system_text = next((m.get("content", "") for m in messages if m.get("role") == "system"), "")
             user_messages = [m for m in messages if m.get("role") != "system"]
-            agent = Agent(name="TG Assistant", instructions=system_text, tools=tools, model=model)
-            return await Runner.run(agent, user_messages)
-        loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(
-            None, lambda: self.client.chat.completions.create(model=model, messages=messages, max_tokens=max_tokens)
-        )
+            return await Runner.run(
+                Agent(name="TG Assistant", instructions=system_text, tools=tools, model=model),
+                user_messages,
+            )
+
+        payload = {
+            "model": model,
+            "input": self._messages_to_input(messages),
+            "max_output_tokens": max_tokens,
+        }
+        if self.reasoning_effort:
+            payload["reasoning"] = {"effort": self.reasoning_effort}
+
+        try:
+            return await asyncio.to_thread(self.client.responses.create, **payload)
+        except (APIConnectionError, APIStatusError, RateLimitError, BadRequestError, AuthenticationError, OpenAIError):
+            return None
 
     @staticmethod
-    def _get_text_from_final_output(resp) -> str:
+    def _get_text_from_final_output(resp):
         fo = getattr(resp, "final_output", None)
         return "" if fo is None else str(fo)
 
@@ -86,14 +128,14 @@ class OpenAIWrapper:
                 for v in d.values():
                     yield from self._walk_nodes(v, depth + 1)
 
-    def used_file_search(self, resp) -> bool:
+    @staticmethod
+    def used_file_search(resp):
         ni = getattr(resp, "new_items", None)
         if ni and hasattr(ni, "__iter__"):
             for it in ni:
                 raw = getattr(it, "raw_item", None)
                 if getattr(raw, "type", None) == "file_search_call":
                     return True
-
         rr = getattr(resp, "raw_responses", None)
         if rr and hasattr(rr, "__iter__"):
             try:
@@ -102,15 +144,22 @@ class OpenAIWrapper:
                     for part in out:
                         if getattr(part, "type", None) == "file_search_call":
                             return True
-            except Exception:
+            except (AttributeError, IndexError, TypeError):
                 pass
-
         return False
 
-    def extract_text(self, response):
+    @staticmethod
+    def extract_text(response):
+        if response is None:
+            return ""
         if hasattr(response, "final_output"):
-            return "" if getattr(response, "final_output") is None else str(response.final_output)
-        return getattr(response, "output_text", None) or response.choices[0].message.content
+            return "" if getattr(response, "final_output", None) is None else str(response.final_output)
+        if getattr(response, "output_text", None):
+            return response.output_text
+        try:
+            return response.choices[0].message.content
+        except (AttributeError, IndexError, TypeError):
+            return ""
 
     @staticmethod
     def extract_usage(response):
@@ -120,6 +169,9 @@ class OpenAIWrapper:
             except Exception:
                 return 0
 
+        if response is None:
+            return 0, 0
+
         cw = getattr(response, "context_wrapper", None)
         u = getattr(cw, "usage", None) if cw else None
         if u:
@@ -127,10 +179,13 @@ class OpenAIWrapper:
 
         rr = getattr(response, "raw_responses", None)
         if rr and hasattr(rr, "__iter__"):
-            ti = sum(to_int(getattr(getattr(r, "usage", None), "input_tokens", 0)) for r in rr)
-            to = sum(to_int(getattr(getattr(r, "usage", None), "output_tokens", 0)) for r in rr)
-            if ti or to:
-                return ti, to
+            try:
+                ti = sum(to_int(getattr(getattr(r, "usage", None), "input_tokens", 0)) for r in rr)
+                to = sum(to_int(getattr(getattr(r, "usage", None), "output_tokens", 0)) for r in rr)
+                if ti or to:
+                    return ti, to
+            except (AttributeError, TypeError):
+                pass
 
         u = getattr(response, "usage", None)
         if u:
@@ -138,9 +193,25 @@ class OpenAIWrapper:
             to = to_int(getattr(u, "output_tokens", None) or getattr(u, "completion_tokens", 0))
             return ti, to
 
-        return 0, 0
+        ti = to_int(getattr(getattr(response, "usage", None), "input_tokens", 0))
+        to = to_int(getattr(getattr(response, "usage", None), "output_tokens", 0))
+        return ti, to
 
-    def clear_files_in_chat(self, chat_id: int) -> bool:
+    def remove_file_from_chat(self, chat_id, file_id):
+        vs_id = self.chat_vector_stores.get(chat_id)
+        if not vs_id:
+            return False
+        try:
+            self.client.vector_stores.files.delete(vector_store_id=vs_id, file_id=file_id)
+        except (APIConnectionError, APIStatusError, RateLimitError, OpenAIError):
+            return False
+        try:
+            self.client.files.delete(file_id)
+        except (APIConnectionError, APIStatusError, RateLimitError, OpenAIError):
+            pass
+        return True
+
+    def clear_files_in_chat(self, chat_id):
         vs_id = self.chat_vector_stores.get(chat_id)
         if not vs_id:
             return False
@@ -148,12 +219,21 @@ class OpenAIWrapper:
             self.client.vector_stores.delete(vs_id)
             self.chat_vector_stores.pop(chat_id, None)
             return True
-        except Exception:
+        except (APIConnectionError, APIStatusError, RateLimitError, OpenAIError, OSError):
             return False
 
-    def list_files_in_chat(self, chat_id: int) -> list[dict]:
+    def list_files_in_chat(self, chat_id):
         vs_id = self.chat_vector_stores.get(chat_id)
         if not vs_id:
             return []
-        files = self.client.vector_stores.files.list(vector_store_id=vs_id).data
-        return [{"id": f.id, "filename": getattr(f, "filename", "?")} for f in files]
+        try:
+            items = self.client.vector_stores.files.list(vector_store_id=vs_id).data
+            out = []
+            for it in items:
+                f = self.client.files.retrieve(it.id)
+                name = getattr(f, "filename", None) or getattr(f, "display_name", None) or getattr(f, "name",
+                                                                                                   None) or "?"
+                out.append({"id": it.id, "filename": name})
+            return out
+        except (APIConnectionError, APIStatusError, RateLimitError, OpenAIError):
+            return []

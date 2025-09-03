@@ -19,6 +19,7 @@ class TestConfigParser(unittest.TestCase):
             "OPENAI_GPT_MODEL": "gpt-x",
             "OPENAI_API_MODE": "responses",
             "OPENAI_REASONING_EFFORT": "medium",
+            "OPENAI_SEARCH_ENABLED": "false",
             "MYAPI_BOT_TOKEN": "token",
             "FILE_PATHS_AUDIO_FOLDER": "/tmp/a",
             "FILE_PATHS_IMAGE_FOLDER": "/tmp/i",
@@ -42,6 +43,7 @@ class TestConfigParser(unittest.TestCase):
         self.assertEqual(openai_settings["gpt_model"], "gpt-x")
         self.assertEqual(openai_settings["api_mode"], "responses")
         self.assertEqual(openai_settings["reasoning_effort"], "medium")
+        self.assertFalse(openai_settings["search_enabled"])
 
         api_settings = cfg.get_api_settings()
         self.assertEqual(api_settings["bot_token"], "token")
@@ -67,10 +69,35 @@ class TestConfigParser(unittest.TestCase):
         openai_settings = cfg.get_openai_settings()
         self.assertEqual(openai_settings["api_mode"], "responses")
         self.assertIsNone(openai_settings["reasoning_effort"])
+        self.assertTrue(openai_settings["search_enabled"])
 
         paths = cfg.get_file_paths_and_limits()
         self.assertIsNone(paths["image_folder_path"])
         self.assertIsNone(paths["files_folder_path"])
         self.assertEqual(paths["max_tokens"], 3000)
         self.assertEqual(paths["max_history_length"], 124000)
+        env_patch.stop()
+
+    def test_search_enabled_true(self) -> None:
+        env_patch: Any = patch.dict(os.environ, {
+            "OPENAI_API_KEY": "sk-test",
+            "OPENAI_GPT_MODEL": "gpt-x",
+            "OPENAI_SEARCH_ENABLED": "true",
+        }, clear=False)
+        env_patch.start()
+        cfg: ConfigReader = ConfigReader()
+        openai_settings = cfg.get_openai_settings()
+        self.assertTrue(openai_settings["search_enabled"])
+        env_patch.stop()
+
+    def test_search_enabled_false(self) -> None:
+        env_patch: Any = patch.dict(os.environ, {
+            "OPENAI_API_KEY": "sk-test",
+            "OPENAI_GPT_MODEL": "gpt-x",
+            "OPENAI_SEARCH_ENABLED": "false",
+        }, clear=False)
+        env_patch.start()
+        cfg: ConfigReader = ConfigReader()
+        openai_settings = cfg.get_openai_settings()
+        self.assertFalse(openai_settings["search_enabled"])
         env_patch.stop()

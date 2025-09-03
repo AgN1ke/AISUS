@@ -14,9 +14,12 @@ class ConfigReader:
     def __init__(self) -> None:
         self.gpt_prompt: str = _format_message(os.getenv("SYSTEM_MESSAGES_GPT_PROMPT"))
         self.voice_message_affix: str = _format_message(os.getenv("SYSTEM_MESSAGES_VOICE_MESSAGE_AFFIX"))
-        self.image_message_affix: str = _format_message(os.getenv("SYSTEM_MESSAGES_IMAGE_MESSAGE_AFFIX", "Ти отримав зображення."))
-        self.image_caption_affix: str = _format_message(os.getenv("SYSTEM_MESSAGES_IMAGE_CAPTION_AFFIX", "Під ним такий підпис відправника:"))
-        self.image_sence_affix: str = _format_message(os.getenv("SYSTEM_MESSAGES_IMAGE_SENCE_AFFIX", "На картинці зображено:"))
+        self.image_message_affix: str = _format_message(
+            os.getenv("SYSTEM_MESSAGES_IMAGE_MESSAGE_AFFIX", "Ти отримав зображення."))
+        self.image_caption_affix: str = _format_message(
+            os.getenv("SYSTEM_MESSAGES_IMAGE_CAPTION_AFFIX", "Під ним такий підпис відправника:"))
+        self.image_sence_affix: str = _format_message(
+            os.getenv("SYSTEM_MESSAGES_IMAGE_SENCE_AFFIX", "На картинці зображено:"))
         self.password: str = _format_message(os.getenv("PASSWORD"))
 
         self.api_key: Optional[str] = os.getenv("OPENAI_API_KEY")
@@ -26,6 +29,8 @@ class ConfigReader:
         self.whisper_model: Optional[str] = os.getenv("OPENAI_WHISPER_MODEL")
         self.tts_model: Optional[str] = os.getenv("OPENAI_TTS_MODEL")
         self.vocalizer_voice: Optional[str] = os.getenv("OPENAI_VOCALIZER_VOICE")
+        self.search_enabled: bool = os.getenv("OPENAI_SEARCH_ENABLED", "true").strip().lower() in {"1", "true", "yes",
+                                                                                                   "on"}
 
         self.bot_token: Optional[str] = os.getenv("MYAPI_BOT_TOKEN")
 
@@ -55,6 +60,7 @@ class ConfigReader:
             "vocalizer_voice": self.vocalizer_voice,
             "api_mode": self.api_mode,
             "reasoning_effort": self.reasoning_effort,
+            "search_enabled": self.search_enabled,
         }
 
     def get_api_settings(self) -> Dict[str, Optional[str]]:

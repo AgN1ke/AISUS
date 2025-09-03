@@ -4,7 +4,6 @@ openai-agents
 configparser
 python-telegram-bot
 python-dateutil
-heroku3
 requests
 wheel
 setuptools
