@@ -21,6 +21,84 @@ class ConfigReader:
         self.image_sence_affix: str = _format_message(
             os.getenv("SYSTEM_MESSAGES_IMAGE_SENCE_AFFIX", "На картинці зображено:"))
         self.password: str = _format_message(os.getenv("PASSWORD"))
+        self.auth_success: str = _format_message(
+            os.getenv(
+                "SYSTEM_MESSAGES_AUTH_SUCCESS",
+                "Автентифікація успішна. Ви можете почати спілкування.",
+            )
+        )
+        self.auth_prompt: str = _format_message(
+            os.getenv(
+                "SYSTEM_MESSAGES_AUTH_PROMPT",
+                "Будь ласка, введіть пароль для продовження.",
+            )
+        )
+        self.error_message: str = _format_message(
+            os.getenv(
+                "SYSTEM_MESSAGES_ERROR",
+                "Сталася помилка. Спробуйте ще раз.",
+            )
+        )
+        self.file_added_template: str = _format_message(
+            os.getenv(
+                "SYSTEM_MESSAGES_FILE_ADDED_TEMPLATE",
+                "Файл додано: {file_name}. Тепер можу посилатись на нього у відповідях.",
+            )
+        )
+        self.history_cleared: str = _format_message(
+            os.getenv(
+                "SYSTEM_MESSAGES_HISTORY_CLEARED",
+                "Історію чату очищено.",
+            )
+        )
+        self.no_previous_message: str = _format_message(
+            os.getenv(
+                "SYSTEM_MESSAGES_NO_PREVIOUS_MESSAGE",
+                "Немає попереднього повідомлення бота для цього чату.",
+            )
+        )
+        self.no_text_to_speak: str = _format_message(
+            os.getenv(
+                "SYSTEM_MESSAGES_NO_TEXT_TO_SPEAK",
+                "Немає тексту для озвучення.",
+            )
+        )
+        self.no_files: str = _format_message(
+            os.getenv(
+                "SYSTEM_MESSAGES_NO_FILES",
+                "Немає завантажених файлів у цьому чаті.",
+            )
+        )
+        self.files_header: str = _format_message(
+            os.getenv("SYSTEM_MESSAGES_FILES_HEADER", "Файли:")
+        )
+        self.file_id_required: str = _format_message(
+            os.getenv("SYSTEM_MESSAGES_FILE_ID_REQUIRED", "Вкажіть file_id після команди.")
+        )
+        self.file_deleted_template: str = _format_message(
+            os.getenv(
+                "SYSTEM_MESSAGES_FILE_DELETED_TEMPLATE",
+                "Файл {file_id} видалено.",
+            )
+        )
+        self.file_delete_failed_template: str = _format_message(
+            os.getenv(
+                "SYSTEM_MESSAGES_FILE_DELETE_FAILED_TEMPLATE",
+                "Не вдалося видалити файли {file_id}.",
+            )
+        )
+        self.files_cleared: str = _format_message(
+            os.getenv(
+                "SYSTEM_MESSAGES_FILES_CLEARED",
+                "Усі файли очищено для цього чату.",
+            )
+        )
+        self.files_clear_failed: str = _format_message(
+            os.getenv(
+                "SYSTEM_MESSAGES_FILES_CLEAR_FAILED",
+                "Не вдалося очистити файли.",
+            )
+        )
 
         self.api_key: Optional[str] = os.getenv("OPENAI_API_KEY")
         self.gpt_model: Optional[str] = os.getenv("OPENAI_GPT_MODEL")
@@ -51,6 +129,20 @@ class ConfigReader:
             "image_caption_affix": self.image_caption_affix,
             "image_sence_affix": self.image_sence_affix,
             "password": self.password,
+            "auth_success": self.auth_success,
+            "auth_prompt": self.auth_prompt,
+            "error_message": self.error_message,
+            "file_added_template": self.file_added_template,
+            "history_cleared": self.history_cleared,
+            "no_previous_message": self.no_previous_message,
+            "no_text_to_speak": self.no_text_to_speak,
+            "no_files": self.no_files,
+            "files_header": self.files_header,
+            "file_id_required": self.file_id_required,
+            "file_deleted_template": self.file_deleted_template,
+            "file_delete_failed_template": self.file_delete_failed_template,
+            "files_cleared": self.files_cleared,
+            "files_clear_failed": self.files_clear_failed,
         }
 
     def get_openai_settings(self) -> Dict[str, Optional[str]]:

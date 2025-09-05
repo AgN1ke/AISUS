@@ -14,6 +14,20 @@ class TestConfigParser(unittest.TestCase):
             "SYSTEM_MESSAGES_IMAGE_MESSAGE_AFFIX": "Img:",
             "SYSTEM_MESSAGES_IMAGE_CAPTION_AFFIX": "Cap:",
             "SYSTEM_MESSAGES_IMAGE_SENCE_AFFIX": "Scene:",
+            "SYSTEM_MESSAGES_AUTH_SUCCESS": "Auth ok",
+            "SYSTEM_MESSAGES_AUTH_PROMPT": "Enter pass",
+            "SYSTEM_MESSAGES_ERROR": "Oops",
+            "SYSTEM_MESSAGES_FILE_ADDED_TEMPLATE": "Added {file_name}",
+            "SYSTEM_MESSAGES_HISTORY_CLEARED": "Cleared",
+            "SYSTEM_MESSAGES_NO_PREVIOUS_MESSAGE": "No prev",
+            "SYSTEM_MESSAGES_NO_TEXT_TO_SPEAK": "No text",
+            "SYSTEM_MESSAGES_NO_FILES": "No files",
+            "SYSTEM_MESSAGES_FILES_HEADER": "Files:",
+            "SYSTEM_MESSAGES_FILE_ID_REQUIRED": "Need id",
+            "SYSTEM_MESSAGES_FILE_DELETED_TEMPLATE": "Del {file_id}",
+            "SYSTEM_MESSAGES_FILE_DELETE_FAILED_TEMPLATE": "No del {file_id}",
+            "SYSTEM_MESSAGES_FILES_CLEARED": "All clear",
+            "SYSTEM_MESSAGES_FILES_CLEAR_FAILED": "No clear",
             "PASSWORD": "pw",
             "OPENAI_API_KEY": "sk-test",
             "OPENAI_GPT_MODEL": "gpt-x",
@@ -36,6 +50,20 @@ class TestConfigParser(unittest.TestCase):
         self.assertEqual(sys_msgs["image_message_affix"], "Img:")
         self.assertEqual(sys_msgs["image_caption_affix"], "Cap:")
         self.assertEqual(sys_msgs["image_sence_affix"], "Scene:")
+        self.assertEqual(sys_msgs["auth_success"], "Auth ok")
+        self.assertEqual(sys_msgs["auth_prompt"], "Enter pass")
+        self.assertEqual(sys_msgs["error_message"], "Oops")
+        self.assertEqual(sys_msgs["file_added_template"], "Added {file_name}")
+        self.assertEqual(sys_msgs["history_cleared"], "Cleared")
+        self.assertEqual(sys_msgs["no_previous_message"], "No prev")
+        self.assertEqual(sys_msgs["no_text_to_speak"], "No text")
+        self.assertEqual(sys_msgs["no_files"], "No files")
+        self.assertEqual(sys_msgs["files_header"], "Files:")
+        self.assertEqual(sys_msgs["file_id_required"], "Need id")
+        self.assertEqual(sys_msgs["file_deleted_template"], "Del {file_id}")
+        self.assertEqual(sys_msgs["file_delete_failed_template"], "No del {file_id}")
+        self.assertEqual(sys_msgs["files_cleared"], "All clear")
+        self.assertEqual(sys_msgs["files_clear_failed"], "No clear")
         self.assertEqual(sys_msgs["password"], "pw")
 
         openai_settings = cfg.get_openai_settings()
@@ -65,6 +93,7 @@ class TestConfigParser(unittest.TestCase):
         self.assertEqual(sys_msgs["image_message_affix"], "Ти отримав зображення.")
         self.assertEqual(sys_msgs["image_caption_affix"], "Під ним такий підпис відправника:")
         self.assertEqual(sys_msgs["image_sence_affix"], "На картинці зображено:")
+        self.assertEqual(sys_msgs["no_files"], "Немає завантажених файлів у цьому чаті.")
 
         openai_settings = cfg.get_openai_settings()
         self.assertEqual(openai_settings["api_mode"], "responses")

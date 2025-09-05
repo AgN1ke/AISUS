@@ -38,9 +38,13 @@ class CustomMessageHandler:
             password: str = self.config.get_system_messages().get("password", "")
             if message_text_for_auth == password or password == "":
                 self.authenticated_users[chat_id] = True
-                await update.message.reply_text("Автентифікація успішна. Ви можете почати спілкування.")
+                await update.message.reply_text(
+                    self.config.get_system_messages()["auth_success"]
+                )
             else:
-                await update.message.reply_text("Будь ласка, введіть пароль для продовження.")
+                await update.message.reply_text(
+                    self.config.get_system_messages()["auth_prompt"]
+                )
             return
         try:
             wrapped_message: MessageWrapper = MessageWrapper(update)
@@ -62,7 +66,9 @@ class CustomMessageHandler:
         except Exception as exc:
             logger.exception("response generation/sending failed: %s", exc)
             try:
-                await update.message.reply_text("Сталася помилка. Спробуйте ще раз.")
+                await update.message.reply_text(
+                    self.config.get_system_messages()["error_message"]
+                )
             except Exception as notify_exc:
                 logger.exception("failed to notify user: %s", notify_exc)
 
@@ -108,7 +114,9 @@ class CustomMessageHandler:
         except Exception as exc:
             logger.exception("response generation/sending failed: %s", exc)
             try:
-                await message.reply_text("Сталася помилка. Спробуйте ще раз.")
+                await message.reply_text(
+                    self.config.get_system_messages()["error_message"]
+                )
             except Exception as notify_exc:
                 logger.exception("failed to notify user: %s", notify_exc)
 
@@ -167,7 +175,13 @@ class CustomMessageHandler:
                 chat_id = message.chat_id
                 self.openai_wrapper.upload_file_to_chat(chat_id, file_path)
                 file_name = os.path.basename(file_path)
-                return f"Файл додано: {file_name}. Тепер можу посилатись на нього у відповідях.", False, False
+                return (
+                    self.config.get_system_messages()[
+                        "file_added_template"
+                    ].format(file_name=file_name),
+                    False,
+                    False,
+                )
             finally:
                 if file_path and os.path.exists(file_path):
                     try:
@@ -295,7 +309,9 @@ class CustomMessageHandler:
             return
         chat_id: int = update.effective_chat.id
         self.chat_history_manager.clear_history(chat_id)
-        await update.message.reply_text("Історію чату очищено.")
+        await update.message.reply_text(
+            self.config.get_system_messages()["history_cleared"]
+        )
 
     async def resend_last_as_voice_command(self, update: Update, context: CallbackContext) -> None:
         if not await self._is_command_for_me(update, context):
@@ -312,7 +328,9 @@ class CustomMessageHandler:
                 break
 
         if not last_bot_text:
-            await update.message.reply_text("Немає попереднього повідомлення бота для цього чату.")
+            await update.message.reply_text(
+                self.config.get_system_messages()["no_previous_message"]
+            )
             return
 
         audio_dir_opt: Optional[str] = self.config.get_file_paths_and_limits().get("audio_folder_path")
@@ -371,7 +389,9 @@ class CustomMessageHandler:
             return
         text_to_speak = " ".join(getattr(context, "args", [])).strip()
         if not text_to_speak:
-            await update.message.reply_text("Немає тексту для озвучення.")
+            await update.message.reply_text(
+                self.config.get_system_messages()["no_text_to_speak"]
+            )
             return
 
         audio_dir = self.config.get_file_paths_and_limits().get("audio_folder_path") or ""
@@ -396,28 +416,43 @@ class CustomMessageHandler:
         chat_id = update.effective_chat.id
         vs_id = self.openai_wrapper.chat_vector_stores.get(chat_id)
         if not vs_id:
-            await update.message.reply_text("Немає завантажених файлів у цьому чаті.")
+            await update.message.reply_text(
+                self.config.get_system_messages()["no_files"]
+            )
             return
         files = self.openai_wrapper.list_files_in_chat(chat_id)
         if not files:
-            await update.message.reply_text("Немає завантажених файлів у цьому чаті.")
+            await update.message.reply_text(
+                self.config.get_system_messages()["no_files"]
+            )
             return
-        lines = [f"{f['id']} – {f['filename']}" for f in files]
-        await update.message.reply_text("Файли:\n" + "\n".join(lines))
+        lines = [f"{f['id']} - {f['filename']}" for f in files]
+        header = self.config.get_system_messages()["files_header"]
+        await update.message.reply_text(f"{header}\n" + "\n".join(lines))
 
     async def remove_file_command(self, update: Update, context: CallbackContext) -> None:
         if not await self._is_command_for_me(update, context):
             return
         chat_id = update.effective_chat.id
         if not context.args:
-            await update.message.reply_text("Вкажіть file_id після команди.")
+            await update.message.reply_text(
+                self.config.get_system_messages()["file_id_required"]
+            )
             return
         file_id = context.args[0].strip()
         ok = self.openai_wrapper.remove_file_from_chat(chat_id, file_id)
         if ok:
-            await update.message.reply_text(f"Файл {file_id} видалено.")
+            await update.message.reply_text(
+                self.config.get_system_messages()[
+                    "file_deleted_template"
+                ].format(file_id=file_id)
+            )
         else:
-            await update.message.reply_text(f"Не вдалося видалити файли {file_id}.")
+            await update.message.reply_text(
+                self.config.get_system_messages()[
+                    "file_delete_failed_template"
+                ].format(file_id=file_id)
+            )
 
     async def clear_files_command(self, update: Update, context: CallbackContext) -> None:
         if not await self._is_command_for_me(update, context):
@@ -425,9 +460,13 @@ class CustomMessageHandler:
         chat_id = update.effective_chat.id
         ok = self.openai_wrapper.clear_files_in_chat(chat_id)
         if ok:
-            await update.message.reply_text("Усі файли очищено для цього чату.")
+            await update.message.reply_text(
+                self.config.get_system_messages()["files_cleared"]
+            )
         else:
-            await update.message.reply_text("Не вдалося очистити файли.")
+            await update.message.reply_text(
+                self.config.get_system_messages()["files_clear_failed"]
+            )
 
     async def _is_command_for_me(self, update: Update, context: CallbackContext) -> bool:
         chat_type = update.effective_chat.type
@@ -446,7 +485,9 @@ class CustomMessageHandler:
             if password == "":
                 self.authenticated_users[chat_id] = True
             else:
-                await update.message.reply_text("Будь ласка, введіть пароль для продовження.")
+                await update.message.reply_text(
+                    self.config.get_system_messages()["auth_prompt"]
+                )
                 return False
 
         return True
