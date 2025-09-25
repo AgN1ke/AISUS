@@ -25,20 +25,24 @@ if __name__ == "__main__":
 
     app = ApplicationBuilder().token(config.get_api_settings()["bot_token"]).build()
 
+    config_value_handler = MessageHandler(
+        filters.TEXT & ~filters.COMMAND,
+        message_handler.config_value_input,
+        block=False,
+    )
+
     private_message_handler = MessageHandler(
         ((filters.TEXT | filters.VOICE | filters.PHOTO | filters.Document.ALL) & filters.ChatType.PRIVATE) & ~filters.COMMAND,
         message_handler.handle_message,
     )
-    mentioned_message_handler = MessageHandler(
-        (filters.TEXT | filters.VOICE | filters.PHOTO | filters.Document.ALL)
-        & filters.ChatType.GROUPS
-        & (filters.Entity("mention") | filters.CaptionEntity("mention")),
+    group_text_message_handler = MessageHandler(
+        (filters.TEXT & filters.ChatType.GROUPS) & ~filters.COMMAND,
         message_handler.handle_message,
     )
-    reply_message_handler = MessageHandler(
-        (filters.TEXT | filters.VOICE | filters.PHOTO | filters.Document.ALL)
+    mentioned_message_handler = MessageHandler(
+        (filters.VOICE | filters.PHOTO | filters.Document.ALL)
         & filters.ChatType.GROUPS
-        & filters.REPLY,
+        & (filters.Entity("mention") | filters.CaptionEntity("mention") | filters.REPLY),
         message_handler.handle_message,
     )
 
@@ -49,10 +53,17 @@ if __name__ == "__main__":
     show_files_handler = CommandHandler(["showfiles"], message_handler.show_files_command)
     remove_file_handler = CommandHandler(["removefile"], message_handler.remove_file_command)
     clear_files_handler = CommandHandler(["clearfiles"], message_handler.clear_files_command)
+    config_handler = CommandHandler(["config"], message_handler.config_command)
+    config_update_handler = CommandHandler(
+        list(CustomMessageHandler.CONFIG_EDIT_COMMANDS.keys()),
+        message_handler.config_update_command,
+    )
+    config_done_handler = CommandHandler(["done"], message_handler.config_done_command)
 
+    app.add_handler(config_value_handler)
     app.add_handler(private_message_handler)
+    app.add_handler(group_text_message_handler)
     app.add_handler(mentioned_message_handler)
-    app.add_handler(reply_message_handler)
     app.add_handler(clear_history_handler)
     app.add_handler(resend_voice_handler)
     app.add_handler(stats_handler)
@@ -60,5 +71,8 @@ if __name__ == "__main__":
     app.add_handler(show_files_handler)
     app.add_handler(remove_file_handler)
     app.add_handler(clear_files_handler)
+    app.add_handler(config_handler)
+    app.add_handler(config_update_handler)
+    app.add_handler(config_done_handler)
 
     app.run_polling()

@@ -121,6 +121,9 @@ class ConfigReader:
         self.max_tokens: int = int(os.getenv("LIMITS_MAX_TOKENS", "3000"))
         self.max_history_length: int = int(os.getenv("LIMITS_MAX_HISTORY_LENGTH", "124000"))
 
+        self._bool_fields = {"search_enabled", "web_search_enabled"}
+        self._int_fields = {"max_tokens", "max_history_length"}
+
     def get_system_messages(self) -> Dict[str, str]:
         return {
             "gpt_prompt": self.gpt_prompt,
@@ -171,3 +174,63 @@ class ConfigReader:
             "max_tokens": self.max_tokens,
             "max_history_length": self.max_history_length,
         }
+
+    def get_editable_snapshot(self) -> Dict[str, Dict[str, Any]]:
+        """Return a mutable copy of editable configuration sections."""
+        return {
+            "system_messages": dict(self.get_system_messages()),
+            "openai_settings": dict(self.get_openai_settings()),
+            "api_settings": dict(self.get_api_settings()),
+            "file_paths": {
+                "audio_folder_path": self.audio_folder_path,
+                "image_folder_path": self.image_folder_path,
+                "files_folder_path": self.files_folder_path,
+            },
+            "file_limits": {
+                "max_tokens": self.max_tokens,
+                "max_history_length": self.max_history_length,
+            },
+        }
+
+    def coerce_value(self, key: str, value: str) -> Any:
+        """Convert raw string value into the correct python type for the key."""
+        if key in self._bool_fields:
+            normalized = value.strip().lower()
+            if normalized in {"1", "true", "yes", "on"}:
+                return True
+            if normalized in {"0", "false", "no", "off"}:
+                return False
+            raise ValueError(f"Не вдалося розпізнати булеве значення з '{value}'")
+        if key in self._int_fields:
+            try:
+                return int(value.strip())
+            except ValueError as exc:
+                raise ValueError(f"Очікувалося число для '{key}'") from exc
+        return value
+
+    def apply_updates(self, updates: Dict[str, Dict[str, Any]]) -> None:
+        """Apply edited configuration values to the runtime config."""
+        system_updates = updates.get("system_messages", {})
+        for key, value in system_updates.items():
+            if hasattr(self, key):
+                setattr(self, key, value)
+
+        openai_updates = updates.get("openai_settings", {})
+        for key, value in openai_updates.items():
+            if hasattr(self, key):
+                setattr(self, key, value)
+
+        api_updates = updates.get("api_settings", {})
+        for key, value in api_updates.items():
+            if hasattr(self, key):
+                setattr(self, key, value)
+
+        path_updates = updates.get("file_paths", {})
+        for key, value in path_updates.items():
+            if hasattr(self, key):
+                setattr(self, key, value)
+
+        limits_updates = updates.get("file_limits", {})
+        for key, value in limits_updates.items():
+            if hasattr(self, key):
+                setattr(self, key, value)
