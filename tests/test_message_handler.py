@@ -44,6 +44,7 @@ class TestMessageHandler(unittest.TestCase):
             chat_history_manager=self.history,
             openai_wrapper=self.openai
         )
+        self.openai.update_settings = Mock()
 
     def tearDown(self) -> None:
         self.env_patch.stop()
@@ -187,6 +188,105 @@ class TestMessageHandler(unittest.TestCase):
 
         msg.reply_voice.assert_awaited_once_with(tts_path)
         self.assertFalse(os.path.exists(tts_path))
+
+    def _build_update(self, chat_id: int, text: str) -> tuple[Update, CallbackContext]:
+        message = Mock()
+        message.text = text
+        message.reply_text = AsyncMock()
+        chat = SimpleNamespace(id=chat_id, type="private")
+        user = SimpleNamespace(id=42)
+        update = SimpleNamespace(
+            effective_chat=chat,
+            effective_user=user,
+            message=message,
+            effective_message=message,
+        )
+        context = SimpleNamespace(bot=self.bot, args=[])
+        return update, context
+
+    def test_config_command_initializes_session(self) -> None:
+        self.handler.authenticated_users[1] = True
+        update, context = self._build_update(1, "/config")
+
+        asyncio.run(self.handler.config_command(update, context))
+
+        self.assertIn(1, self.handler.config_sessions)
+        session = self.handler.config_sessions[1]
+        self.assertTrue(session.get("active"))
+        update.message.reply_text.assert_awaited()
+        overview_text = update.message.reply_text.await_args.args[0]
+        for command in CustomMessageHandler.CONFIG_EDIT_COMMANDS:
+            self.assertIn(f"/{command}", overview_text)
+
+    def test_config_update_and_done_applies_changes(self) -> None:
+        chat_id = 9
+        self.handler.authenticated_users[chat_id] = True
+        update, context = self._build_update(chat_id, "/config")
+
+        asyncio.run(self.handler.config_command(update, context))
+
+        update.message.text = "/model test-model"
+        asyncio.run(self.handler.config_update_command(update, context))
+        update.message.text = "/search false"
+        asyncio.run(self.handler.config_update_command(update, context))
+        update.message.text = "/password secret"
+        asyncio.run(self.handler.config_update_command(update, context))
+        update.message.text = "/apikey sk-new"
+        asyncio.run(self.handler.config_update_command(update, context))
+        update.message.text = "/audiofolder /tmp/audio"
+        asyncio.run(self.handler.config_update_command(update, context))
+
+        update.message.text = "/done"
+        asyncio.run(self.handler.config_done_command(update, context))
+
+        self.assertEqual(self.config.gpt_model, "test-model")
+        self.assertFalse(self.config.search_enabled)
+        self.assertEqual(self.config.password, "secret")
+        self.assertEqual(self.config.api_key, "sk-new")
+        self.assertEqual(self.config.audio_folder_path, "/tmp/audio")
+        self.openai.update_settings.assert_called()
+        kwargs = self.openai.update_settings.call_args.kwargs
+        self.assertEqual(kwargs.get("api_key"), "sk-new")
+        self.assertNotIn(chat_id, self.handler.config_sessions)
+
+    def test_config_commands_work_without_config_reader_helpers(self) -> None:
+        original_snapshot = ConfigReader.get_editable_snapshot
+        original_coerce = ConfigReader.coerce_value
+        original_apply = ConfigReader.apply_updates
+        try:
+            del ConfigReader.get_editable_snapshot
+            del ConfigReader.coerce_value
+            del ConfigReader.apply_updates
+
+            legacy_config = ConfigReader()
+            handler = CustomMessageHandler(legacy_config, self.history, self.openai)
+            handler.authenticated_users[21] = True
+
+            update, context = self._build_update(21, "/config")
+            asyncio.run(handler.config_command(update, context))
+
+            update.message.text = "/maxtokens 2048"
+            asyncio.run(handler.config_update_command(update, context))
+            update.message.text = "/search off"
+            asyncio.run(handler.config_update_command(update, context))
+
+            update.message.text = "/done"
+            asyncio.run(handler.config_done_command(update, context))
+
+            self.assertEqual(legacy_config.max_tokens, 2048)
+            self.assertFalse(legacy_config.search_enabled)
+        finally:
+            ConfigReader.get_editable_snapshot = original_snapshot
+            ConfigReader.coerce_value = original_coerce
+            ConfigReader.apply_updates = original_apply
+
+    def test_config_update_ignored_without_session(self) -> None:
+        self.handler.authenticated_users[5] = True
+        update, context = self._build_update(5, "/model test")
+
+        asyncio.run(self.handler.config_update_command(update, context))
+
+        update.message.reply_text.assert_not_awaited()
 
     def test_tts_creates_audio_dir(self) -> None:
         import shutil
