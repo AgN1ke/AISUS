@@ -49,6 +49,12 @@ if __name__ == "__main__":
     show_files_handler = CommandHandler(["showfiles"], message_handler.show_files_command)
     remove_file_handler = CommandHandler(["removefile"], message_handler.remove_file_command)
     clear_files_handler = CommandHandler(["clearfiles"], message_handler.clear_files_command)
+    config_handler = CommandHandler(["config"], message_handler.config_command)
+    config_update_handler = CommandHandler(
+        list(CustomMessageHandler.CONFIG_EDIT_COMMANDS.keys()),
+        message_handler.config_update_command,
+    )
+    config_done_handler = CommandHandler(["done"], message_handler.config_done_command)
 
     app.add_handler(private_message_handler)
     app.add_handler(mentioned_message_handler)
@@ -60,5 +66,8 @@ if __name__ == "__main__":
     app.add_handler(show_files_handler)
     app.add_handler(remove_file_handler)
     app.add_handler(clear_files_handler)
+    app.add_handler(config_handler)
+    app.add_handler(config_update_handler)
+    app.add_handler(config_done_handler)
 
     app.run_polling()

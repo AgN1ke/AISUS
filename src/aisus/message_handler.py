@@ -1,5 +1,6 @@
 # message_handler.py
 import os
+import copy
 import logging
 from typing import Tuple, Optional, Dict, Any
 from telegram import Update, Bot
@@ -15,6 +16,51 @@ logger: logging.Logger = logging.getLogger(__name__)
 
 
 class CustomMessageHandler:
+    CONFIG_EDIT_COMMANDS: Dict[str, Tuple[str, str, str]] = {
+        # System messages and service texts
+        "prompt": ("system_messages", "gpt_prompt", "Системний промт"),
+        "voiceaffix": ("system_messages", "voice_message_affix", "Афікс для голосових повідомлень"),
+        "imageaffix": ("system_messages", "image_message_affix", "Афікс для зображень"),
+        "imagecaption": ("system_messages", "image_caption_affix", "Афікс підпису зображення"),
+        "imagescene": ("system_messages", "image_sence_affix", "Афікс опису сцени"),
+        "password": ("system_messages", "password", "Пароль доступу"),
+        "authsuccess": ("system_messages", "auth_success", "Повідомлення про успішну автентифікацію"),
+        "authprompt": ("system_messages", "auth_prompt", "Запит пароля"),
+        "errormessage": ("system_messages", "error_message", "Повідомлення про помилку"),
+        "fileadded": ("system_messages", "file_added_template", "Повідомлення про доданий файл"),
+        "historycleared": ("system_messages", "history_cleared", "Текст очищення історії"),
+        "noprevious": ("system_messages", "no_previous_message", "Немає попереднього повідомлення"),
+        "notext": ("system_messages", "no_text_to_speak", "Немає тексту для озвучення"),
+        "nofiles": ("system_messages", "no_files", "Немає файлів"),
+        "filesheader": ("system_messages", "files_header", "Заголовок списку файлів"),
+        "fileidrequired": ("system_messages", "file_id_required", "Необхідність file_id"),
+        "filedeleted": ("system_messages", "file_deleted_template", "Шаблон видалення файлу"),
+        "filedeletefail": ("system_messages", "file_delete_failed_template", "Помилка видалення файлу"),
+        "filescleared": ("system_messages", "files_cleared", "Повідомлення про очищення файлів"),
+        "filesclearfail": ("system_messages", "files_clear_failed", "Помилка очищення файлів"),
+        # OpenAI settings
+        "apikey": ("openai_settings", "api_key", "API ключ OpenAI"),
+        "model": ("openai_settings", "gpt_model", "Модель GPT"),
+        "mode": ("openai_settings", "api_mode", "Режим API"),
+        "reasoning": ("openai_settings", "reasoning_effort", "Рівень reasoning effort"),
+        "search": ("openai_settings", "search_enabled", "Пошук по файлах (true/false)"),
+        "websearch": ("openai_settings", "web_search_enabled", "Веб-пошук (true/false)"),
+        "whisper": ("openai_settings", "whisper_model", "Whisper модель"),
+        "tts": ("openai_settings", "tts_model", "TTS модель"),
+        "voice": ("openai_settings", "vocalizer_voice", "Голос озвучення"),
+        # Telegram/API settings
+        "bottoken": ("api_settings", "bot_token", "Токен телеграм-бота"),
+        # File paths and limits
+        "audiofolder": ("file_paths", "audio_folder_path", "Тека для аудіо"),
+        "imagefolder": ("file_paths", "image_folder_path", "Тека для зображень"),
+        "filesfolder": ("file_paths", "files_folder_path", "Тека для файлів"),
+        "maxtokens": ("file_limits", "max_tokens", "Макс. токенів"),
+        "maxhistory": ("file_limits", "max_history_length", "Макс. довжина історії"),
+    }
+
+    LEGACY_BOOL_FIELDS = {"search_enabled", "web_search_enabled"}
+    LEGACY_INT_FIELDS = {"max_tokens", "max_history_length"}
+
     def __init__(self, config: ConfigReader, chat_history_manager: ChatHistoryManager, openai_wrapper: OpenAIWrapper) -> None:
         self.config: ConfigReader = config
         self.chat_history_manager: ChatHistoryManager = chat_history_manager
@@ -26,6 +72,7 @@ class CustomMessageHandler:
         self.messages_in = 0
         self.messages_out = 0
         self.per_message_stats = []
+        self.config_sessions: Dict[int, Dict[str, Any]] = {}
 
     async def handle_message(self, update: Update, context: CallbackContext) -> None:
         chat_id: int = update.effective_chat.id
@@ -467,6 +514,212 @@ class CustomMessageHandler:
             await update.message.reply_text(
                 self.config.get_system_messages()["files_clear_failed"]
             )
+
+    async def config_command(self, update: Update, context: CallbackContext) -> None:
+        if not await self._is_command_for_me(update, context):
+            return
+        chat_id = update.effective_chat.id
+        user_id = update.effective_user.id if update.effective_user else None
+        session = self.config_sessions.get(chat_id)
+        if session and session.get("active") and session.get("initiator_id") not in (None, user_id):
+            await update.message.reply_text("Інший користувач вже редагує налаштування.")
+            return
+
+        snapshot = self._build_config_snapshot()
+        self.config_sessions[chat_id] = {
+            "active": True,
+            "initiator_id": user_id,
+            "pending": copy.deepcopy(snapshot),
+        }
+        await update.message.reply_text(self._format_config_overview(snapshot))
+
+    async def config_update_command(self, update: Update, context: CallbackContext) -> None:
+        if not await self._is_command_for_me(update, context):
+            return
+        chat_id = update.effective_chat.id
+        session = self.config_sessions.get(chat_id)
+        if not session or not session.get("active"):
+            return
+        user_id = update.effective_user.id if update.effective_user else None
+        initiator = session.get("initiator_id")
+        if initiator not in (None, user_id):
+            return
+
+        command_name = self._extract_command_name(update)
+        if command_name not in self.CONFIG_EDIT_COMMANDS:
+            return
+
+        value_text = self._extract_command_value(update)
+        category, key, description = self.CONFIG_EDIT_COMMANDS[command_name]
+
+        try:
+            coerced_value = self._coerce_config_value(category, key, value_text, session)
+        except ValueError as exc:
+            await update.message.reply_text(str(exc))
+            return
+
+        session["pending"].setdefault(category, {})[key] = coerced_value
+        await update.message.reply_text(
+            f"{description} оновлено: {self._format_value_for_display(coerced_value)}"
+        )
+
+    async def config_done_command(self, update: Update, context: CallbackContext) -> None:
+        if not await self._is_command_for_me(update, context):
+            return
+        chat_id = update.effective_chat.id
+        session = self.config_sessions.get(chat_id)
+        if not session or not session.get("active"):
+            return
+        user_id = update.effective_user.id if update.effective_user else None
+        initiator = session.get("initiator_id")
+        if initiator not in (None, user_id):
+            return
+
+        pending = session.get("pending", {})
+        self._apply_config_updates(pending)
+        openai_settings = self.config.get_openai_settings()
+        self.openai_wrapper.update_settings(
+            api_key=openai_settings.get("api_key"),
+            api_mode=openai_settings.get("api_mode"),
+            reasoning_effort=openai_settings.get("reasoning_effort"),
+            search_enabled=openai_settings.get("search_enabled"),
+            web_search_enabled=openai_settings.get("web_search_enabled"),
+            whisper_model=openai_settings.get("whisper_model"),
+            tts_model=openai_settings.get("tts_model"),
+        )
+        self.config_sessions.pop(chat_id, None)
+        await update.message.reply_text("Налаштування оновлено. Бот перезавантажено з новими параметрами.")
+
+    @staticmethod
+    def _extract_command_name(update: Update) -> str:
+        text = (update.effective_message.text or "").strip()
+        if not text.startswith("/"):
+            return ""
+        command_token = text.split()[0]
+        command_body = command_token[1:]
+        if "@" in command_body:
+            command_body = command_body.split("@", 1)[0]
+        return command_body.lower()
+
+    @staticmethod
+    def _extract_command_value(update: Update) -> str:
+        text = (update.effective_message.text or "").strip()
+        parts = text.split(" ", 1)
+        if len(parts) == 1:
+            return ""
+        return parts[1]
+
+    def _format_config_overview(self, snapshot: Dict[str, Dict[str, Any]]) -> str:
+        lines = ["Поточні налаштування:"]
+        for command, (category, key, description) in self.CONFIG_EDIT_COMMANDS.items():
+            value = snapshot.get(category, {}).get(key)
+            lines.append(
+                f"• {description}: {self._format_value_for_display(value)} (/{command})"
+            )
+        lines.append("У групових чатах додавайте @ім'я_бота після команди.")
+        lines.append("Завершити та застосувати: /done")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _format_value_for_display(value: Any) -> str:
+        if isinstance(value, bool):
+            return "увімкнено" if value else "вимкнено"
+        if value is None:
+            return "(не задано)"
+        text = str(value)
+        if len(text) > 300:
+            return text[:297] + "..."
+        return text
+
+    def _build_config_snapshot(self) -> Dict[str, Dict[str, Any]]:
+        get_snapshot = getattr(self.config, "get_editable_snapshot", None)
+        if callable(get_snapshot):
+            try:
+                snapshot = get_snapshot()
+                if isinstance(snapshot, dict):
+                    return snapshot
+            except Exception as exc:
+                logger.exception("failed to obtain config snapshot via config reader: %s", exc)
+
+        system_messages = dict(self.config.get_system_messages())
+        openai_settings = dict(self.config.get_openai_settings())
+        api_settings = dict(getattr(self.config, "get_api_settings", lambda: {})())
+        paths_and_limits = self.config.get_file_paths_and_limits()
+        return {
+            "system_messages": system_messages,
+            "openai_settings": openai_settings,
+            "api_settings": api_settings,
+            "file_paths": {
+                "audio_folder_path": paths_and_limits.get("audio_folder_path"),
+                "image_folder_path": paths_and_limits.get("image_folder_path"),
+                "files_folder_path": paths_and_limits.get("files_folder_path"),
+            },
+            "file_limits": {
+                "max_tokens": paths_and_limits.get("max_tokens"),
+                "max_history_length": paths_and_limits.get("max_history_length"),
+            },
+        }
+
+    def _coerce_config_value(
+        self,
+        category: str,
+        key: str,
+        raw_value: str,
+        session: Dict[str, Any],
+    ) -> Any:
+        coerce_fn = getattr(self.config, "coerce_value", None)
+        if callable(coerce_fn):
+            return coerce_fn(key, raw_value)
+
+        current_section = session.get("pending", {}).get(category, {})
+        current_value = current_section.get(key)
+
+        if isinstance(current_value, bool) or key in self.LEGACY_BOOL_FIELDS:
+            normalized = raw_value.strip().lower()
+            if normalized in {"1", "true", "yes", "on"}:
+                return True
+            if normalized in {"0", "false", "no", "off"}:
+                return False
+            raise ValueError(f"Не вдалося розпізнати булеве значення з '{raw_value}'")
+
+        if isinstance(current_value, int) or key in self.LEGACY_INT_FIELDS:
+            try:
+                return int(raw_value.strip())
+            except ValueError as exc:
+                raise ValueError(f"Очікувалося число для '{key}'") from exc
+
+        return raw_value
+
+    def _apply_config_updates(self, updates: Dict[str, Dict[str, Any]]) -> None:
+        apply_fn = getattr(self.config, "apply_updates", None)
+        if callable(apply_fn):
+            apply_fn(updates)
+            return
+
+        system_updates = updates.get("system_messages", {})
+        for key, value in system_updates.items():
+            if hasattr(self.config, key):
+                setattr(self.config, key, value)
+
+        openai_updates = updates.get("openai_settings", {})
+        for key, value in openai_updates.items():
+            if hasattr(self.config, key):
+                setattr(self.config, key, value)
+
+        api_updates = updates.get("api_settings", {})
+        for key, value in api_updates.items():
+            if hasattr(self.config, key):
+                setattr(self.config, key, value)
+
+        path_updates = updates.get("file_paths", {})
+        for key, value in path_updates.items():
+            if hasattr(self.config, key):
+                setattr(self.config, key, value)
+
+        limits_updates = updates.get("file_limits", {})
+        for key, value in limits_updates.items():
+            if hasattr(self.config, key):
+                setattr(self.config, key, value)
 
     async def _is_command_for_me(self, update: Update, context: CallbackContext) -> bool:
         chat_type = update.effective_chat.type
