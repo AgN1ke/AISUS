@@ -26,6 +26,7 @@ class OpenAIWrapper:
         whisper_model: str | None = None,
         tts_model: str | None = None,
     ):
+        self.api_key = api_key
         self.client = OpenAI(api_key=api_key)
         self.api_mode = api_mode
         self.reasoning_effort = reasoning_effort
@@ -34,6 +35,33 @@ class OpenAIWrapper:
         self.chat_vector_stores: dict[int, str] = {}
         self.whisper_model = whisper_model
         self.tts_model = tts_model
+
+    def update_settings(
+        self,
+        *,
+        api_key: str | None = None,
+        api_mode: str | None = None,
+        reasoning_effort: str | None = None,
+        search_enabled: bool | None = None,
+        web_search_enabled: bool | None = None,
+        whisper_model: str | None = None,
+        tts_model: str | None = None,
+    ) -> None:
+        if api_key and api_key != self.api_key:
+            self.api_key = api_key
+            self.client = OpenAI(api_key=api_key)
+        if api_mode is not None:
+            self.api_mode = api_mode
+        if reasoning_effort is not None:
+            self.reasoning_effort = reasoning_effort or None
+        if search_enabled is not None:
+            self.search_enabled = search_enabled
+        if web_search_enabled is not None:
+            self.web_search_enabled = web_search_enabled
+        if whisper_model is not None:
+            self.whisper_model = whisper_model
+        if tts_model is not None:
+            self.tts_model = tts_model
 
     @staticmethod
     def _messages_to_input(messages):
