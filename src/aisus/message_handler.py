@@ -28,47 +28,56 @@ class CustomMessageHandler:
         self.per_message_stats = []
 
     async def handle_message(self, update: Update, context: CallbackContext) -> None:
-        chat_id: int = update.effective_chat.id
-        bot_username: str = (await context.bot.get_me()).username
-        raw_text: str = (update.message.text or update.message.caption or "")
-        message_text_for_auth: str = raw_text.replace(f"@{bot_username}", "").strip()
+        msg = getattr(update, "message", None) or getattr(update, "effective_message", None)
+        if not msg:
+            return
+
+        chat = getattr(update, "effective_chat", None) or getattr(getattr(msg, "chat", None), None)
+        if not chat:
+            return
+        chat_id = chat.id
+
+        bot_username = (await context.bot.get_me()).username
+        raw_text = (getattr(msg, "text", None) or getattr(msg, "caption", None) or "")
+        message_text_for_auth = raw_text.replace(f"@{bot_username}", "").strip()
+
         if not await self._should_process_message(context.bot, MessageWrapper(update)):
             return
+
         if not self.authenticated_users.get(chat_id):
-            password: str = self.config.get_system_messages().get("password", "")
+            password = self.config.get_system_messages().get("password", "")
             if message_text_for_auth == password or password == "":
                 self.authenticated_users[chat_id] = True
-                await update.message.reply_text(
-                    self.config.get_system_messages()["auth_success"]
-                )
+                await msg.reply_text(self.config.get_system_messages()["auth_success"])
             else:
-                await update.message.reply_text(
-                    self.config.get_system_messages()["auth_prompt"]
-                )
+                await msg.reply_text(self.config.get_system_messages()["auth_prompt"])
             return
+
         try:
-            wrapped_message: MessageWrapper = MessageWrapper(update)
+            wrapped_message = MessageWrapper(update)
             user_message, is_voice, is_image = await self._process_message_content(wrapped_message)
             if not user_message:
                 return
+
             self.messages_in += 1
             first_name = wrapped_message.from_user_first_name
+
             history = self.chat_history_manager.get_history(chat_id)
             if not history or history[0].get("role") != "system":
                 self.chat_history_manager.add_system_message(
                     chat_id, self.config.get_system_messages().get("gpt_prompt", "")
                 )
+
             self._update_chat_history(chat_id, first_name, user_message, is_voice, is_image)
             bot_response, used_fs, used_ws = await self._generate_bot_response(chat_id)
             await self._send_response(wrapped_message, bot_response, is_voice, used_fs, used_ws)
             self.chat_history_manager.add_bot_message(chat_id, bot_response)
             self.messages_out += 1
+
         except Exception as exc:
             logger.exception("response generation/sending failed: %s", exc)
             try:
-                await update.message.reply_text(
-                    self.config.get_system_messages()["error_message"]
-                )
+                await msg.reply_text(self.config.get_system_messages()["error_message"])
             except Exception as notify_exc:
                 logger.exception("failed to notify user: %s", notify_exc)
 

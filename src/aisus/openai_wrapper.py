@@ -16,17 +16,11 @@ from datetime import datetime
 
 
 class OpenAIWrapper:
-    def __init__(
-        self,
-        api_key: str,
-        api_mode: str = "responses",
-        reasoning_effort: str | None = None,
-        search_enabled: bool = False,
-        web_search_enabled: bool = False,
-        whisper_model: str | None = None,
-        tts_model: str | None = None,
-    ):
-        self.client = OpenAI(api_key=api_key)
+    def __init__(self, api_key: str, api_mode: str = "responses", reasoning_effort: str | None = None,
+                 search_enabled: bool = False, web_search_enabled: bool = False,
+                 whisper_model: str | None = None, tts_model: str | None = None,
+                 base_url: str | None = None):
+        self.client = OpenAI(api_key=api_key, base_url=base_url)
         self.api_mode = api_mode
         self.reasoning_effort = reasoning_effort
         self.search_enabled = search_enabled
@@ -89,27 +83,49 @@ class OpenAIWrapper:
             return None, vs_id
 
     async def generate(self, model, messages, max_tokens, chat_id=None, extra_overrides=None):
-        vector_store_id = self.chat_vector_stores.get(chat_id) if chat_id is not None else None
+        def _to_chat_messages(msgs):
+            out = []
+            for m in msgs:
+                role = m.get("role", "user")
+                content = m.get("content", "")
+                out.append({"role": role, "content": content if isinstance(content, str) else str(content)})
+            return out
 
-        if self.api_mode == "agents":
+        is_deepseek = isinstance(getattr(self, "base_url", None) or getattr(self.client, "base_url", None), str) and \
+                      "deepseek" in (getattr(self, "base_url", None) or getattr(self.client, "base_url", ""))
+
+        # 1) Agents (OpenAI-only). Fallback to chat-completions if not supported (e.g., DeepSeek).
+        if self.api_mode == "agents" and not is_deepseek:
             include_results = bool(extra_overrides.get("citations", {}).get("enabled")) if extra_overrides else False
             tools = []
-            if self.search_enabled and vector_store_id:
-                tools.append(
-                    FileSearchTool(
-                        vector_store_ids=[vector_store_id],
-                        include_search_results=include_results
-                    )
-                )
+            if self.search_enabled and chat_id is not None:
+                vs_id = self.chat_vector_stores.get(chat_id)
+                if vs_id:
+                    tools.append(FileSearchTool(vector_store_ids=[vs_id], include_search_results=include_results))
             if self.web_search_enabled:
                 tools.append(WebSearchTool())
-
             system_text = next((m.get("content", "") for m in messages if m.get("role") == "system"), "")
             user_messages = [m for m in messages if m.get("role") != "system"]
-            return await Runner.run(
-                Agent(name="TG Assistant", instructions=system_text, tools=tools, model=model),
-                user_messages,
-            )
+            return await Runner.run(Agent(name="TG Assistant", instructions=system_text, tools=tools, model=model),
+                                    user_messages)
+
+        # 2) Chat Completions (works on OpenAI and DeepSeek)
+        if self.api_mode == "chat_completions" or is_deepseek:
+            payload = {"model": model, "messages": _to_chat_messages(messages), "max_tokens": max_tokens}
+            try:
+                return await asyncio.to_thread(self.client.chat.completions.create, **payload)
+            except (APIConnectionError, APIStatusError, RateLimitError, BadRequestError, AuthenticationError,
+                    OpenAIError):
+                return None
+
+        # 3) Responses API (OpenAI)
+        payload = {"model": model, "input": self._messages_to_input(messages), "max_output_tokens": max_tokens}
+        if self.reasoning_effort:
+            payload["reasoning"] = {"effort": self.reasoning_effort}
+        try:
+            return await asyncio.to_thread(self.client.responses.create, **payload)
+        except (APIConnectionError, APIStatusError, RateLimitError, BadRequestError, AuthenticationError, OpenAIError):
+            return None
 
         payload = {
             "model": model,

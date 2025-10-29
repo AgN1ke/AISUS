@@ -34,6 +34,7 @@ class TestConfigParser(unittest.TestCase):
             "OPENAI_API_MODE": "responses",
             "OPENAI_REASONING_EFFORT": "medium",
             "OPENAI_SEARCH_ENABLED": "false",
+            "OPENAI_BASE_URL": "https://api.deepseek.com",
             "MYAPI_BOT_TOKEN": "token",
             "FILE_PATHS_AUDIO_FOLDER": "/tmp/a",
             "FILE_PATHS_IMAGE_FOLDER": "/tmp/i",
@@ -72,6 +73,7 @@ class TestConfigParser(unittest.TestCase):
         self.assertEqual(openai_settings["api_mode"], "responses")
         self.assertEqual(openai_settings["reasoning_effort"], "medium")
         self.assertFalse(openai_settings["search_enabled"])
+        self.assertEqual(openai_settings["base_url"], "https://api.deepseek.com")
 
         api_settings = cfg.get_api_settings()
         self.assertEqual(api_settings["bot_token"], "token")
@@ -99,6 +101,7 @@ class TestConfigParser(unittest.TestCase):
         self.assertEqual(openai_settings["api_mode"], "responses")
         self.assertIsNone(openai_settings["reasoning_effort"])
         self.assertTrue(openai_settings["search_enabled"])
+        self.assertIsNone(openai_settings["base_url"])
 
         paths = cfg.get_file_paths_and_limits()
         self.assertIsNone(paths["image_folder_path"])

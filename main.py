@@ -18,8 +18,11 @@ if __name__ == "__main__":
         web_search_enabled=str(config.get_openai_settings()["web_search_enabled"]).lower() in ("1", "true", "yes"),
         whisper_model=config.get_openai_settings()["whisper_model"],
         tts_model=config.get_openai_settings()["tts_model"],
+        base_url=config.get_openai_settings()["base_url"],
     )
-    openai_wrapper.restore_vector_stores()
+
+    if config.get_openai_settings()["search_enabled"]:
+        openai_wrapper.restore_vector_stores()
 
     message_handler = CustomMessageHandler(config, chat_history_manager, openai_wrapper)
 

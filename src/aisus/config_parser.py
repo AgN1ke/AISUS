@@ -100,6 +100,7 @@ class ConfigReader:
             )
         )
 
+        self.base_url: Optional[str] = os.getenv("OPENAI_BASE_URL")
         self.api_key: Optional[str] = os.getenv("OPENAI_API_KEY")
         self.gpt_model: Optional[str] = os.getenv("OPENAI_GPT_MODEL")
         self.api_mode: str = os.getenv("OPENAI_API_MODE", "responses")
@@ -156,6 +157,7 @@ class ConfigReader:
             "reasoning_effort": self.reasoning_effort,
             "search_enabled": self.search_enabled,
             "web_search_enabled": self.web_search_enabled,
+            "base_url": self.base_url,
         }
 
     def get_api_settings(self) -> Dict[str, Optional[str]]:
