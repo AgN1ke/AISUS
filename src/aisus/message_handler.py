@@ -15,10 +15,19 @@ logger: logging.Logger = logging.getLogger(__name__)
 
 
 class CustomMessageHandler:
-    def __init__(self, config: ConfigReader, chat_history_manager: ChatHistoryManager, openai_wrapper: OpenAIWrapper) -> None:
+    def __init__(
+        self,
+        config: ConfigReader,
+        chat_history_manager: ChatHistoryManager,
+        openai_wrapper: OpenAIWrapper,
+        chat_wrapper: Optional[OpenAIWrapper] = None,
+        chat_model: Optional[str] = None,
+    ) -> None:
         self.config: ConfigReader = config
         self.chat_history_manager: ChatHistoryManager = chat_history_manager
         self.openai_wrapper: OpenAIWrapper = openai_wrapper
+        self.chat_wrapper: OpenAIWrapper = chat_wrapper or openai_wrapper
+        self.chat_model: Optional[str] = chat_model or config.get_openai_settings().get("gpt_model")
         self.authenticated_users: Dict[int, bool] = {}
         self.started_at = time.monotonic()
         self.tokens_in = 0
@@ -256,16 +265,17 @@ class CustomMessageHandler:
 
     async def _generate_bot_response(self, chat_id: int) -> tuple[str, bool, bool]:
         limit = self.config.get_file_paths_and_limits()["max_tokens"]
-        maybe_coro = self.openai_wrapper.generate(
-            model=self.config.get_openai_settings()["gpt_model"],
+        model_name = self.chat_model or self.config.get_openai_settings()["gpt_model"]
+        maybe_coro = self.chat_wrapper.generate(
+            model=model_name,
             messages=self.chat_history_manager.get_history(chat_id),
             max_tokens=limit,
             chat_id=chat_id,
         )
         response = await maybe_coro if inspect.isawaitable(maybe_coro) else maybe_coro
         ti, to = self._sum_usage(response)
-        used_fs = self.openai_wrapper.used_file_search(response)
-        used_ws = self.openai_wrapper.used_web_search(response)
+        used_fs = self.chat_wrapper.used_file_search(response)
+        used_ws = self.chat_wrapper.used_web_search(response)
         self.tokens_in += ti
         self.tokens_out += to
         self.per_message_stats.append({
@@ -276,7 +286,7 @@ class CustomMessageHandler:
             "used_file_search": used_fs,
             "used_web_search": used_ws,
         })
-        return self.openai_wrapper.extract_text(response), used_fs, used_ws
+        return self.chat_wrapper.extract_text(response), used_fs, used_ws
 
     async def _send_response(
             self,

@@ -39,6 +39,9 @@ class TestMessageHandler(unittest.TestCase):
         self.bot: Mock = Mock()
         self.bot.get_me = AsyncMock(return_value=SimpleNamespace(username="testbot"))
         self.openai: Mock = Mock()
+        self.openai.used_file_search = Mock(return_value=False)
+        self.openai.used_web_search = Mock(return_value=False)
+        self.openai.extract_text = Mock(return_value="")
         self.handler: CustomMessageHandler = CustomMessageHandler(
             config=self.config,
             chat_history_manager=self.history,
