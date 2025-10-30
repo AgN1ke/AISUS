@@ -108,6 +108,10 @@ class ConfigReader:
         self.whisper_model: Optional[str] = os.getenv("OPENAI_WHISPER_MODEL")
         self.tts_model: Optional[str] = os.getenv("OPENAI_TTS_MODEL")
         self.vocalizer_voice: Optional[str] = os.getenv("OPENAI_VOCALIZER_VOICE")
+        self.deepseek_api_key: Optional[str] = os.getenv("DEEPSEEK_API_KEY")
+        self.deepseek_model: Optional[str] = os.getenv("DEEPSEEK_CHAT_MODEL")
+        self.deepseek_base_url: Optional[str] = os.getenv("DEEPSEEK_BASE_URL")
+        self.deepseek_api_mode: str = os.getenv("DEEPSEEK_API_MODE", "chat_completions")
         self.search_enabled: bool = os.getenv("OPENAI_SEARCH_ENABLED", "true").strip().lower() in {"1", "true", "yes",
                                                                                                    "on"}
         self.web_search_enabled: bool = os.getenv("OPENAI_WEB_SEARCH_ENABLED", "true").strip().lower() in {"1", "true",
@@ -158,6 +162,14 @@ class ConfigReader:
             "search_enabled": self.search_enabled,
             "web_search_enabled": self.web_search_enabled,
             "base_url": self.base_url,
+        }
+
+    def get_deepseek_settings(self) -> Dict[str, Optional[str]]:
+        return {
+            "api_key": self.deepseek_api_key,
+            "model": self.deepseek_model,
+            "base_url": self.deepseek_base_url,
+            "api_mode": self.deepseek_api_mode,
         }
 
     def get_api_settings(self) -> Dict[str, Optional[str]]:

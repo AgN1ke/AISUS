@@ -28,6 +28,7 @@ class OpenAIWrapper:
         self.chat_vector_stores: dict[int, str] = {}
         self.whisper_model = whisper_model
         self.tts_model = tts_model
+        self.base_url = base_url
 
     @staticmethod
     def _messages_to_input(messages):
