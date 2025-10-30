@@ -39,6 +39,9 @@ class TestMessageHandler(unittest.TestCase):
         self.bot: Mock = Mock()
         self.bot.get_me = AsyncMock(return_value=SimpleNamespace(username="testbot"))
         self.openai: Mock = Mock()
+        self.openai.used_file_search = Mock(return_value=False)
+        self.openai.used_web_search = Mock(return_value=False)
+        self.openai.extract_text = Mock(return_value="")
         self.handler: CustomMessageHandler = CustomMessageHandler(
             config=self.config,
             chat_history_manager=self.history,
@@ -213,6 +216,19 @@ class TestMessageHandler(unittest.TestCase):
         asyncio.run(self.handler._send_response(msg, "hello", is_voice=True))
 
         self.assertTrue(os.path.isdir(self.audio_dir))
+
+    def test_compose_error_message_appends_config_prompt(self) -> None:
+        with patch.dict(os.environ, {
+            "SYSTEM_MESSAGES_ERROR": "Сталася помилка.",
+            "SYSTEM_MESSAGES_CHECK_CONFIG": "Перевірте конфігурацію, будь ласка.",
+        }, clear=False):
+            cfg = ConfigReader()
+        handler = CustomMessageHandler(cfg, self.history, self.openai)
+
+        error_message = handler._compose_error_message()
+
+        self.assertIn("Сталася помилка.", error_message)
+        self.assertIn("Перевірте конфігурацію, будь ласка.", error_message)
 
     def test_image_dir_falls_back_to_audio_dir(self) -> None:
         created_path: Optional[str] = None
