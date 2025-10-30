@@ -9,22 +9,42 @@ from src.aisus.openai_wrapper import OpenAIWrapper
 if __name__ == "__main__":
     config = ConfigReader()
 
+    openai_settings = config.get_openai_settings()
+    deepseek_settings = config.get_deepseek_settings()
+
     chat_history_manager = ChatHistoryManager()
     openai_wrapper = OpenAIWrapper(
-        api_key=config.get_openai_settings()["api_key"],
-        api_mode=config.get_openai_settings()["api_mode"],
-        reasoning_effort=config.get_openai_settings()["reasoning_effort"],
-        search_enabled=str(config.get_openai_settings()["search_enabled"]).lower() in ("1", "true", "yes"),
-        web_search_enabled=str(config.get_openai_settings()["web_search_enabled"]).lower() in ("1", "true", "yes"),
-        whisper_model=config.get_openai_settings()["whisper_model"],
-        tts_model=config.get_openai_settings()["tts_model"],
-        base_url=config.get_openai_settings()["base_url"],
+        api_key=openai_settings["api_key"],
+        api_mode=openai_settings["api_mode"],
+        reasoning_effort=openai_settings["reasoning_effort"],
+        search_enabled=str(openai_settings["search_enabled"]).lower() in ("1", "true", "yes"),
+        web_search_enabled=str(openai_settings["web_search_enabled"]).lower() in ("1", "true", "yes"),
+        whisper_model=openai_settings["whisper_model"],
+        tts_model=openai_settings["tts_model"],
+        base_url=openai_settings["base_url"],
     )
 
-    if config.get_openai_settings()["search_enabled"]:
+    chat_wrapper = openai_wrapper
+    chat_model = openai_settings["gpt_model"]
+
+    if deepseek_settings["api_key"]:
+        chat_wrapper = OpenAIWrapper(
+            api_key=deepseek_settings["api_key"],
+            api_mode=deepseek_settings.get("api_mode") or "chat_completions",
+            base_url=deepseek_settings.get("base_url"),
+        )
+        chat_model = deepseek_settings.get("model") or chat_model
+
+    if openai_settings["search_enabled"]:
         openai_wrapper.restore_vector_stores()
 
-    message_handler = CustomMessageHandler(config, chat_history_manager, openai_wrapper)
+    message_handler = CustomMessageHandler(
+        config,
+        chat_history_manager,
+        openai_wrapper,
+        chat_wrapper=chat_wrapper,
+        chat_model=chat_model,
+    )
 
     app = ApplicationBuilder().token(config.get_api_settings()["bot_token"]).build()
 

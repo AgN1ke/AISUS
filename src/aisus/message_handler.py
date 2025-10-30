@@ -15,10 +15,19 @@ logger: logging.Logger = logging.getLogger(__name__)
 
 
 class CustomMessageHandler:
-    def __init__(self, config: ConfigReader, chat_history_manager: ChatHistoryManager, openai_wrapper: OpenAIWrapper) -> None:
+    def __init__(
+        self,
+        config: ConfigReader,
+        chat_history_manager: ChatHistoryManager,
+        openai_wrapper: OpenAIWrapper,
+        chat_wrapper: Optional[OpenAIWrapper] = None,
+        chat_model: Optional[str] = None,
+    ) -> None:
         self.config: ConfigReader = config
         self.chat_history_manager: ChatHistoryManager = chat_history_manager
         self.openai_wrapper: OpenAIWrapper = openai_wrapper
+        self.chat_wrapper: OpenAIWrapper = chat_wrapper or openai_wrapper
+        self.chat_model: Optional[str] = chat_model or config.get_openai_settings().get("gpt_model")
         self.authenticated_users: Dict[int, bool] = {}
         self.started_at = time.monotonic()
         self.tokens_in = 0
@@ -77,7 +86,7 @@ class CustomMessageHandler:
         except Exception as exc:
             logger.exception("response generation/sending failed: %s", exc)
             try:
-                await msg.reply_text(self.config.get_system_messages()["error_message"])
+                await msg.reply_text(self._compose_error_message())
             except Exception as notify_exc:
                 logger.exception("failed to notify user: %s", notify_exc)
 
@@ -123,9 +132,7 @@ class CustomMessageHandler:
         except Exception as exc:
             logger.exception("response generation/sending failed: %s", exc)
             try:
-                await message.reply_text(
-                    self.config.get_system_messages()["error_message"]
-                )
+                await message.reply_text(self._compose_error_message())
             except Exception as notify_exc:
                 logger.exception("failed to notify user: %s", notify_exc)
 
@@ -256,16 +263,19 @@ class CustomMessageHandler:
 
     async def _generate_bot_response(self, chat_id: int) -> tuple[str, bool, bool]:
         limit = self.config.get_file_paths_and_limits()["max_tokens"]
-        maybe_coro = self.openai_wrapper.generate(
-            model=self.config.get_openai_settings()["gpt_model"],
+        model_name = self.chat_model or self.config.get_openai_settings()["gpt_model"]
+        maybe_coro = self.chat_wrapper.generate(
+            model=model_name,
             messages=self.chat_history_manager.get_history(chat_id),
             max_tokens=limit,
             chat_id=chat_id,
         )
         response = await maybe_coro if inspect.isawaitable(maybe_coro) else maybe_coro
+        if response is None:
+            raise RuntimeError("chat client returned no response")
         ti, to = self._sum_usage(response)
-        used_fs = self.openai_wrapper.used_file_search(response)
-        used_ws = self.openai_wrapper.used_web_search(response)
+        used_fs = self.chat_wrapper.used_file_search(response)
+        used_ws = self.chat_wrapper.used_web_search(response)
         self.tokens_in += ti
         self.tokens_out += to
         self.per_message_stats.append({
@@ -276,7 +286,10 @@ class CustomMessageHandler:
             "used_file_search": used_fs,
             "used_web_search": used_ws,
         })
-        return self.openai_wrapper.extract_text(response), used_fs, used_ws
+        text = self.chat_wrapper.extract_text(response)
+        if not text.strip():
+            raise RuntimeError("chat client returned empty text")
+        return text, used_fs, used_ws
 
     async def _send_response(
             self,
@@ -312,6 +325,20 @@ class CustomMessageHandler:
             return
         text_to_send = f"{tag_block}\n{bot_response}" if tag_block else bot_response
         await message.reply_text(text_to_send)
+
+    def _compose_error_message(self) -> str:
+        system_messages = self.config.get_system_messages()
+        base_error = system_messages.get("error_message", "")
+        config_prompt = system_messages.get("check_config_prompt", "")
+
+        base_error = base_error.strip()
+        config_prompt = config_prompt.strip()
+
+        if base_error and config_prompt:
+            return f"{base_error}\n{config_prompt}"
+        if config_prompt:
+            return config_prompt
+        return base_error or "Сталася помилка. Спробуйте ще раз."
 
     async def clear_history_command(self, update: Update, context: CallbackContext) -> None:
         if not await self._is_command_for_me(update, context):
