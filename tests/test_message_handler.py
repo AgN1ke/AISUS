@@ -183,9 +183,10 @@ class TestMessageHandler(unittest.TestCase):
         msg.reply_voice = AsyncMock()
         msg.reply_text = AsyncMock()
 
-        asyncio.run(self.handler._send_response(msg, "hello", is_voice=True))
+        result = asyncio.run(self.handler._send_response(msg, "hello", is_voice=True))
 
         msg.reply_voice.assert_awaited_once_with(tts_path)
+        self.assertEqual("hello", result)
         self.assertFalse(os.path.exists(tts_path))
 
     def test_tts_creates_audio_dir(self) -> None:
@@ -210,9 +211,10 @@ class TestMessageHandler(unittest.TestCase):
         msg.reply_voice = AsyncMock(side_effect=reply_voice)
         msg.reply_text = AsyncMock()
 
-        asyncio.run(self.handler._send_response(msg, "hello", is_voice=True))
+        result = asyncio.run(self.handler._send_response(msg, "hello", is_voice=True))
 
         self.assertTrue(os.path.isdir(self.audio_dir))
+        self.assertEqual("hello", result)
 
     def test_image_dir_falls_back_to_audio_dir(self) -> None:
         created_path: Optional[str] = None
@@ -265,10 +267,11 @@ class TestMessageHandler(unittest.TestCase):
 
         with patch("src.aisus.message_handler.os.remove", side_effect=OSError("boom")), \
                 self.assertLogs("src.aisus.message_handler", level="ERROR") as captured:
-            asyncio.run(self.handler._send_response(msg, "hello", is_voice=True))
+            result = asyncio.run(self.handler._send_response(msg, "hello", is_voice=True))
 
         msg.reply_voice.assert_awaited_once_with(tts_path)
         self.assertTrue(any("failed to remove temp tts file" in rec for rec in captured.output))
+        self.assertEqual("hello", result)
 
     def test_auth_with_text_mention_in_group(self) -> None:
         with patch.dict(os.environ, {"PASSWORD": "secret"}, clear=False):
@@ -353,13 +356,16 @@ class TestMessageHandler(unittest.TestCase):
 
     def test_resend_last_as_voice_command_sends_last_bot_message_as_voice(self) -> None:
         chat_id: int = 555
-        last_text: str = "Previous bot reply"
+        last_text: str = "[filesearch:on]\nPrevious bot reply with details"
         self.history.add_bot_message(chat_id, last_text)
 
         os.makedirs(self.audio_dir, exist_ok=True)
         tts_path: str = os.path.join(self.audio_dir, "last.ogg")
 
+        captured_text: list[str] = []
+
         def generate(text: str, voice: Optional[str], audio_dir: str) -> str:
+            captured_text.append(text)
             with open(tts_path, "wb") as f:
                 f.write(b"ogg")
             return tts_path
@@ -377,7 +383,21 @@ class TestMessageHandler(unittest.TestCase):
         asyncio.run(self.handler.resend_last_as_voice_command(update, context))
 
         update.message.reply_voice.assert_awaited_once_with(tts_path)
+        self.assertEqual([last_text], captured_text)
         self.assertFalse(os.path.exists(tts_path))
+
+    def test_send_response_splits_long_messages(self) -> None:
+        msg: Mock = Mock()
+        msg.reply_text = AsyncMock()
+        long_text = "a" * (CustomMessageHandler.TELEGRAM_MESSAGE_LIMIT + 10)
+
+        result = asyncio.run(self.handler._send_response(msg, long_text, is_voice=False))
+
+        self.assertEqual(long_text, result)
+        self.assertGreater(len(msg.reply_text.await_args_list), 1)
+        for call in msg.reply_text.await_args_list:
+            sent_text = call.args[0]
+            self.assertLessEqual(len(sent_text), CustomMessageHandler.TELEGRAM_MESSAGE_LIMIT)
 
     def test_audio_command_with_text(self) -> None:
         os.makedirs(self.audio_dir, exist_ok=True)

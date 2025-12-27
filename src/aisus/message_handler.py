@@ -15,6 +15,7 @@ logger: logging.Logger = logging.getLogger(__name__)
 
 
 class CustomMessageHandler:
+    TELEGRAM_MESSAGE_LIMIT = 4096
     def __init__(self, config: ConfigReader, chat_history_manager: ChatHistoryManager, openai_wrapper: OpenAIWrapper) -> None:
         self.config: ConfigReader = config
         self.chat_history_manager: ChatHistoryManager = chat_history_manager
@@ -70,8 +71,8 @@ class CustomMessageHandler:
 
             self._update_chat_history(chat_id, first_name, user_message, is_voice, is_image)
             bot_response, used_fs, used_ws = await self._generate_bot_response(chat_id)
-            await self._send_response(wrapped_message, bot_response, is_voice, used_fs, used_ws)
-            self.chat_history_manager.add_bot_message(chat_id, bot_response)
+            sent_text = await self._send_response(wrapped_message, bot_response, is_voice, used_fs, used_ws)
+            self.chat_history_manager.add_bot_message(chat_id, sent_text)
             self.messages_out += 1
 
         except Exception as exc:
@@ -117,8 +118,8 @@ class CustomMessageHandler:
 
         try:
             bot_response, used_fs, used_ws = await self._generate_bot_response(chat_id)
-            await self._send_response(message, bot_response, is_voice, used_fs, used_ws)
-            self.chat_history_manager.add_bot_message(chat_id, bot_response)
+            sent_text = await self._send_response(message, bot_response, is_voice, used_fs, used_ws)
+            self.chat_history_manager.add_bot_message(chat_id, sent_text)
             self.messages_out += 1
         except Exception as exc:
             logger.exception("response generation/sending failed: %s", exc)
@@ -285,13 +286,14 @@ class CustomMessageHandler:
             is_voice: bool,
             used_file_search: bool = False,
             used_web_search: bool = False,
-    ) -> None:
+    ) -> str:
         tags = []
         if used_file_search:
             tags.append("[filesearch:on]")
         if used_web_search:
             tags.append("[websearch:on]")
         tag_block = "\n".join(tags)
+        text_to_store = f"{tag_block}\n{bot_response}" if tag_block else bot_response
         if is_voice:
             if tag_block:
                 await message.reply_text(tag_block)
@@ -309,9 +311,35 @@ class CustomMessageHandler:
                     os.remove(voice_response_file)
                 except OSError as exc:
                     logger.exception("failed to remove temp tts file: %s", exc)
-            return
+            return text_to_store
         text_to_send = f"{tag_block}\n{bot_response}" if tag_block else bot_response
-        await message.reply_text(text_to_send)
+        for chunk in self._split_message(text_to_send):
+            await message.reply_text(chunk)
+        return text_to_send
+
+    @classmethod
+    def _split_message(cls, text: str, limit: Optional[int] = None) -> list[str]:
+        max_length = limit or cls.TELEGRAM_MESSAGE_LIMIT
+        if len(text) <= max_length:
+            return [text]
+
+        chunks = []
+        remaining = text
+        while remaining:
+            if len(remaining) <= max_length:
+                chunks.append(remaining)
+                break
+
+            split_at = remaining.rfind("\n", 0, max_length)
+            if split_at <= 0:
+                split_at = remaining.rfind(" ", 0, max_length)
+            if split_at <= 0:
+                split_at = max_length
+
+            chunks.append(remaining[:split_at].rstrip())
+            remaining = remaining[split_at:].lstrip()
+
+        return [chunk for chunk in chunks if chunk]
 
     async def clear_history_command(self, update: Update, context: CallbackContext) -> None:
         if not await self._is_command_for_me(update, context):
