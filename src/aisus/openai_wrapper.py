@@ -1,7 +1,7 @@
 # openai_wrapper.py
 import os
 import asyncio
-from openai import OpenAI
+from openai import OpenAI, AsyncOpenAI
 from openai import (
     OpenAIError,
     APIConnectionError,
@@ -11,16 +11,55 @@ from openai import (
     AuthenticationError,
 )
 from agents import Agent, Runner, FileSearchTool, WebSearchTool
+from agents.models import _openai_shared
 import base64
 from datetime import datetime
 
 
 class OpenAIWrapper:
-    def __init__(self, api_key: str, api_mode: str = "responses", reasoning_effort: str | None = None,
-                 search_enabled: bool = False, web_search_enabled: bool = False,
-                 whisper_model: str | None = None, tts_model: str | None = None,
-                 base_url: str | None = None):
-        self.client = OpenAI(api_key=api_key, base_url=base_url)
+    def __init__(
+        self,
+        api_key: str | None,
+        api_mode: str = "responses",
+        reasoning_effort: str | None = None,
+        search_enabled: bool = False,
+        web_search_enabled: bool = False,
+        whisper_model: str | None = None,
+        tts_model: str | None = None,
+        base_url: str | None = None,
+        chat_api_key: str | None = None,
+        image_api_key: str | None = None,
+        whisper_api_key: str | None = None,
+        tts_api_key: str | None = None,
+        files_api_key: str | None = None,
+        chat_base_url: str | None = None,
+        image_base_url: str | None = None,
+        whisper_base_url: str | None = None,
+        tts_base_url: str | None = None,
+        files_base_url: str | None = None,
+    ):
+        self.chat_api_key = chat_api_key or api_key
+        self.image_api_key = image_api_key or api_key
+        self.whisper_api_key = whisper_api_key or api_key
+        self.tts_api_key = tts_api_key or api_key
+        self.files_api_key = files_api_key or api_key
+        self.chat_base_url = chat_base_url or base_url
+        self.image_base_url = image_base_url or base_url
+        self.whisper_base_url = whisper_base_url or base_url
+        self.tts_base_url = tts_base_url or base_url
+        self.files_base_url = files_base_url or base_url
+
+        self.chat_client = OpenAI(api_key=self.chat_api_key, base_url=self.chat_base_url)
+        self.image_client = OpenAI(api_key=self.image_api_key, base_url=self.image_base_url)
+        self.whisper_client = OpenAI(api_key=self.whisper_api_key, base_url=self.whisper_base_url)
+        self.tts_client = OpenAI(api_key=self.tts_api_key, base_url=self.tts_base_url)
+        self.files_client = OpenAI(api_key=self.files_api_key, base_url=self.files_base_url)
+        if self.chat_api_key or self.chat_base_url:
+            _openai_shared.set_default_openai_client(
+                AsyncOpenAI(api_key=self.chat_api_key, base_url=self.chat_base_url)
+            )
+        self.client = self.chat_client
+        self.base_url = self.chat_base_url
         self.api_mode = api_mode
         self.reasoning_effort = reasoning_effort
         self.search_enabled = search_enabled
@@ -47,7 +86,7 @@ class OpenAIWrapper:
         restored = 0
         cursor = None
         while True:
-            page = self.client.vector_stores.list(after=cursor) if cursor else self.client.vector_stores.list()
+            page = self.files_client.vector_stores.list(after=cursor) if cursor else self.files_client.vector_stores.list()
             for store in page.data:
                 name = getattr(store, "name", "") or ""
                 if name.startswith(name_prefix):
@@ -68,7 +107,7 @@ class OpenAIWrapper:
         vs_id = self.chat_vector_stores.get(chat_id)
         if vs_id:
             return vs_id
-        vs = self.client.vector_stores.create(name=f"tg-chat-{chat_id}")
+        vs = self.files_client.vector_stores.create(name=f"tg-chat-{chat_id}")
         self.chat_vector_stores[chat_id] = vs.id
         return vs.id
 
@@ -76,8 +115,8 @@ class OpenAIWrapper:
         vs_id = self.ensure_vector_store(chat_id)
         try:
             with open(file_path, "rb") as fh:
-                f = self.client.files.create(file=fh, purpose="assistants")
-            self.client.vector_stores.files.create(vector_store_id=vs_id, file_id=f.id)
+                f = self.files_client.files.create(file=fh, purpose="assistants")
+            self.files_client.vector_stores.files.create(vector_store_id=vs_id, file_id=f.id)
             return f.id, vs_id
         except (OpenAIError, OSError, BadRequestError, AuthenticationError):
             return None, vs_id
@@ -91,8 +130,8 @@ class OpenAIWrapper:
                 out.append({"role": role, "content": content if isinstance(content, str) else str(content)})
             return out
 
-        is_deepseek = isinstance(getattr(self, "base_url", None) or getattr(self.client, "base_url", None), str) and \
-                      "deepseek" in (getattr(self, "base_url", None) or getattr(self.client, "base_url", ""))
+        base_url = getattr(self, "chat_base_url", None) or getattr(self.chat_client, "base_url", None)
+        is_deepseek = isinstance(base_url, str) and "deepseek" in base_url
 
         # 1) Agents (OpenAI-only). Fallback to chat-completions if not supported (e.g., DeepSeek).
         if self.api_mode == "agents" and not is_deepseek:
@@ -113,7 +152,7 @@ class OpenAIWrapper:
         if self.api_mode == "chat_completions" or is_deepseek:
             payload = {"model": model, "messages": _to_chat_messages(messages), "max_tokens": max_tokens}
             try:
-                return await asyncio.to_thread(self.client.chat.completions.create, **payload)
+                return await asyncio.to_thread(self.chat_client.chat.completions.create, **payload)
             except (APIConnectionError, APIStatusError, RateLimitError, BadRequestError, AuthenticationError,
                     OpenAIError):
                 return None
@@ -123,7 +162,7 @@ class OpenAIWrapper:
         if self.reasoning_effort:
             payload["reasoning"] = {"effort": self.reasoning_effort}
         try:
-            return await asyncio.to_thread(self.client.responses.create, **payload)
+            return await asyncio.to_thread(self.chat_client.responses.create, **payload)
         except (APIConnectionError, APIStatusError, RateLimitError, BadRequestError, AuthenticationError, OpenAIError):
             return None
 
@@ -136,7 +175,7 @@ class OpenAIWrapper:
             payload["reasoning"] = {"effort": self.reasoning_effort}
 
         try:
-            return await asyncio.to_thread(self.client.responses.create, **payload)
+            return await asyncio.to_thread(self.chat_client.responses.create, **payload)
         except (APIConnectionError, APIStatusError, RateLimitError, BadRequestError, AuthenticationError, OpenAIError):
             return None
 
@@ -256,11 +295,11 @@ class OpenAIWrapper:
         if not vs_id:
             return False
         try:
-            self.client.vector_stores.files.delete(vector_store_id=vs_id, file_id=file_id)
+            self.files_client.vector_stores.files.delete(vector_store_id=vs_id, file_id=file_id)
         except (APIConnectionError, APIStatusError, RateLimitError, OpenAIError):
             return False
         try:
-            self.client.files.delete(file_id)
+            self.files_client.files.delete(file_id)
         except (APIConnectionError, APIStatusError, RateLimitError, OpenAIError):
             pass
         return True
@@ -270,7 +309,7 @@ class OpenAIWrapper:
         if not vs_id:
             return False
         try:
-            self.client.vector_stores.delete(vs_id)
+            self.files_client.vector_stores.delete(vs_id)
             self.chat_vector_stores.pop(chat_id, None)
             return True
         except (APIConnectionError, APIStatusError, RateLimitError, OpenAIError, OSError):
@@ -281,10 +320,10 @@ class OpenAIWrapper:
         if not vs_id:
             return []
         try:
-            items = self.client.vector_stores.files.list(vector_store_id=vs_id).data
+            items = self.files_client.vector_stores.files.list(vector_store_id=vs_id).data
             out = []
             for it in items:
-                f = self.client.files.retrieve(it.id)
+                f = self.files_client.files.retrieve(it.id)
                 name = getattr(f, "filename", None) or getattr(f, "display_name", None) or getattr(f, "name",
                                                                                                    None) or "?"
                 out.append({"id": it.id, "filename": name})
@@ -307,20 +346,20 @@ class OpenAIWrapper:
             "max_output_tokens": max_tokens
         }
         try:
-            resp = await asyncio.to_thread(self.client.responses.create, **payload)
+            resp = await asyncio.to_thread(self.image_client.responses.create, **payload)
         except (APIConnectionError, APIStatusError, RateLimitError, BadRequestError, AuthenticationError, OpenAIError):
             return ""
         return self.extract_text(resp)
 
     def transcribe_voice_message(self, voice_message_path):
         with open(voice_message_path, "rb") as audio_file:
-            r = self.client.audio.transcriptions.create(model=self.whisper_model, file=audio_file)
+            r = self.whisper_client.audio.transcriptions.create(model=self.whisper_model, file=audio_file)
         return r.text
 
     def generate_voice_response_and_save_file(self, text, voice, folder_path):
         if not folder_path or not os.path.isdir(folder_path):
             folder_path = os.getcwd()
-        r = self.client.audio.speech.create(model=self.tts_model, voice=voice, input=text)
+        r = self.tts_client.audio.speech.create(model=self.tts_model, voice=voice, input=text)
         file_name = os.path.join(folder_path, f"response_{datetime.now().strftime('%Y%m%d%H%M%S')}.mp3")
         with open(file_name, "wb") as f:
             f.write(r.read())

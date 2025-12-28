@@ -277,7 +277,10 @@ class CustomMessageHandler:
             "used_file_search": used_fs,
             "used_web_search": used_ws,
         })
-        return self.openai_wrapper.extract_text(response), used_fs, used_ws
+        text = self.openai_wrapper.extract_text(response)
+        if not text.strip():
+            return self.config.get_system_messages()["error_message"], False, False
+        return text, used_fs, used_ws
 
     async def _send_response(
             self,
@@ -293,6 +296,8 @@ class CustomMessageHandler:
         if used_web_search:
             tags.append("[websearch:on]")
         tag_block = "\n".join(tags)
+        if not bot_response.strip():
+            bot_response = self.config.get_system_messages()["error_message"]
         text_to_store = f"{tag_block}\n{bot_response}" if tag_block else bot_response
         if is_voice:
             if tag_block:
@@ -313,6 +318,8 @@ class CustomMessageHandler:
                     logger.exception("failed to remove temp tts file: %s", exc)
             return text_to_store
         text_to_send = f"{tag_block}\n{bot_response}" if tag_block else bot_response
+        if not text_to_send.strip():
+            text_to_send = self.config.get_system_messages()["error_message"]
         for chunk in self._split_message(text_to_send):
             await message.reply_text(chunk)
         return text_to_send
