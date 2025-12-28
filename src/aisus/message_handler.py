@@ -277,7 +277,10 @@ class CustomMessageHandler:
             "used_file_search": used_fs,
             "used_web_search": used_ws,
         })
-        return self.openai_wrapper.extract_text(response), used_fs, used_ws
+        text = self.openai_wrapper.extract_text(response)
+        if not text.strip():
+            return self.config.get_system_messages()["error_message"], False, False
+        return text, used_fs, used_ws
 
     async def _send_response(
             self,
