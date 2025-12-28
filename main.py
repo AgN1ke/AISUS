@@ -8,20 +8,31 @@ from src.aisus.openai_wrapper import OpenAIWrapper
 
 if __name__ == "__main__":
     config = ConfigReader()
+    openai_settings = config.get_openai_settings()
 
     chat_history_manager = ChatHistoryManager()
     openai_wrapper = OpenAIWrapper(
-        api_key=config.get_openai_settings()["api_key"],
-        api_mode=config.get_openai_settings()["api_mode"],
-        reasoning_effort=config.get_openai_settings()["reasoning_effort"],
-        search_enabled=str(config.get_openai_settings()["search_enabled"]).lower() in ("1", "true", "yes"),
-        web_search_enabled=str(config.get_openai_settings()["web_search_enabled"]).lower() in ("1", "true", "yes"),
-        whisper_model=config.get_openai_settings()["whisper_model"],
-        tts_model=config.get_openai_settings()["tts_model"],
-        base_url=config.get_openai_settings()["base_url"],
+        api_key=openai_settings["api_key"],
+        api_mode=openai_settings["api_mode"],
+        reasoning_effort=openai_settings["reasoning_effort"],
+        search_enabled=str(openai_settings["search_enabled"]).lower() in ("1", "true", "yes"),
+        web_search_enabled=str(openai_settings["web_search_enabled"]).lower() in ("1", "true", "yes"),
+        whisper_model=openai_settings["whisper_model"],
+        tts_model=openai_settings["tts_model"],
+        base_url=openai_settings["base_url"],
+        chat_api_key=openai_settings["chat_api_key"],
+        image_api_key=openai_settings["image_api_key"],
+        whisper_api_key=openai_settings["whisper_api_key"],
+        tts_api_key=openai_settings["tts_api_key"],
+        files_api_key=openai_settings["files_api_key"],
+        chat_base_url=openai_settings["chat_base_url"],
+        image_base_url=openai_settings["image_base_url"],
+        whisper_base_url=openai_settings["whisper_base_url"],
+        tts_base_url=openai_settings["tts_base_url"],
+        files_base_url=openai_settings["files_base_url"],
     )
 
-    if config.get_openai_settings()["search_enabled"]:
+    if openai_settings["search_enabled"]:
         openai_wrapper.restore_vector_stores()
 
     message_handler = CustomMessageHandler(config, chat_history_manager, openai_wrapper)

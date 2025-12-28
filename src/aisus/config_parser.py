@@ -102,6 +102,16 @@ class ConfigReader:
 
         self.base_url: Optional[str] = os.getenv("OPENAI_BASE_URL")
         self.api_key: Optional[str] = os.getenv("OPENAI_API_KEY")
+        self.chat_api_key: Optional[str] = os.getenv("OPENAI_CHAT_API_KEY")
+        self.image_api_key: Optional[str] = os.getenv("OPENAI_IMAGE_API_KEY")
+        self.whisper_api_key: Optional[str] = os.getenv("OPENAI_WHISPER_API_KEY")
+        self.tts_api_key: Optional[str] = os.getenv("OPENAI_TTS_API_KEY")
+        self.files_api_key: Optional[str] = os.getenv("OPENAI_FILES_API_KEY")
+        self.chat_base_url: Optional[str] = os.getenv("OPENAI_CHAT_BASE_URL")
+        self.image_base_url: Optional[str] = os.getenv("OPENAI_IMAGE_BASE_URL")
+        self.whisper_base_url: Optional[str] = os.getenv("OPENAI_WHISPER_BASE_URL")
+        self.tts_base_url: Optional[str] = os.getenv("OPENAI_TTS_BASE_URL")
+        self.files_base_url: Optional[str] = os.getenv("OPENAI_FILES_BASE_URL")
         self.gpt_model: Optional[str] = os.getenv("OPENAI_GPT_MODEL")
         self.api_mode: str = os.getenv("OPENAI_API_MODE", "responses")
         self.reasoning_effort: Optional[str] = os.getenv("OPENAI_REASONING_EFFORT")
@@ -149,6 +159,11 @@ class ConfigReader:
     def get_openai_settings(self) -> Dict[str, Optional[str]]:
         return {
             "api_key": self.api_key,
+            "chat_api_key": self.chat_api_key,
+            "image_api_key": self.image_api_key,
+            "whisper_api_key": self.whisper_api_key,
+            "tts_api_key": self.tts_api_key,
+            "files_api_key": self.files_api_key,
             "gpt_model": self.gpt_model,
             "whisper_model": self.whisper_model,
             "tts_model": self.tts_model,
@@ -158,6 +173,11 @@ class ConfigReader:
             "search_enabled": self.search_enabled,
             "web_search_enabled": self.web_search_enabled,
             "base_url": self.base_url,
+            "chat_base_url": self.chat_base_url,
+            "image_base_url": self.image_base_url,
+            "whisper_base_url": self.whisper_base_url,
+            "tts_base_url": self.tts_base_url,
+            "files_base_url": self.files_base_url,
         }
 
     def get_api_settings(self) -> Dict[str, Optional[str]]:
