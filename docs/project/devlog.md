@@ -2370,3 +2370,10 @@
 - `python -m pytest tests/ --collect-only` — 88 тестів збираються без помилок.
 - Функціональні перевірки: `normalize_search_query`, `is_explicit_search_request`, `_heuristic_plan` — всі assertions пройдені.
 
+### Розгортання
+
+- Створено `deploy/deploy.cjs` — приватний скрипт на ssh2 для SFTP-upload і systemctl restart.
+- Розгорнуто на VPS (87.106.11.84:/opt/smartest/app) — архів 150MB, обидва сервіси OK:
+  - `smartest-bot` — active
+  - `smartest-admin` — active
+
