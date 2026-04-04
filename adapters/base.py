@@ -1,8 +1,38 @@
 from __future__ import annotations
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional, Any, Awaitable, Callable
 
 MessageHandler = Callable[["UnifiedMessage"], Awaitable[None]]
+
+
+@dataclass
+class MessageParticipant:
+    user_id: Optional[int] = None
+    username: Optional[str] = None
+    display_name: Optional[str] = None
+
+
+@dataclass
+class ReplyTarget:
+    message_id: Optional[int] = None
+    author: MessageParticipant = field(default_factory=MessageParticipant)
+    text: str = ""
+    media_kind: Optional[str] = None
+    is_bot: bool = False
+
+
+@dataclass
+class MessageGeometry:
+    chat_type: Optional[str] = None
+    sender: MessageParticipant = field(default_factory=MessageParticipant)
+    reply_target: ReplyTarget = field(default_factory=ReplyTarget)
+    current_media_kind: Optional[str] = None
+    target_media_kind: Optional[str] = None
+    clean_text: str = ""
+    addressed_via_mention: bool = False
+    reply_to_bot: bool = False
+    addressed: bool = False
+
 
 @dataclass
 class UnifiedMessage:
@@ -21,6 +51,7 @@ class UnifiedMessage:
 
     # Допоміжне
     bot_username: Optional[str] = None
+    geometry: MessageGeometry = field(default_factory=MessageGeometry)
 
 class AbstractAdapter:
     name: str

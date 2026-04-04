@@ -1,13 +1,40 @@
 # db/search_repository.py
 from __future__ import annotations
-import hashlib, json, datetime as dt
-from typing import Optional, List, Dict
-from .connection import fetchone, fetchall, execute
+
+import datetime as dt
+import hashlib
+import json
+from typing import Dict, List, Optional
+
+from .connection import execute, fetchone
+
 
 def _h(s: str) -> str:
     return hashlib.sha256(s.encode("utf-8", "ignore")).hexdigest()
 
-async def get_search_cache(provider: str, query: str, ttl_min: int) -> Optional[List[Dict]]:
+
+def _utcnow() -> dt.datetime:
+    return dt.datetime.now(dt.timezone.utc)
+
+
+def _ensure_utc(value: dt.datetime | None) -> dt.datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=dt.timezone.utc)
+    return value.astimezone(dt.timezone.utc)
+
+
+def _is_expired(created_at: dt.datetime | None, ttl_min: int) -> bool:
+    normalized = _ensure_utc(created_at)
+    if normalized is None:
+        return False
+    return (_utcnow() - normalized).total_seconds() > ttl_min * 60
+
+
+async def get_search_cache(
+    provider: str, query: str, ttl_min: int
+) -> Optional[List[Dict]]:
     qh = _h(query.strip().lower())
     row = await fetchone(
         """
@@ -19,13 +46,13 @@ async def get_search_cache(provider: str, query: str, ttl_min: int) -> Optional[
     )
     if not row:
         return None
-    created = row["created_at"]
-    if created and (dt.datetime.utcnow() - created).total_seconds() > ttl_min * 60:
+    if _is_expired(row["created_at"], ttl_min):
         return None
     try:
         return json.loads(row["results_json"])
     except Exception:
         return None
+
 
 async def put_search_cache(provider: str, query: str, results: List[Dict]):
     qh = _h(query.strip().lower())
@@ -36,6 +63,7 @@ async def put_search_cache(provider: str, query: str, results: List[Dict]):
     """,
         (provider, qh, query, json.dumps(results, ensure_ascii=False)),
     )
+
 
 async def get_page_cache(url: str, ttl_min: int) -> Optional[str]:
     uh = _h(url)
@@ -48,10 +76,10 @@ async def get_page_cache(url: str, ttl_min: int) -> Optional[str]:
     )
     if not row:
         return None
-    fetched = row["fetched_at"]
-    if fetched and (dt.datetime.utcnow() - fetched).total_seconds() > ttl_min * 60:
+    if _is_expired(row["fetched_at"], ttl_min):
         return None
     return row["text"]
+
 
 async def put_page_cache(url: str, text: str):
     uh = _h(url)

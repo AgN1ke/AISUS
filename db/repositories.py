@@ -1,6 +1,7 @@
-# db/repositories.py
-from datetime import datetime
+from __future__ import annotations
+
 from .connection import execute
+
 
 async def upsert_chat(chat_id: int, title: str | None, lang: str | None):
     sql = """
@@ -13,7 +14,14 @@ async def upsert_chat(chat_id: int, title: str | None, lang: str | None):
     """
     await execute(sql, (chat_id, title, lang))
 
-async def upsert_participant(chat_id: int, user_id: int, username: str | None, display_name: str | None, role: str | None = None):
+
+async def upsert_participant(
+    chat_id: int,
+    user_id: int,
+    username: str | None,
+    display_name: str | None,
+    role: str | None = None,
+):
     sql = """
     INSERT INTO participants (chat_id, user_id, username, display_name, role, last_active, messages_count)
     VALUES (%s, %s, %s, %s, %s, NOW(), 1)

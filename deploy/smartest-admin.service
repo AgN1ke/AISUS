@@ -1,0 +1,19 @@
+[Unit]
+Description=Smartest Admin UI
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/smartest/app
+ExecStart=/opt/smartest/venv/bin/python -m app.admin_ui
+Restart=always
+RestartSec=3
+Environment=PYTHONUNBUFFERED=1
+Environment=SMARTEST_ENV_PATH=/opt/smartest/.env
+Environment=SMARTEST_ADMIN_HOST=127.0.0.1
+Environment=SMARTEST_ADMIN_PORT=8787
+Environment=SMARTEST_MANAGED_SERVICE=smartest-bot.service
+Environment=SMARTEST_ADMIN_SERVICE_NAME=smartest-admin.service
+
+[Install]
+WantedBy=multi-user.target

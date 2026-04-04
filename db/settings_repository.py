@@ -1,11 +1,19 @@
 from __future__ import annotations
+
 from typing import Optional
-from .connection import fetchone, execute
+
+from .connection import execute, fetchone
+from .repositories import upsert_chat
+
 
 async def get_settings(chat_id: int) -> Optional[dict]:
     return await fetchone("SELECT * FROM settings WHERE chat_id=%s", (chat_id,))
 
-async def upsert_settings(chat_id: int, auth_ok: bool | None = None, mode: str | None = None):
+
+async def upsert_settings(
+    chat_id: int, auth_ok: bool | None = None, mode: str | None = None
+):
+    await upsert_chat(chat_id, title=None, lang=None)
     await execute(
         """
         INSERT INTO settings (chat_id, auth_ok, mode)
