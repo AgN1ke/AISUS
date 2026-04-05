@@ -2445,3 +2445,19 @@ Admin UI (`smartest.klawa.top`) — каша: ключі всіх провайд
 - Розгортання на VPS (87.106.11.84): обидва сервіси OK.
   - `smartest-bot` — active
   - `smartest-admin` — active
+
+### Фіксапи (продовження сесії 043)
+
+**Проблема 1: `<input>+<datalist>` — погана UX.** Коли в полі щось вписано, datalist фільтрує список і інші варіанти зникають. Всі model поля переведено на `<select>`. Оновлено `refreshModels()` JS — тепер тільки оновлює `<select>`, не перестворює input.
+
+**Проблема 2: Search provider info-tooltips.** Додано `SEARCH_PROVIDER_INFO` dict з деталями кожного провайдера (ціна, швидкість, free tier). Кнопки `(i)` поруч з назвою провайдера відкривають tooltip. Додано CSS `.info-btn`.
+
+**Проблема 3: Бот не працює — Gemini quota 429 + planner 404.**
+
+Дві незалежні помилки:
+- `gemini-3.1-pro-preview` — free tier `limit: 0`. Модель існує, але на безплатному tier не доступна взагалі. Замінено всі агенти на `gemini-2.5-flash` / `gemini-2.5-flash-lite` через direct patch `.env` на сервері.
+- `planner.py` передавав `model=planner_model()` як explicit override в `chat_once()`. `planner_model()` читає legacy env-змінні (`OPENAI_PLANNER_MODEL` → `OPENAI_CHAT_MODEL` → `OPENAI_GPT_MODEL=gpt-4o-mini`). Коли provider встановлено Gemini, модель `gpt-4o-mini` іде в Gemini API → HTTP 404. Виправлено: прибрано `model=planner_model()` — planner тепер використовує `CAPABILITY_PLANNER_REASONING_MODEL` через provider registry, як і всі інші агенти. Видалено невикористаний import `planner_model` з `planner.py`.
+
+**Уроки:**
+- `gemini-3.1-pro-preview` не підходить для free tier — тільки `gemini-2.5-flash` і нижче.
+- Legacy `model=` override в `chat_once()` обходить CAPABILITY_ систему. Краще не передавати `model=` якщо вже є capability — нехай registry вирішує.

@@ -91,6 +91,16 @@ PROVIDERS: list[ProviderDef] = [
                 "Fallback"),
 ]
 
+# Detailed info for search provider tooltips
+SEARCH_PROVIDER_INFO: dict[str, str] = {
+    "brave": "Найкращий за якістю (score 14.89/20, #1 з 8 API). Швидкий: 669ms. Ціна: $5-9/1K запитів. Free tier: 2000 запитів/місяць. Рекомендований як primary.",
+    "tavily": "Search + витяг контенту зі сторінок. Єдиний хто може crawl сайт і дати чистий текст. Ціна: $5/1K. Free tier: 1000 запитів/місяць. Добрий для site-search.",
+    "exa": "Семантичний пошук — шукає за змістом, а не ключовими словами. Ідеальний для наукових статей, документації, technical research. Ціна: $3.50/1K. Free tier: 1000 запитів/місяць.",
+    "serper": "Обгортка над Google Search. Стабільний, швидкий. Ціна: $1/1K. Free tier: 2500 запитів. Добрий fallback.",
+    "perplexity": "LLM-powered пошук — не просто посилання, а готова синтезована відповідь. Повільний (~11с). Ціна: $5/1K. Free tier: немає. Корисний для складних питань.",
+    "bing": "Microsoft Bing API. Старий, стабільний. Ціна: перші 1000 безплатно, далі $7/1K. Fallback якщо все інше не працює.",
+}
+
 LLM_PROVIDERS = [p for p in PROVIDERS if p.kind == "llm"]
 SEARCH_PROVIDERS = [p for p in PROVIDERS if p.kind == "search"]
 
@@ -486,7 +496,23 @@ def render_dashboard(values: dict[str, str], flash: str = "", flash_kind: str = 
         return out
 
     llm_cards = _provider_cards(LLM_PROVIDERS)
-    search_cards = _provider_cards(SEARCH_PROVIDERS)
+
+    # Search provider cards with info tooltips
+    search_cards = ""
+    for p in SEARCH_PROVIDERS:
+        has_key = p.slug in providers_with_keys
+        dot = "dot-ok" if has_key else "dot-empty"
+        kv = html.escape(values.get(p.key_env, ""))
+        info = SEARCH_PROVIDER_INFO.get(p.slug, "")
+        info_btn = f'<button type="button" class="info-btn" title="{html.escape(info)}">i</button>' if info else ""
+        search_cards += f'''<div class="prov-card">
+          <div class="prov-header"><span class="dot {dot}"></span><strong>{html.escape(p.label)}</strong>{info_btn}</div>
+          <p class="prov-hint">{html.escape(p.help_text)}</p>
+          <div class="prov-key-row">
+            <input class="secret-input prov-key-input" type="password" name="{html.escape(p.key_env)}" value="{kv}" data-provider="{p.slug}" placeholder="API key">
+            <button class="btn-eye" type="button" data-toggle-secret>&#128065;</button>
+          </div>
+        </div>'''
 
     # --- Capability group cards ---
     models_json = json.dumps(MODELS, ensure_ascii=False)
@@ -513,23 +539,19 @@ def render_dashboard(values: dict[str, str], flash: str = "", flash_kind: str = 
                 tag = "" if lp.slug in providers_with_keys else " (немає ключа)"
                 prov_opts += f'<option value="{lp.slug}"{sel}{dis}>{html.escape(lp.label)}{tag}</option>'
 
-            # Model: for restricted types — <select>, for text — <input> + <datalist>
-            is_restricted = cap.model_type in ("vision", "video", "stt")
+            # Model: always <select>
             provider_models = MODELS.get(cap.model_type, MODELS.get("text", {})).get(eff_provider, [])
-
-            if is_restricted:
-                model_el = f'<select class="inp cap-model" name="{capability_field_key(cap.slug, "MODEL")}" data-cap="{cap.slug}">'
-                for m in provider_models:
-                    sel = " selected" if m == eff_model else ""
-                    model_el += f'<option value="{m}"{sel}>{m}</option>'
-                model_el += "</select>"
-            else:
-                dl_id = f"dl_{cap.slug}"
-                model_el = f'<input class="inp cap-model" type="text" name="{capability_field_key(cap.slug, "MODEL")}" value="{html.escape(eff_model)}" list="{dl_id}" data-cap="{cap.slug}" placeholder="{html.escape(cap.default_model)}">'
-                model_el += f'<datalist id="{dl_id}">'
-                for m in provider_models:
-                    model_el += f'<option value="{m}"></option>'
-                model_el += "</datalist>"
+            model_el = f'<select class="inp cap-model" name="{capability_field_key(cap.slug, "MODEL")}" data-cap="{cap.slug}">'
+            found = False
+            for m in provider_models:
+                sel = ""
+                if m == eff_model:
+                    sel = " selected"
+                    found = True
+                model_el += f'<option value="{m}"{sel}>{m}</option>'
+            if not found and eff_model:
+                model_el += f'<option value="{html.escape(eff_model)}" selected>{html.escape(eff_model)}</option>'
+            model_el += "</select>"
 
             # Hidden fields: provider env key, adapter (auto-computed)
             adapter_val = _auto_adapter(eff_provider, cap.model_type)
@@ -638,6 +660,12 @@ body{{ margin:0; min-height:100vh; font-family:"IBM Plex Sans","Segoe UI",sans-s
 .prov-card{{ padding:16px; border-radius:20px; }}
 .prov-header{{ display:flex; align-items:center; gap:8px; margin-bottom:6px; }}
 .prov-hint{{ margin:0 0 10px; color:var(--muted); font-size:.85rem; }}
+.info-btn{{
+  display:inline-flex; align-items:center; justify-content:center;
+  width:20px; height:20px; border-radius:50%; border:1.5px solid var(--accent2);
+  background:transparent; color:var(--accent2); font-size:.75rem; font-weight:700;
+  font-style:italic; cursor:help; margin-left:6px; padding:0; flex-shrink:0;
+}}
 .dot{{ width:10px; height:10px; border-radius:50%; flex-shrink:0; }}
 .dot-ok{{ background:var(--ok); box-shadow:0 0 6px rgba(44,107,68,.4); }}
 .dot-empty{{ background:var(--line); }}
@@ -822,17 +850,9 @@ function refreshModels(sel) {{
     adapterEl.value = prov === 'gemini' ? 'gemini_generate_content' : mt === 'vision' ? 'openai_vision' : 'openai_chat';
   }}
   const opts = (MODELS[mt] || MODELS['text'] || {{}})[prov] || [];
-  if (modelEl.tagName === 'SELECT') {{
-    const prev = modelEl.value;
-    modelEl.innerHTML = '';
-    opts.forEach(m => {{ const o = new Option(m, m, false, m===prev); modelEl.add(o); }});
-  }} else if (modelEl.tagName === 'INPUT') {{
-    const dlId = modelEl.getAttribute('list');
-    if (dlId) {{
-      const dl = document.getElementById(dlId);
-      if (dl) {{ dl.innerHTML = ''; opts.forEach(m => {{ const o = document.createElement('option'); o.value = m; dl.appendChild(o); }}); }}
-    }}
-  }}
+  const prev = modelEl.value;
+  modelEl.innerHTML = '';
+  opts.forEach(m => {{ const o = new Option(m, m, false, m===prev); modelEl.add(o); }});
 }}
 
 document.querySelectorAll('.prov-key-input').forEach(i => i.addEventListener('input', refreshProviderDropdowns));

@@ -8,7 +8,7 @@ from typing import Optional
 
 from agent.llm import chat_once, make_messages
 from agent.search_task import is_explicit_search_request
-from core.env import env_bool, planner_model
+from core.env import env_bool
 from core.prompts import PLANNER_SYSTEM_PROMPT
 
 logger = logging.getLogger(__name__)
@@ -197,7 +197,6 @@ def _plan_with_model(task: PlannerInput) -> Optional[PlanDecision]:
         messages,
         tools=None,
         use_reasoning=False,
-        model=planner_model(),
         temperature=0,
         capability="planner_reasoning",
     )

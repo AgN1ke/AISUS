@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+import os
+
 from core.env import (
     capability_adapter,
     capability_model,
@@ -42,7 +44,7 @@ def resolve_provider_binding(
         provider=provider,
         adapter=capability_adapter(capability, default=adapter_default),
         model=(model or capability_model(capability)).strip(),
-        api_key=provider_api_key(provider),
+        api_key=os.getenv(f"CAPABILITY_{capability.upper()}_API_KEY", "").strip() or provider_api_key(provider),
         base_url=provider_base_url(provider),
     )
 
