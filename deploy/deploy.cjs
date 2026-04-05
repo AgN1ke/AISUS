@@ -5,7 +5,8 @@ const { execSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 
-const PROJECT_DIR = path.resolve(__dirname, '..');
+// Always deploy from Smartest project, regardless of where this script runs
+const PROJECT_DIR = 'C:/Python_projects/Smartest';
 const REMOTE_APP = '/opt/smartest/app';
 const REMOTE_VENV = '/opt/smartest/venv';
 
@@ -64,6 +65,7 @@ conn.on('ready', () => {
         `${REMOTE_VENV}/bin/pip install -q -r ${REMOTE_APP}/requirements.txt`,
         // Restart services
         `systemctl restart smartest-bot`,
+        `systemctl restart smartest-admin`,
         `sleep 2`,
         `systemctl is-active smartest-bot && echo '[deploy] smartest-bot: OK' || echo '[deploy] smartest-bot: FAILED'`,
         `systemctl is-active smartest-admin && echo '[deploy] smartest-admin: OK' || echo '[deploy] smartest-admin: FAILED'`,

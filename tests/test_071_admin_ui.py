@@ -45,13 +45,59 @@ def test_ensure_session_secret_writes_missing_secret(tmp_path, monkeypatch):
     assert current["SMARTEST_ADMIN_SESSION_SECRET"] == secret
 
 
-def test_admin_ui_exposes_search_provider_keys_and_orders():
-    provider_keys = {field.key for field in admin_ui.PROVIDER_FIELDS}
-    global_keys = {field.key for field in admin_ui.GLOBAL_FIELDS}
-    capability_slugs = {cap.slug for cap in admin_ui.CAPABILITIES}
-
+def test_admin_ui_exposes_search_provider_keys():
+    provider_keys = {f.key for f in admin_ui.PROVIDER_FIELDS}
     assert "PROVIDER_PERPLEXITY_API_KEY" in provider_keys
     assert "PROVIDER_EXA_API_KEY" in provider_keys
     assert "PROVIDER_BRAVE_API_KEY" in provider_keys
+
+
+def test_admin_ui_exposes_global_search_fields():
+    global_keys = {f.key for f in admin_ui.GLOBAL_FIELDS}
     assert "SEARCH_OPENAI_MODEL" in global_keys
-    assert "search_web" in capability_slugs
+    assert "DEFAULT_LLM_PROVIDER" in global_keys
+
+
+def test_admin_ui_capabilities_include_all_agents():
+    slugs = {cap.slug for cap in admin_ui.CAPABILITIES}
+    assert "chat_final" in slugs
+    assert "planner_reasoning" in slugs
+    assert "search_query_planner" in slugs
+    assert "search_query_composer" in slugs
+    assert "search_evaluator" in slugs
+    assert "search_synthesis" in slugs
+    assert "vision_image" in slugs
+    assert "video_understanding" in slugs
+    assert "stt_voice" in slugs
+    assert "memory_summary" in slugs
+    assert "document_context" in slugs
+    assert "agent_reasoning" in slugs
+
+
+def test_admin_ui_capability_groups():
+    groups = {cap.group for cap in admin_ui.CAPABILITIES}
+    assert groups == {"smart", "functional", "media"}
+
+
+def test_admin_ui_media_capabilities_have_correct_model_type():
+    media_caps = {cap.slug: cap for cap in admin_ui.CAPABILITIES if cap.group == "media"}
+    assert media_caps["vision_image"].model_type == "vision"
+    assert media_caps["video_understanding"].model_type == "video"
+    assert media_caps["stt_voice"].model_type == "stt"
+
+
+def test_auto_adapter():
+    assert admin_ui._auto_adapter("gemini", "text") == "gemini_generate_content"
+    assert admin_ui._auto_adapter("openai", "vision") == "openai_vision"
+    assert admin_ui._auto_adapter("openai", "text") == "openai_chat"
+    assert admin_ui._auto_adapter("deepseek", "text") == "openai_chat"
+
+
+def test_model_options_cover_media_types():
+    assert "vision" in admin_ui.MODELS
+    assert "video" in admin_ui.MODELS
+    assert "stt" in admin_ui.MODELS
+    # Video only has gemini
+    assert set(admin_ui.MODELS["video"].keys()) == {"gemini"}
+    # STT only has openai
+    assert set(admin_ui.MODELS["stt"].keys()) == {"openai"}

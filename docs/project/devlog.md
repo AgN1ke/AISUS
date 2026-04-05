@@ -2377,3 +2377,71 @@
   - `smartest-bot` — active
   - `smartest-admin` — active
 
+## Сесія: Очищення Контексту На Сервері
+
+- На live-контурі `smartest` очищено тільки чат-контекст у БД, без зміни коду і без зачіпання механіки.
+- Видалено записи з таблиць: `messages`, `threads`, `glossary`, `participants`, `memory_recent`, `memory_long`.
+- Після очищення `smartest-bot.service` зупинено і запущено знову; сервіс підтверджено як `active`.
+- Збережено `settings` і сам runtime-конфіг, тобто скинуто саме контекст, а не авторизацію чи механіку.
+
+## 2026-04-05 - Сесія 043
+
+### Проблема / Ціль
+
+Admin UI (`smartest.klawa.top`) — каша: ключі всіх провайдерів в одній купі, агенти без дефолтних моделей (все пусте), для медіа-агентів можна вибрати модель яка не підтримує потрібний формат, немає рекомендацій яку модель ставити, немає можливості задати окремий ключ для агента.
+
+### Що Зроблено
+
+**`app/admin_ui.py`** — повний rewrite:
+
+- **Provider Keys** розділено на LLM (OpenAI, Anthropic, Gemini, DeepSeek, Mistral, xAI) і Search (Brave, Tavily, Exa, Serper, Perplexity, Bing). Кожен провайдер — картка з індикатором наявності ключа (зелена/сіра точка).
+- **3 групи агентів:**
+  - *Розумні* (`chat_final`, `search_synthesis`, `agent_reasoning`) — бейдж "Потужна модель".
+  - *Функціональні* (`planner_reasoning`, `search_query_planner`, `search_query_composer`, `search_evaluator`, `memory_summary`) — бейдж "Маленька швидка модель".
+  - *Медіа* (`vision_image`, `video_understanding`, `stt_voice`, `document_context`) — фільтровані списки моделей під можливості.
+- **Додано `search_query_planner`** — був у коді, але не в UI.
+- **Прибрано `search_web`** з карток агентів — це не LLM capability, а search provider override.
+- **Модельні списки по типу:** vision — тільки GPT-4o/Gemini/Claude з vision; video — тільки Gemini (native video); STT — тільки whisper/transcribe. Текстові — вільний ввід з підказками.
+- **Рекомендаційні бейджі** на кожному агенті.
+- **JS інтерактивність:** провайдери без ключів — disabled в дропдаунах; зміна провайдера оновлює список моделей; адаптер auto-computed.
+- **Custom API key per agent:** галочка "Окремий API ключ" відкриває поле для окремого ключа (для контролю видатків).
+- **Автозаповнення defaults:** всі поля показують поточні значення або дефолтні моделі.
+
+**`core/provider_registry.py`:**
+
+- `resolve_provider_binding()` тепер перевіряє `CAPABILITY_{SLUG}_API_KEY` перед загальним `PROVIDER_{NAME}_API_KEY`. Це дозволяє ізолювати видатки per-agent.
+
+**`tests/test_071_admin_ui.py`** — повністю переписано: тести на групи, model types, auto-adapter, media filtering, наявність всіх capabilities.
+
+### Коригування Проблем
+
+Першу версію не було видно на сервері — deploy скрипт запускався з неправильної директорії й архівував Comixator, а не Smartest. Виправлено: `PROJECT_DIR` = абсолютний шлях `C:/Python_projects/Smartest`. Також додано перезапуск `smartest-admin.service` (раніше перезапускалась тільки `smartest-bot`).
+
+### Актуалізація Моделей (Квітень 2026)
+
+Дефолти були застарілі (`gpt-4o-mini`). Оновлено на актуальні:
+
+| Категорія | Моделі |
+|-----------|--------|
+| **OpenAI** | `gpt-5.4`, `gpt-5.4-mini`, `gpt-5.4-nano`, `gpt-4.1`, `o4-mini` |
+| **Anthropic** | `claude-opus-4-6`, `claude-sonnet-4-6`, `claude-haiku-4-5` |
+| **Gemini** | `gemini-3.1-pro-preview`, `gemini-2.5-pro`, `gemini-2.5-flash`, `gemini-2.5-flash-lite` |
+| **DeepSeek** | `deepseek-chat`, `deepseek-reasoner` |
+| **Mistral** | `mistral-large-latest`, `mistral-medium-latest`, `mistral-small-latest` |
+| **xAI** | `grok-4`, `grok-3`, `grok-3-mini` |
+
+**Дефолти:**
+- Розумні агенти (`chat_final`, `search_synthesis`, `agent_reasoning`) → `gpt-5.4-mini`
+- Функціональні (`planner`, `composer`, `evaluator`, `memory`) → `gpt-5.4-nano`
+- Vision → `gpt-5.4-mini`
+- Video → `gemini-2.5-flash`
+- STT → `gpt-4o-transcribe`
+
+### Перевірка & Розгортання
+
+- `py_compile admin_ui.py` — OK.
+- `pytest test_071_admin_ui.py --noconftest` — 10 passed.
+- `render_dashboard()` — 45K HTML, все активно.
+- Розгортання на VPS (87.106.11.84): обидва сервіси OK.
+  - `smartest-bot` — active
+  - `smartest-admin` — active
