@@ -126,6 +126,9 @@ async def main():
     await bootstrap_db()
     logger.info("runtime.db_bootstrap_ok")
 
+    from memory.scheduler import start_scheduler
+    start_scheduler()
+
     inst = _load_instances_from_file(CONFIG_PATH)
     if not inst:
         inst = _load_instances_from_env()
@@ -152,6 +155,8 @@ async def main():
             pass
 
     await stop_ev.wait()
+    from memory.scheduler import stop_scheduler
+    stop_scheduler()
     for a in adapters:
         try:
             await a.stop()

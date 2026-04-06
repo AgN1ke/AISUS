@@ -345,3 +345,130 @@ VISION_IMAGE_DESCRIPTION_PROMPT = (
 # Базова fallback-інструкція для мультимодальних reply-сценаріїв. Використовується
 # в `media/router.py`, якщо користувач просто тегнув медіа без явної задачі.
 MEDIA_DEFAULT_TASK_PROMPT = "Проаналізуй наведене медіа і відповідай по суті завдання."
+
+
+# --- 3-layer memory: importance agent & fact extraction ---
+
+IMPORTANCE_EVAL_SYSTEM_PROMPT = _block(
+    """
+    Ти внутрішній агент-оцінювач пам'яті Telegram-бота.
+    Тобі дають список стиснених спогадів (memories) з минулих сесій
+    і контекст ядра (core) — стабільні факти про користувача.
+
+    Для кожного спогаду визнач:
+    - importance (1–10): наскільки він важливий для довгострокового розуміння користувача
+    - compressed_text: коротша версія тексту (якщо importance 4–6) або null (якщо без змін)
+    - reason: коротке пояснення (1 речення)
+
+    Шкала:
+    1–2: шум (привітання, побутові фрази, повтори)
+    3–4: контекст (разові запити, деталі конкретної задачі)
+    5–6: корисне (часті теми, уподобання, робочий контекст)
+    7–8: важливе (прямий feedback, ключові рішення, емоційні моменти)
+    9–10: критичне (ідентичність, принципові переконання)
+
+    Поверни тільки JSON без пояснень:
+    {"evaluations": [{"id": ..., "importance": ..., "compressed_text": ..., "reason": "..."}]}
+    """
+)
+
+IMPORTANCE_EVAL_USER_TEMPLATE = _block(
+    """
+    Контекст ядра (core):
+    {core_context}
+
+    Спогади для оцінки:
+    {entries_json}
+    """
+)
+
+FACT_EXTRACTION_SYSTEM_PROMPT = _block(
+    """
+    Ти внутрішній агент Telegram-бота, що витягує стабільні факти про користувача
+    з блоку діалогу. Факти — це те, що не змінюється щодня: ім'я, місто, робота,
+    мова, стиль спілкування, переконання, уподобання.
+
+    Не витягуй разові запити, теми конкретних розмов, побутові фрази.
+    Тільки стабільні факти, корисні для персоналізації бота на місяці вперед.
+
+    Для кожного факту визнач source:
+    - explicit: користувач сказав прямо ("мене звати Петро")
+    - llm_extracted: виведено з контексту моделлю
+    - inferred: непряме виведення з патерну
+
+    І confidence (числове, за шкалою):
+    - explicit = 320
+    - llm_extracted = 230
+    - inferred = 200
+
+    Поверни тільки JSON:
+    {"profile_facts": [{"key": "name", "value": "Петро", "source": "explicit", "confidence": 320}]}
+
+    Якщо фактів немає — поверни порожній масив.
+    """
+)
+
+FACT_EXTRACTION_USER_TEMPLATE = _block(
+    """
+    Поточне ядро (core):
+    {core_context}
+
+    Блок діалогу:
+    {block}
+    """
+)
+
+REFLECTION_SYSTEM_PROMPT = _block(
+    """
+    Ти внутрішній агент рефлексії Telegram-бота. Тобі дають групу схожих
+    спогадів з довгострокової пам'яті. Твоя задача — синтезувати з них
+    одне стабільне переконання (core belief) про користувача.
+
+    Переконання має бути:
+    - коротким (1–2 речення)
+    - узагальненим (не прив'язаним до конкретної дати/події)
+    - корисним для персоналізації відповідей бота
+
+    Поверни тільки JSON:
+    {"belief_key": "short_key", "belief_value": "текст переконання"}
+    """
+)
+
+REFLECTION_USER_TEMPLATE = _block(
+    """
+    Спогади групи:
+    {memories_text}
+    """
+)
+
+# ---------------------------------------------------------------------------
+# Env var overrides — admin UI /prompts page writes to these env vars.
+# If an env var is set (non-empty), it replaces the code default above.
+# ---------------------------------------------------------------------------
+
+_PROMPT_OVERRIDES = {
+    "PROMPT_PLANNER_SYSTEM": "PLANNER_SYSTEM_PROMPT",
+    "PROMPT_SEARCH_COMPOSER": "SEARCH_COMPOSER_SYSTEM_PROMPT",
+    "PROMPT_SEARCH_QUERY_PLANNER": "SEARCH_QUERY_PLANNER_PROMPT",
+    "PROMPT_SEARCH_EVALUATOR": "SEARCH_EVALUATOR_SYSTEM_PROMPT",
+    "PROMPT_MEMORY_SUMMARY": "MEMORY_SUMMARY_SYSTEM_PROMPT",
+    "PROMPT_MEMORY_SUMMARY_TPL": "MEMORY_SUMMARY_USER_TEMPLATE",
+    "PROMPT_IMPORTANCE_EVAL": "IMPORTANCE_EVAL_SYSTEM_PROMPT",
+    "PROMPT_FACT_EXTRACTION": "FACT_EXTRACTION_SYSTEM_PROMPT",
+    "PROMPT_REFLECTION": "REFLECTION_SYSTEM_PROMPT",
+    "PROMPT_TRANSPORT": "TELEGRAM_TRANSPORT_SYSTEM_PROMPT",
+    "PROMPT_VISION_DESC": "VISION_IMAGE_DESCRIPTION_PROMPT",
+}
+
+
+def _apply_env_overrides():
+    """Replace module-level prompt constants with env var values if set."""
+    import sys
+    module = sys.modules[__name__]
+    for env_key, attr_name in _PROMPT_OVERRIDES.items():
+        val = os.getenv(env_key, "").strip()
+        if val:
+            setattr(module, attr_name, val)
+
+
+_apply_env_overrides()

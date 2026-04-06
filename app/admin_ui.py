@@ -114,7 +114,7 @@ MODELS: dict[str, dict[str, list[str]]] = {
         "openai": ["gpt-5.4", "gpt-5.4-mini", "gpt-5.4-nano", "gpt-4.1", "gpt-4.1-mini", "gpt-4.1-nano", "o4-mini"],
         # Claude 4.6 = current gen (April 2026)
         "anthropic": ["claude-opus-4-6", "claude-sonnet-4-6", "claude-haiku-4-5"],
-        # Gemini 3.1 preview = latest; 2.5 = stable; 2.5-flash-lite = cheapest
+        # Gemini 3.1-pro = latest (paid tier only); 2.5 = stable; 2.5-flash-lite = cheapest
         "gemini": ["gemini-3.1-pro-preview", "gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.5-flash-lite"],
         # DeepSeek V3 = deepseek-chat; R1 = deepseek-reasoner
         "deepseek": ["deepseek-chat", "deepseek-reasoner"],
@@ -235,6 +235,156 @@ CAPABILITY_GROUPS = [
     ("smart", "Розумні Агенти", "Формують відповіді користувачу. Потребують потужних моделей."),
     ("functional", "Функціональні Агенти", "Внутрішні задачі: routing, пошукові запити, оцінка. Працюють на маленьких дешевих моделях."),
     ("media", "Медіа Агенти", "Працюють з конкретними форматами. Список моделей обмежений можливостями."),
+]
+
+# ---------------------------------------------------------------------------
+# Prompt definitions — for the /prompts page
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class PromptDef:
+    slug: str           # unique id
+    title: str          # human-readable name
+    description: str    # what it does
+    stage: str          # at which pipeline stage
+    capability: str     # which capability uses this (for model resolution)
+    env_key: str        # env var to override this prompt
+    code_default: str   # default value from core/prompts.py
+
+def _load_prompt_defaults() -> dict[str, str]:
+    """Load default prompt values from core/prompts.py at import time."""
+    from core.prompts import (
+        PLANNER_SYSTEM_PROMPT,
+        SEARCH_COMPOSER_SYSTEM_PROMPT,
+        SEARCH_QUERY_PLANNER_PROMPT,
+        SEARCH_EVALUATOR_SYSTEM_PROMPT,
+        MEMORY_SUMMARY_SYSTEM_PROMPT,
+        MEMORY_SUMMARY_USER_TEMPLATE,
+        TELEGRAM_TRANSPORT_SYSTEM_PROMPT,
+        VISION_IMAGE_DESCRIPTION_PROMPT,
+        IMPORTANCE_EVAL_SYSTEM_PROMPT,
+        FACT_EXTRACTION_SYSTEM_PROMPT,
+        REFLECTION_SYSTEM_PROMPT,
+    )
+    return {
+        "planner": PLANNER_SYSTEM_PROMPT,
+        "search_composer": SEARCH_COMPOSER_SYSTEM_PROMPT,
+        "search_query_planner": SEARCH_QUERY_PLANNER_PROMPT,
+        "search_evaluator": SEARCH_EVALUATOR_SYSTEM_PROMPT,
+        "memory_summary": MEMORY_SUMMARY_SYSTEM_PROMPT,
+        "memory_summary_tpl": MEMORY_SUMMARY_USER_TEMPLATE,
+        "transport": TELEGRAM_TRANSPORT_SYSTEM_PROMPT,
+        "vision_desc": VISION_IMAGE_DESCRIPTION_PROMPT,
+        "importance_eval": IMPORTANCE_EVAL_SYSTEM_PROMPT,
+        "fact_extraction": FACT_EXTRACTION_SYSTEM_PROMPT,
+        "reflection": REFLECTION_SYSTEM_PROMPT,
+    }
+
+_PROMPT_DEFAULTS: dict[str, str] = {}
+
+def _get_prompt_defaults() -> dict[str, str]:
+    global _PROMPT_DEFAULTS
+    if not _PROMPT_DEFAULTS:
+        _PROMPT_DEFAULTS = _load_prompt_defaults()
+    return _PROMPT_DEFAULTS
+
+PROMPT_DEFS: list[PromptDef] = [
+    PromptDef(
+        "persona", "Персона бота",
+        "Головний system prompt, що визначає характер і стиль бота. Додається до кожної відповіді.",
+        "Кожна відповідь",
+        "chat_final",
+        "SYSTEM_MESSAGES_GPT_PROMPT",
+        "",
+    ),
+    PromptDef(
+        "planner", "Planner / Router",
+        "Внутрішній маршрутизатор. Визначає, який модуль обробить запит: чат, пошук, зображення, голос, документ.",
+        "Крок 1: Маршрутизація",
+        "planner_reasoning",
+        "PROMPT_PLANNER_SYSTEM",
+        "",
+    ),
+    PromptDef(
+        "search_composer", "Побудова пошукового запиту",
+        "Перетворює розмовний запит користувача в чистий пошуковий запит. Прибирає сленг, зайві слова, команди.",
+        "Крок 2a: Пошук → формулювання",
+        "search_query_composer",
+        "PROMPT_SEARCH_COMPOSER",
+        "",
+    ),
+    PromptDef(
+        "search_query_planner", "Декомпозиція запитів",
+        "Розбиває складний запит на 1–3 підзапити з профілем (general/news/docs) та альтернативним формулюванням.",
+        "Крок 2b: Пошук → планування",
+        "search_query_planner",
+        "PROMPT_SEARCH_QUERY_PLANNER",
+        "",
+    ),
+    PromptDef(
+        "search_evaluator", "Оцінка результатів пошуку",
+        "Оцінює, чи вистачає знайденого evidence для відповіді, і чи потрібен retry з іншим запитом.",
+        "Крок 2c: Пошук → оцінка",
+        "search_evaluator",
+        "PROMPT_SEARCH_EVALUATOR",
+        "",
+    ),
+    PromptDef(
+        "memory_summary", "Стиснення пам'яті (system)",
+        "Стискає блок діалогу з Working-шару в короткий підсумок для Long-term пам'яті.",
+        "Консолідація: Working → Long-term",
+        "memory_summary",
+        "PROMPT_MEMORY_SUMMARY",
+        "",
+    ),
+    PromptDef(
+        "memory_summary_tpl", "Стиснення пам'яті (шаблон)",
+        "Шаблон для конкретного блоку повідомлень. Змінна {block} замінюється на текст.",
+        "Консолідація: Working → Long-term",
+        "memory_summary",
+        "PROMPT_MEMORY_SUMMARY_TPL",
+        "",
+    ),
+    PromptDef(
+        "importance_eval", "Оцінка важливості спогадів",
+        "Агент-оцінювач: визначає важливість (1–10) кожного спогаду при каскадному перестисненні Long-term.",
+        "Каскадне перестиснення Long-term",
+        "memory_summary",
+        "PROMPT_IMPORTANCE_EVAL",
+        "",
+    ),
+    PromptDef(
+        "fact_extraction", "Витяг фактів → CORE",
+        "Витягує стабільні факти про користувача (ім'я, місто, робота, стиль) з блоку діалогу в CORE-шар пам'яті.",
+        "Консолідація → CORE шар",
+        "memory_summary",
+        "PROMPT_FACT_EXTRACTION",
+        "",
+    ),
+    PromptDef(
+        "reflection", "Рефлексія (синтез beliefs)",
+        "Аналізує групу схожих спогадів і формує одне стабільне переконання (core belief) про користувача.",
+        "Рефлексія (раз на 3 дні)",
+        "memory_summary",
+        "PROMPT_REFLECTION",
+        "",
+    ),
+    PromptDef(
+        "transport", "Telegram формат",
+        "Інструкція з форматування відповідей для Telegram. Додається до кожної фінальної відповіді.",
+        "Кожна відповідь (transport layer)",
+        "chat_final",
+        "PROMPT_TRANSPORT",
+        "",
+    ),
+    PromptDef(
+        "vision_desc", "Опис зображень",
+        "Коротка інструкція для моделі, що описує зображення: текст на картинці, персонажі, дії.",
+        "Медіа: розпізнавання зображень",
+        "vision_image",
+        "PROMPT_VISION_DESC",
+        "",
+    ),
 ]
 
 # Adapter auto-detection — internal, never shown to user
@@ -514,6 +664,16 @@ def render_dashboard(values: dict[str, str], flash: str = "", flash_kind: str = 
           </div>
         </div>'''
 
+    # --- Default search provider selector ---
+    current_search_prov = (values.get("SEARCH_PROVIDER", "") or "auto").strip().lower()
+    search_prov_opts = '<option value="auto"' + (' selected' if current_search_prov == "auto" else '') + '>Авто (за пріоритетом)</option>'
+    for p in SEARCH_PROVIDERS:
+        sel = " selected" if p.slug == current_search_prov else ""
+        has = p.slug in providers_with_keys
+        dis = "" if has else ' disabled'
+        tag = "" if has else " (немає ключа)"
+        search_prov_opts += f'<option value="{p.slug}"{sel}{dis}>{html.escape(p.label)}{tag}</option>'
+
     # --- Capability group cards ---
     models_json = json.dumps(MODELS, ensure_ascii=False)
 
@@ -671,6 +831,7 @@ body{{ margin:0; min-height:100vh; font-family:"IBM Plex Sans","Segoe UI",sans-s
 .dot-empty{{ background:var(--line); }}
 .prov-key-row{{ display:flex; gap:8px; align-items:center; }}
 .prov-key-row input{{ flex:1; }}
+.search-default-row{{ margin-bottom:16px; max-width:360px; }}
 
 /* Capability cards */
 .cap-grid{{ display:grid; gap:16px; grid-template-columns:repeat(auto-fit,minmax(320px,1fr)); }}
@@ -750,6 +911,7 @@ option.no-key{{ color:#bbb; }}
         <label class="chk"><input type="checkbox" name="restart_bot" value="1" checked> Перезапустити бота</label>
       </div>
       <div class="toolbar-right">
+        <a class="btn btn-sec" href="/prompts">Промпти</a>
         <button class="btn btn-sec" type="submit" formaction="/logout" formmethod="post">Вийти</button>
       </div>
     </div>
@@ -764,7 +926,14 @@ option.no-key{{ color:#bbb; }}
     <!-- Search Providers -->
     <section class="panel">
       <h2>Search Провайдери</h2>
-      <p class="panel-desc">Пошукові API. Використовуються автоматично за пріоритетом.</p>
+      <p class="panel-desc">Пошукові API. Введіть ключ і виберіть основний пошуковик.</p>
+      <div class="search-default-row">
+        <label class="cap-label">Пошуковик за замовчуванням
+          <select class="inp" name="SEARCH_PROVIDER" id="search-default-select">
+            {search_prov_opts}
+          </select>
+        </label>
+      </div>
       <div class="prov-grid">{search_cards}</div>
     </section>
 
@@ -855,10 +1024,169 @@ function refreshModels(sel) {{
   opts.forEach(m => {{ const o = new Option(m, m, false, m===prev); modelEl.add(o); }});
 }}
 
-document.querySelectorAll('.prov-key-input').forEach(i => i.addEventListener('input', refreshProviderDropdowns));
+// Update search default dropdown when keys change
+function refreshSearchDefault() {{
+  const active = activeProviders();
+  const sel = document.getElementById('search-default-select');
+  if (!sel) return;
+  Array.from(sel.options).forEach(opt => {{
+    if (opt.value === 'auto') return;
+    opt.disabled = !active.has(opt.value);
+    opt.textContent = opt.textContent.replace(/ \(немає ключа\)$/, '');
+    if (opt.disabled) opt.textContent += ' (немає ключа)';
+  }});
+}}
+
+document.querySelectorAll('.prov-key-input').forEach(i => i.addEventListener('input', () => {{ refreshProviderDropdowns(); refreshSearchDefault(); }}));
 document.querySelectorAll('.cap-provider').forEach(s => s.addEventListener('change', () => refreshModels(s)));
 refreshProviderDropdowns();
+refreshSearchDefault();
 </script>
+</body>
+</html>"""
+
+
+def render_prompts_page(values: dict[str, str], flash: str = "", flash_kind: str = "info") -> str:
+    """Render the prompts editing page."""
+    defaults = _get_prompt_defaults()
+    flash_html = (
+        f'<div class="flash flash-{html.escape(flash_kind)}">{html.escape(flash)}</div>'
+        if flash else ""
+    )
+
+    # Resolve effective model per capability (same logic as main page)
+    cap_map = {c.slug: c for c in CAPABILITIES}
+
+    cards = ""
+    for pd in PROMPT_DEFS:
+        cap = cap_map.get(pd.capability)
+        if cap:
+            eff_model = _effective_model(cap, values)
+            eff_provider = _effective_provider(cap, values)
+        else:
+            eff_model = "—"
+            eff_provider = "—"
+
+        # Current value: env override or code default
+        if pd.slug == "persona":
+            current = values.get(pd.env_key, "")
+            placeholder = "(порожньо — бот без персони)"
+        else:
+            current = values.get(pd.env_key, "")
+            placeholder = defaults.get(pd.slug, "")
+
+        display_val = html.escape(current if current else placeholder)
+        is_override = bool(current)
+
+        override_badge = '<span class="badge badge-override">Перевизначено</span>' if is_override else '<span class="badge badge-default">За замовчуванням</span>'
+
+        cards += f'''<div class="prompt-card">
+          <div class="prompt-top">
+            <h3>{html.escape(pd.title)}</h3>
+            <span class="badge badge-model" title="Провайдер: {html.escape(eff_provider)}">{html.escape(eff_model)}</span>
+            {override_badge}
+          </div>
+          <p class="prompt-desc">{html.escape(pd.description)}</p>
+          <div class="prompt-stage">Етап: <strong>{html.escape(pd.stage)}</strong></div>
+          <textarea class="prompt-text" name="{html.escape(pd.env_key)}" rows="6" placeholder="{html.escape(placeholder[:200])}">{html.escape(current)}</textarea>
+          <p class="prompt-hint">Env: <code>{html.escape(pd.env_key)}</code> &middot; Capability: <code>{html.escape(pd.capability)}</code></p>
+        </div>'''
+
+    return f"""<!doctype html>
+<html lang="uk">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Smartest — Промпти</title>
+<style>
+:root {{
+  --bg: #f3ead9; --paper: rgba(255,248,236,0.88); --ink: #1f1d19;
+  --muted: #655d4d; --line: rgba(59,45,30,0.14); --accent: #bf4b2c;
+  --accent2: #204d46; --ok: #2c6b44; --warn: #935a14;
+  --sh: 0 24px 60px rgba(52,36,18,0.12);
+}}
+*{{ box-sizing:border-box; }}
+body{{ margin:0; min-height:100vh; font-family:"IBM Plex Sans","Segoe UI",sans-serif; color:var(--ink);
+  background: radial-gradient(circle at top left,rgba(191,75,44,.22),transparent 32%),
+    radial-gradient(circle at bottom right,rgba(32,77,70,.18),transparent 28%),
+    linear-gradient(135deg,#efe1c4 0%,#f7f0e3 42%,#e8dcc5 100%);
+}}
+.sh{{ max-width:1480px; margin:0 auto; padding:28px 18px 48px; }}
+
+.hero-card{{
+  background:var(--paper); backdrop-filter:blur(12px);
+  border:1px solid var(--line); border-radius:24px; box-shadow:var(--sh);
+  padding:28px; margin-bottom:24px;
+}}
+.hero-card h1{{ margin:0 0 10px; font-size:clamp(1.6rem,3vw,2.4rem); line-height:.95; letter-spacing:-.04em; }}
+.hero-card p{{ margin:0; color:var(--muted); max-width:62ch; }}
+.nav-link{{ color:var(--accent2); font-weight:700; text-decoration:none; }}
+.nav-link:hover{{ text-decoration:underline; }}
+
+.flash{{ margin-bottom:20px; padding:14px 16px; border-radius:16px; font-weight:600; }}
+.flash-info{{ background:rgba(32,77,70,.12); color:var(--accent2); border:1px solid rgba(32,77,70,.18); }}
+.flash-error{{ background:rgba(191,75,44,.12); color:#8b2e14; border:1px solid rgba(191,75,44,.18); }}
+
+.toolbar{{ display:flex; gap:12px; flex-wrap:wrap; justify-content:space-between; align-items:center; margin-bottom:18px; }}
+.btn{{ border:0; border-radius:999px; padding:14px 20px; font:inherit; font-weight:700; cursor:pointer; transition:transform .16s; }}
+.btn:hover{{ transform:translateY(-1px); }}
+.btn-main{{ color:#fff7ef; background:linear-gradient(135deg,var(--accent),#d96c44); }}
+.btn-sec{{ color:var(--ink); background:rgba(255,255,255,.7); border:1px solid var(--line); }}
+
+.prompt-grid{{ display:grid; gap:20px; grid-template-columns:1fr; }}
+.prompt-card{{
+  background:var(--paper); backdrop-filter:blur(12px);
+  border:1px solid var(--line); border-radius:24px; box-shadow:var(--sh);
+  padding:22px; animation:rise .35s ease both;
+}}
+.prompt-top{{ display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin-bottom:6px; }}
+.prompt-top h3{{ margin:0; font-size:1.05rem; }}
+.badge{{
+  display:inline-block; padding:3px 10px; border-radius:999px;
+  font-size:.76rem; font-weight:600;
+}}
+.badge-model{{ background:rgba(32,77,70,.12); color:var(--accent2); }}
+.badge-override{{ background:rgba(191,75,44,.12); color:#8b2e14; }}
+.badge-default{{ background:rgba(59,45,30,.08); color:var(--muted); }}
+.prompt-desc{{ margin:0 0 6px; color:var(--muted); font-size:.92rem; line-height:1.45; }}
+.prompt-stage{{ margin:0 0 10px; font-size:.88rem; color:var(--accent2); }}
+.prompt-text{{
+  width:100%; border:1px solid rgba(59,45,30,.18); border-radius:14px;
+  background:rgba(255,255,255,.82); padding:12px 14px; font:inherit; font-size:.88rem;
+  color:var(--ink); resize:vertical; min-height:80px; line-height:1.5;
+}}
+.prompt-text::placeholder{{ color:#baa; font-style:italic; }}
+.prompt-hint{{ margin:6px 0 0; color:var(--muted); font-size:.78rem; }}
+.prompt-hint code{{ background:rgba(0,0,0,.06); padding:2px 5px; border-radius:6px; font-size:.78rem; }}
+
+.section-label{{
+  margin:28px 0 14px; padding:0; font-size:1.1rem; font-weight:700;
+  color:var(--accent2); letter-spacing:.02em;
+}}
+
+@keyframes rise{{ from{{ opacity:0; transform:translateY(8px); }} to{{ opacity:1; transform:translateY(0); }} }}
+@media(max-width:620px){{ .sh{{ padding:18px 14px 34px; }} }}
+</style>
+</head>
+<body>
+<div class="sh">
+  <div class="hero-card">
+    <h1>Промпти</h1>
+    <p>Системні промпти для кожного етапу. Модель підтягується з <a class="nav-link" href="/">головної сторінки</a>.
+    Порожнє поле = використовується вбудований промпт за замовчуванням.</p>
+  </div>
+  {flash_html}
+  <form method="post" action="/save-prompts">
+    <div class="toolbar">
+      <button class="btn btn-main" type="submit">Зберегти промпти</button>
+      <a class="nav-link" href="/">&larr; Назад до конфігурації</a>
+    </div>
+
+    <div class="prompt-grid">
+      {cards}
+    </div>
+  </form>
+</div>
 </body>
 </html>"""
 
@@ -928,6 +1256,11 @@ class SmartestAdminHandler(BaseHTTPRequestHandler):
             self._send_text("ok"); return
         if parsed.path == "/login":
             self._send_html(render_login(self._query_param(parsed.query, "message"))); return
+        if parsed.path == "/prompts":
+            if not self._current_session():
+                self._redirect("/login"); return
+            values = read_current_config()
+            self._send_html(render_prompts_page(values, flash=self._query_param(parsed.query, "flash"), flash_kind=self._query_param(parsed.query, "kind") or "info")); return
         if parsed.path != "/":
             self.send_error(HTTPStatus.NOT_FOUND); return
         if not self._current_session():
@@ -945,6 +1278,10 @@ class SmartestAdminHandler(BaseHTTPRequestHandler):
             if not self._current_session():
                 self._redirect("/login?" + urlencode({"message": "Потрібен повторний вхід."})); return
             self._handle_save(); return
+        if parsed.path == "/save-prompts":
+            if not self._current_session():
+                self._redirect("/login?" + urlencode({"message": "Потрібен повторний вхід."})); return
+            self._handle_save_prompts(); return
         self.send_error(HTTPStatus.NOT_FOUND)
 
     def _body_params(self) -> dict[str, str]:
@@ -1010,6 +1347,9 @@ class SmartestAdminHandler(BaseHTTPRequestHandler):
                 url_key = f"PROVIDER_{p.slug.upper()}_BASE_URL"
                 updates[url_key] = BASE_URLS[p.slug]
 
+        # Default search provider
+        updates["SEARCH_PROVIDER"] = params.get("SEARCH_PROVIDER", "auto").strip() or "auto"
+
         # Gemini thinking budget (keep existing value)
         existing = read_current_config()
         gb = existing.get("PROVIDER_GEMINI_THINKING_BUDGET", "0")
@@ -1059,6 +1399,21 @@ class SmartestAdminHandler(BaseHTTPRequestHandler):
         self._redirect("/?" + urlencode({
             "flash": flash,
             "kind": "info" if restarted or params.get("restart_bot") != "1" else "error",
+        }))
+
+    def _handle_save_prompts(self) -> None:
+        params = self._body_params()
+        updates: dict[str, str] = {}
+
+        for pd in PROMPT_DEFS:
+            val = params.get(pd.env_key, "").strip()
+            updates[pd.env_key] = val
+
+        write_env_updates(ENV_PATH, updates)
+
+        self._redirect("/prompts?" + urlencode({
+            "flash": "Промпти збережено. Перезапустіть бота на головній сторінці для застосування.",
+            "kind": "info",
         }))
 
     def _redirect(self, location: str) -> None:

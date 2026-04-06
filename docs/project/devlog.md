@@ -2461,3 +2461,115 @@ Admin UI (`smartest.klawa.top`) — каша: ключі всіх провайд
 **Уроки:**
 - `gemini-3.1-pro-preview` не підходить для free tier — тільки `gemini-2.5-flash` і нижче.
 - Legacy `model=` override в `chat_once()` обходить CAPABILITY_ систему. Краще не передавати `model=` якщо вже є capability — нехай registry вирішує.
+
+
+## 2026-04-06 - Сесія 044
+
+### Проблема / Ціль
+
+Реалізувати 3-шарову архітектуру пам'яті, задокументовану в `docs/project/memory-architecture.md`. Поточна система — 2 шари (memory_recent + memory_long). Потрібно додати CORE шар, каскадне перестиснення, агент-оцінювач важливості, нічний cron, тогл пам'яті, рефлексію.
+
+### Що Зроблено
+
+**Архітектурний документ** (`docs/project/memory-architecture.md`) — доповнено:
+- Наскрізний приклад "Петро і бот" (від першого повідомлення до рефлексії)
+- ASCII діаграма життєвого циклу даних
+- Алгоритм каскадного перестиснення з псевдокодом
+- Агент-оцінювач: вхід/вихід JSON, таблиця критеріїв 1–10, heuristic fallback
+- Retrieval scoring формула з конкретним прикладом
+- 8 граничних випадків з захистами
+
+**Міграція** (`db/migrations/003_memory_core.sql`):
+- Таблиця `memory_core` (fact_key, fact_value, source, confidence, tokens)
+- `memory_long.is_core_memory` — захист від видалення при перестисненні
+- `settings.memory_persist_enabled` — per-chat тогл пам'яті
+- `settings.last_reflection_at` — трекінг останньої рефлексії
+
+**Repository** (`db/memory_repository.py`):
+- CRUD для memory_core: fetch_core_all, core_total_tokens, upsert_core_fact, delete_core_facts, fetch_core_fact
+- Long-term helpers: long_total_tokens, fetch_long_oldest, delete_long_by_ids, update_long_entry
+- fetch_chats_with_recent для нічного cron
+
+**Settings** (`db/settings_repository.py`):
+- is_memory_persist_enabled, set_last_reflection, get_last_reflection
+
+**Prompts** (`core/prompts.py`):
+- IMPORTANCE_EVAL_SYSTEM_PROMPT + USER_TEMPLATE — оцінка важливості 1–10
+- FACT_EXTRACTION_SYSTEM_PROMPT + USER_TEMPLATE — витяг стабільних фактів з діалогу
+- REFLECTION_SYSTEM_PROMPT + USER_TEMPLATE — синтез core beliefs
+
+**Importance Agent** (`memory/importance.py` — новий):
+- evaluate_importance() — LLM-оцінка з JSON парсингом
+- heuristic_importance() — keyword fallback (identity/strong words, age, length)
+
+**Summarizer** (`memory/summarizer.py` — розширено):
+- extract_profile_facts() — витяг фактів → CORE
+- compress_entry() — стиснення одного запису для каскаду
+
+**Memory Manager** (`memory/manager.py` — major rewrite):
+- CORE layer: select_context тепер включає [CORE] блок перед [LONG-MEMO]
+- Тогл: якщо memory_persist_enabled=False → тільки Working в контексті
+- Profile facts: після кожної консолідації витягуються факти → CORE (з перевіркою confidence_delta ≥ 25.6)
+- Каскадне перестиснення: _cascade_recompress() — порції по 500 токенів, importance ≤3 видаляємо, 4-6 стискаємо, 7+ лишаємо. Fallback: FIFO.
+- Per-chat asyncio.Lock проти конкурентних консолідацій
+- Cooldown 10 хвилин між консолідаціями одного чату
+
+**Scheduler** (`memory/scheduler.py` — новий):
+- APScheduler AsyncIOScheduler, job: 02:00 UTC щоночі
+- Ітерує всі чати з recent memory, запускає ensure_budget
+- Раз на 3 дні запускає рефлексію
+
+**Reflection** (`memory/reflection.py` — новий):
+- Групування спогадів за keyword overlap (Jaccard ≥ 0.3)
+- Якщо група ≥ 3 і avg_importance ≥ 0.6 → LLM синтезує belief → CORE
+
+**Wiring** (`run.py`):
+- start_scheduler() після bootstrap_db
+- stop_scheduler() при shutdown
+
+**Dependencies** (`requirements.txt`):
+- Додано `apscheduler>=3.10`
+
+### Архітектурні Рішення
+
+- **Бюджети через env vars:** MEMORY_CORE_BUDGET=1000, існуючі MEMORY_RECENT_BUDGET/MEMORY_LONG_BUDGET без змін. Backward compatible.
+- **APScheduler всередині бота** замість системного cron: бот вже async long-running, шарить DB pool.
+- **Confidence delta = 25.6** (8% від max 320): новий факт перезаписує старий тільки якщо джерело значно достовірніше.
+- **Graceful degradation:** кожен LLM-виклик (importance, extraction, compression, reflection) має heuristic/truncation fallback.
+
+## 2026-04-07 - Сесія 045
+
+### Проблема / Ціль
+
+Промпти захардкоджені в коді (`core/prompts.py`), не видно яка модель їх виконує, не можна змінити без коміту.
+
+### Що Зроблено
+
+**Сторінка "Промпти"** (`app/admin_ui.py` → `/prompts`):
+- 12 промптів з описом що кожен робить і на якому етапі pipeline
+- Біля кожного промпта бейдж з ефективною моделлю (підтягується з capability settings на головній сторінці)
+- Textarea для перевизначення — порожнє поле = використовується вбудований дефолт
+- Бейджі "Перевизначено" / "За замовчуванням"
+- `POST /save-prompts` зберігає в `.env` через `PROMPT_*` змінні
+
+**Промпти на сторінці:**
+1. Персона бота (chat_final) — головна сторінка
+2. Planner / Router (planner_reasoning) — крок 1 маршрутизація
+3. Побудова пошукового запиту (search_query_composer) — крок 2a
+4. Декомпозиція запитів (search_query_planner) — крок 2b
+5. Оцінка результатів пошуку (search_evaluator) — крок 2c
+6. Стиснення пам'яті system (memory_summary) — консолідація Working→Long-term
+7. Стиснення пам'яті шаблон (memory_summary) — шаблон блоку
+8. Оцінка важливості спогадів (memory_summary) — каскадне перестиснення
+9. Витяг фактів → CORE (memory_summary) — консолідація → CORE
+10. Рефлексія (memory_summary) — синтез beliefs раз на 3 дні
+11. Telegram формат (chat_final) — transport layer
+12. Опис зображень (vision_image) — медіа
+
+**Env var overrides** (`core/prompts.py`):
+- Блок `_apply_env_overrides()` в кінці файлу: якщо `PROMPT_*` env var не порожній, він замінює відповідну константу
+- 11 override mappings: PROMPT_PLANNER_SYSTEM, PROMPT_SEARCH_COMPOSER, PROMPT_MEMORY_SUMMARY, etc.
+
+**Навігація:**
+- Кнопка "Промпти" в toolbar головної сторінки
+- Посилання "← Назад до конфігурації" на сторінці промптів
