@@ -912,6 +912,7 @@ option.no-key{{ color:#bbb; }}
       </div>
       <div class="toolbar-right">
         <a class="btn btn-sec" href="/prompts">Промпти</a>
+        <a class="btn btn-sec" href="/logs">Логи</a>
         <button class="btn btn-sec" type="submit" formaction="/logout" formmethod="post">Вийти</button>
       </div>
     </div>
@@ -1067,18 +1068,17 @@ def render_prompts_page(values: dict[str, str], flash: str = "", flash_kind: str
             eff_model = "—"
             eff_provider = "—"
 
-        # Current value: env override or code default
-        if pd.slug == "persona":
-            current = values.get(pd.env_key, "")
-            placeholder = "(порожньо — бот без персони)"
-        else:
-            current = values.get(pd.env_key, "")
-            placeholder = defaults.get(pd.slug, "")
+        # Current value: env override wins, otherwise show code default
+        env_override = values.get(pd.env_key, "").strip()
+        code_default = defaults.get(pd.slug, "") if pd.slug != "persona" else ""
+        # What to show in textarea: env override if set, otherwise code default
+        text_value = env_override if env_override else code_default
+        is_override = bool(env_override)
 
-        display_val = html.escape(current if current else placeholder)
-        is_override = bool(current)
+        override_badge = '<span class="badge badge-override">Змінено</span>' if is_override else '<span class="badge badge-default">Дефолт</span>'
 
-        override_badge = '<span class="badge badge-override">Перевизначено</span>' if is_override else '<span class="badge badge-default">За замовчуванням</span>'
+        # Count lines for textarea height
+        line_count = max(4, min(20, text_value.count('\n') + 2))
 
         cards += f'''<div class="prompt-card">
           <div class="prompt-top">
@@ -1088,7 +1088,7 @@ def render_prompts_page(values: dict[str, str], flash: str = "", flash_kind: str
           </div>
           <p class="prompt-desc">{html.escape(pd.description)}</p>
           <div class="prompt-stage">Етап: <strong>{html.escape(pd.stage)}</strong></div>
-          <textarea class="prompt-text" name="{html.escape(pd.env_key)}" rows="6" placeholder="{html.escape(placeholder[:200])}">{html.escape(current)}</textarea>
+          <textarea class="prompt-text" name="{html.escape(pd.env_key)}" rows="{line_count}">{html.escape(text_value)}</textarea>
           <p class="prompt-hint">Env: <code>{html.escape(pd.env_key)}</code> &middot; Capability: <code>{html.escape(pd.capability)}</code></p>
         </div>'''
 
@@ -1191,6 +1191,151 @@ body{{ margin:0; min-height:100vh; font-family:"IBM Plex Sans","Segoe UI",sans-s
 </html>"""
 
 
+def _read_journal_log(service: str, lines: int = 500) -> str:
+    """Read last N lines from systemd journal for a service."""
+    try:
+        proc = subprocess.run(
+            ["journalctl", "-u", service, "--no-pager", "-n", str(lines), "--output=short-iso"],
+            capture_output=True, text=True, timeout=10,
+        )
+        return proc.stdout or proc.stderr or "(порожньо)"
+    except FileNotFoundError:
+        return "(journalctl не знайдено — логи доступні тільки на сервері)"
+    except Exception as exc:
+        return f"(помилка: {exc})"
+
+
+def render_logs_page(values: dict[str, str], service: str = "", lines: int = 500) -> str:
+    """Render the logs page with journalctl output."""
+    if not service or service not in (MANAGED_BOT_SERVICE, SELF_SERVICE_NAME):
+        service = MANAGED_BOT_SERVICE
+
+    log_text = _read_journal_log(service, lines)
+    service_label = "Бот" if service == MANAGED_BOT_SERVICE else "Адмін"
+
+    bot_sel = " selected" if service == MANAGED_BOT_SERVICE else ""
+    admin_sel = " selected" if service == SELF_SERVICE_NAME else ""
+
+    lines_opts = ""
+    for n in [100, 200, 500, 1000, 2000, 5000]:
+        sel = " selected" if n == lines else ""
+        lines_opts += f'<option value="{n}"{sel}>{n}</option>'
+
+    return f"""<!doctype html>
+<html lang="uk">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Smartest — Логи ({html.escape(service_label)})</title>
+<style>
+:root {{
+  --bg: #1a1a1a; --paper: #1e1e1e; --ink: #d4d4d4;
+  --muted: #888; --line: rgba(255,255,255,0.08); --accent: #bf4b2c;
+  --accent2: #4ec9b0; --ok: #4ec9b0; --warn: #d7ba7d;
+}}
+*{{ box-sizing:border-box; }}
+body{{ margin:0; min-height:100vh; font-family:"JetBrains Mono","Fira Code","Consolas",monospace; color:var(--ink);
+  background:var(--bg); font-size:13px; }}
+.sh{{ display:flex; flex-direction:column; height:100vh; }}
+
+.toolbar{{
+  display:flex; gap:12px; align-items:center; flex-wrap:wrap;
+  padding:12px 18px; background:var(--paper); border-bottom:1px solid var(--line);
+  flex-shrink:0;
+}}
+.toolbar-title{{ font-weight:700; font-size:1.1rem; color:var(--accent2); margin-right:auto; }}
+.nav-link{{ color:var(--accent2); font-weight:600; text-decoration:none; font-size:.9rem; }}
+.nav-link:hover{{ text-decoration:underline; }}
+
+select,button{{
+  font-family:inherit; font-size:.85rem; padding:6px 12px;
+  border:1px solid var(--line); border-radius:8px;
+  background:var(--bg); color:var(--ink); cursor:pointer;
+}}
+button{{ font-weight:700; }}
+button:hover{{ background:#333; }}
+
+.log-wrap{{
+  flex:1; overflow:auto; padding:12px 18px;
+}}
+.log-pre{{
+  margin:0; white-space:pre-wrap; word-break:break-all; line-height:1.55;
+  color:#ccc; font-size:12.5px;
+}}
+.log-pre .ts{{ color:#6a9955; }}
+.log-pre .lvl-err{{ color:#f44747; font-weight:700; }}
+.log-pre .lvl-warn{{ color:#d7ba7d; }}
+.log-pre .lvl-info{{ color:#4ec9b0; }}
+
+.status-bar{{
+  display:flex; gap:16px; align-items:center; padding:8px 18px;
+  background:var(--paper); border-top:1px solid var(--line);
+  font-size:.82rem; color:var(--muted); flex-shrink:0;
+}}
+</style>
+</head>
+<body>
+<div class="sh">
+  <div class="toolbar">
+    <span class="toolbar-title">Логи: {html.escape(service_label)}</span>
+    <label>Сервіс:
+      <select id="svc-select">
+        <option value="{html.escape(MANAGED_BOT_SERVICE)}"{bot_sel}>Бот</option>
+        <option value="{html.escape(SELF_SERVICE_NAME)}"{admin_sel}>Адмін</option>
+      </select>
+    </label>
+    <label>Рядків:
+      <select id="lines-select">
+        {lines_opts}
+      </select>
+    </label>
+    <button onclick="reload()">Оновити</button>
+    <button onclick="scrollEnd()">&#8595; Кінець</button>
+    <a class="nav-link" href="/">&larr; Конфігурація</a>
+    <a class="nav-link" href="/prompts">Промпти</a>
+  </div>
+  <div class="log-wrap" id="log-wrap">
+    <pre class="log-pre" id="log-pre">{html.escape(log_text)}</pre>
+  </div>
+  <div class="status-bar">
+    <span>Сервіс: {html.escape(service)}</span>
+    <span>Рядків: {log_text.count(chr(10))}</span>
+    <span id="auto-label"></span>
+  </div>
+</div>
+<script>
+function reload() {{
+  const svc = document.getElementById('svc-select').value;
+  const n = document.getElementById('lines-select').value;
+  window.location.href = '/logs?service=' + encodeURIComponent(svc) + '&lines=' + n;
+}}
+function scrollEnd() {{
+  const el = document.getElementById('log-wrap');
+  el.scrollTop = el.scrollHeight;
+}}
+document.getElementById('svc-select').addEventListener('change', reload);
+document.getElementById('lines-select').addEventListener('change', reload);
+// Auto-scroll to bottom on load
+scrollEnd();
+
+// Auto-refresh every 10s
+let autoTimer = setInterval(() => {{
+  fetch('/logs-text?service=' + encodeURIComponent(document.getElementById('svc-select').value) + '&lines=' + document.getElementById('lines-select').value)
+    .then(r => r.text())
+    .then(t => {{
+      const pre = document.getElementById('log-pre');
+      const wrap = document.getElementById('log-wrap');
+      const wasBottom = (wrap.scrollHeight - wrap.scrollTop - wrap.clientHeight) < 60;
+      pre.textContent = t;
+      if (wasBottom) scrollEnd();
+    }}).catch(() => {{}});
+}}, 10000);
+document.getElementById('auto-label').textContent = 'Авто-оновлення: 10с';
+</script>
+</body>
+</html>"""
+
+
 def render_login(message: str = "") -> str:
     flash = f'<div class="login-flash">{html.escape(message)}</div>' if message else ""
     return f"""<!doctype html>
@@ -1261,6 +1406,21 @@ class SmartestAdminHandler(BaseHTTPRequestHandler):
                 self._redirect("/login"); return
             values = read_current_config()
             self._send_html(render_prompts_page(values, flash=self._query_param(parsed.query, "flash"), flash_kind=self._query_param(parsed.query, "kind") or "info")); return
+        if parsed.path == "/logs":
+            if not self._current_session():
+                self._redirect("/login"); return
+            values = read_current_config()
+            svc = self._query_param(parsed.query, "service") or MANAGED_BOT_SERVICE
+            lines = min(5000, max(50, int(self._query_param(parsed.query, "lines") or "500")))
+            self._send_html(render_logs_page(values, service=svc, lines=lines)); return
+        if parsed.path == "/logs-text":
+            if not self._current_session():
+                self._send_text("unauthorized", status=HTTPStatus.UNAUTHORIZED); return
+            svc = self._query_param(parsed.query, "service") or MANAGED_BOT_SERVICE
+            if svc not in (MANAGED_BOT_SERVICE, SELF_SERVICE_NAME):
+                svc = MANAGED_BOT_SERVICE
+            lines = min(5000, max(50, int(self._query_param(parsed.query, "lines") or "500")))
+            self._send_text(_read_journal_log(svc, lines)); return
         if parsed.path != "/":
             self.send_error(HTTPStatus.NOT_FOUND); return
         if not self._current_session():
