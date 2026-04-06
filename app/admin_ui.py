@@ -462,11 +462,13 @@ def _parse_env_value(raw: str) -> str:
     if not value:
         return ""
     if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
-        quote = value[0]
-        inner = value[1:-1]
-        if quote == '"':
-            return bytes(inner, "utf-8").decode("unicode_escape")
-        return inner.replace("\\'", "'")
+        # Values written by _safe_env_value use json.dumps, so parse back with json.loads
+        try:
+            return json.loads(value)
+        except Exception:
+            pass
+        # Fallback: strip quotes
+        return value[1:-1]
     return value
 
 def read_env_lines(path: Path) -> list[EnvLine]:
