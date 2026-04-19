@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -23,6 +24,22 @@ SEARCH_QUERY_PREFIXES = [
     r"^/think\b",
     r"^(пошукай|погугли|загугли)\b[\s:,-]*",
     r"^(знайди|перевір)\s+в\s+інтернеті\b[\s:,-]*",
+]
+
+SEARCH_INTENT_PATTERNS = [
+    r"\bшукай\b",
+    r"\bпошукай\b",
+    r"\bпогугли\b",
+    r"\bзагугли\b",
+    r"\bгугли\b",
+    r"\bзагуглити\b",
+    r"\bзнайди\s+в\s+інтернеті\b",
+    r"\bперевір\s+в\s+інтернеті\b",
+    r"\bщо\s+нового\b",
+    r"\bновини\b",
+    r"\bsearch\b",
+    r"\bgoogle\b",
+    r"\blook\s+up\b",
 ]
 
 ALLOWED_SEARCH_PROFILES = {
@@ -199,6 +216,13 @@ def strip_search_command(user_text: str) -> str:
     return text
 
 
+def _has_search_command_prefix(user_text: str) -> bool:
+    text = (user_text or "").strip()
+    if not text:
+        return False
+    return strip_search_command(text) != text
+
+
 def normalize_search_query(user_text: str) -> str:
     """Strip command prefix and do minimal text cleanup.
 
@@ -245,7 +269,13 @@ def is_explicit_search_request(user_text: str) -> bool:
     text = (user_text or "").strip()
     if not text:
         return False
-    return strip_search_command(text) != text
+    if _has_search_command_prefix(text):
+        return True
+    lowered = text.lower()
+    return any(
+        re.search(pattern, lowered, flags=re.I)
+        for pattern in SEARCH_INTENT_PATTERNS
+    )
 
 
 def trim_terminal_user_duplicate(
@@ -267,8 +297,14 @@ def _context_excerpt(context_msgs: list[dict], limit: int = 6) -> str:
     for msg in context_msgs:
         role = (msg.get("role") or "").strip().lower()
         content = (msg.get("content") or "").strip()
-        if role == "system" and content.startswith("[CHAT-GEOMETRY]"):
-            relevant.append({"role": "system", "content": content[:800]})
+        if role == "system":
+            if (
+                content.startswith("[CHAT-GEOMETRY]")
+                or content.startswith("[CHAT-TURN]")
+                or content.startswith("[THREAD-HISTORY]")
+                or content.startswith("[PARTICIPANT-HISTORY]")
+            ):
+                relevant.append({"role": "system", "content": content[:800]})
             continue
         if role not in {"user", "assistant"}:
             continue
@@ -475,7 +511,9 @@ def _build_single_search_task_from_context(
     context: list[dict],
 ) -> SearchTask:
     normalized_direct = normalize_search_query(user_text)
-    if is_explicit_search_request(user_text):
+    if _has_search_command_prefix(user_text) and not _is_underspecified_search_request(
+        user_text
+    ):
         return _build_search_task(
             original_request=user_text,
             query=normalized_direct,
@@ -1067,7 +1105,11 @@ async def build_search_task(
         user_text,
         turn_context_msgs=turn_context_msgs,
     )
-    return _build_single_search_task_from_context(user_text, context)
+    return await asyncio.to_thread(
+        _build_single_search_task_from_context,
+        user_text,
+        context,
+    )
 
 
 async def plan_search_queries(
@@ -1077,14 +1119,19 @@ async def plan_search_queries(
     *,
     fallback_task: SearchTask | None = None,
 ) -> SearchPlan:
-    base_task = fallback_task or _build_single_search_task_from_context(
-        user_text,
-        trim_terminal_user_duplicate(dialogue_excerpt, user_text),
-    )
+    if fallback_task is None:
+        base_task = await asyncio.to_thread(
+            _build_single_search_task_from_context,
+            user_text,
+            trim_terminal_user_duplicate(dialogue_excerpt, user_text),
+        )
+    else:
+        base_task = fallback_task
     fallback_plan = _heuristic_plan_from_task(base_task)
 
     try:
-        planned = _plan_with_model(
+        planned = await asyncio.to_thread(
+            _plan_with_model,
             user_text,
             dialogue_excerpt,
             mode_hint=mode_hint or base_task.mode,
@@ -1119,7 +1166,11 @@ async def build_search_tasks(
         user_text,
         turn_context_msgs=turn_context_msgs,
     )
-    base_task = _build_single_search_task_from_context(user_text, context)
+    base_task = await asyncio.to_thread(
+        _build_single_search_task_from_context,
+        user_text,
+        context,
+    )
     plan = await plan_search_queries(
         user_text,
         context,

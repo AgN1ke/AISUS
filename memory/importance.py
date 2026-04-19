@@ -1,6 +1,7 @@
 """Importance agent: evaluates memory entries for cascading recompression."""
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -62,7 +63,8 @@ async def evaluate_importance(
             core_context=core_context or "(порожньо)",
             entries_json=json.dumps(entries_for_llm, ensure_ascii=False, indent=2),
         )
-        resp = chat_once(
+        resp = await asyncio.to_thread(
+            chat_once,
             [
                 {"role": "system", "content": IMPORTANCE_EVAL_SYSTEM_PROMPT},
                 {"role": "user", "content": prompt_user},
@@ -73,7 +75,7 @@ async def evaluate_importance(
             capability="memory_summary",
             max_tokens=600,
         )
-        raw = resp.choices[0].message.content.strip()
+        raw = (resp.choices[0].message.content or "").strip()
         # Extract JSON from possible markdown wrapper
         json_match = re.search(r"\{[\s\S]*\}", raw)
         if json_match:

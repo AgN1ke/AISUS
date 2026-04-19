@@ -1,4 +1,4 @@
-# Девлог
+﻿# Девлог
 
 ## Правила
 
@@ -2573,3 +2573,3388 @@ Admin UI (`smartest.klawa.top`) — каша: ключі всіх провайд
 **Навігація:**
 - Кнопка "Промпти" в toolbar головної сторінки
 - Посилання "← Назад до конфігурації" на сторінці промптів
+
+## 2026-04-08 - Сесія 046
+
+### Проблема / Ціль
+
+Зафіксувати новий пакет user-facing задач після живого тесту в Telegram так, щоб не втратити контекст і не переплутати етапи. Користувач окремо попросив:
+
+- подивитися проблему з reply-на-пост з медіа і текстом перед тим як формалізувати задачу;
+- не скорочувати пояснення;
+- згрупувати пов'язані задачі разом;
+- зафіксувати все в документах, щоб пізніше вже робити реалізацію по пакетах.
+
+### Зафіксований Контекст Користувача
+
+Користувач сформулював такий пакет вимог:
+
+- коли тегають бота reply-єм на пост, де є медіа і текст, бот дивиться тільки на медіа; треба щоб він бачив усі елементи посту;
+- бот плутає людей, з ким спілкується; у його конфігурації промптів і контексті неочевидно хто останній йому говорить, тому він називає інших людей ім'ям того, хто перший почав;
+- потрібна команда `/c@botname` у чаті, яка повністю видаляє контекст-історію з пам'яті бота;
+- потрібна кнопка для очищення пам'яті на сайті;
+- не працюють голосові повідомлення: бот їх не сприймає нормально і не відповідає ними;
+- потрібні команди `/a@botname + text` і `/v@botname` для озвучки тексту та останнього повідомлення бота;
+- сторінка логів на сайті вже є, але логів там замало, треба бачити повний потік, маршрути, помилки і проходження по етапах.
+
+### Що Перевірено
+
+Зробив не лише формальну фіксацію, а й первинну діагностику по live-контурі `smartest`.
+
+Що вдалося підтвердити:
+
+- проблема з media-post реальна: `media/downloader.py` уже вміє дістати caption/text цільового повідомлення, але `media/router.py` для photo/video далі фактично просуває лише опис медіа, а не повний bundle `media + text/caption`;
+- у живій пам'яті є приклад, де `[MEDIA]` зберіг опис відео, але текст самого target-поста не став частиною мультимодального контексту;
+- проблема з плутаниною людей теж структурна: `memory_recent` зберігає лише роль і текст, тому різні люди в груповій історії зливаються в одного `user`;
+- сторінка логів справді бідна: вона читає тільки `journalctl`, не дає нормального trace по geometry/media/search/memory і не підходить для діагностики reply-геометрії;
+- команда очищення контексту потребує окремої реалізації, бо поточний `MemoryManager.clear_all()` не чистить working/recent;
+- у canonical runtime немає повноцінного command-layer для `/c`, `/a`, `/v`, а voice/TTS у новому контурі не доведені до end-to-end поведінки.
+
+Додатково:
+
+- перевірка проміжку `14:58-15:07` показала ще одну проблему: сам лог-контур зараз фіксує подію занадто бідно, тому навіть правильний live-debug reply-сценаріїв ускладнений.
+
+### Що Зроблено
+
+- створено окремий документ `docs/project/live-task-packet-2026-04-08.md`;
+- у ньому зафіксовано:
+  - повний контекст користувача;
+  - підтверджені причини по коду і живих даних;
+  - групування задач по пакетах;
+  - прив'язку до етапів;
+- оновлено `plan.md`, щоб новий пакет був видимий не лише в девлозі, а й у головному оперативному плані;
+- оновлено `telegram-geometry.md`, щоб окремо зафіксувати дві підтверджені речі:
+  - post-with-media-and-text має бути єдиним target bundle;
+  - participant identity не може жити лише в поточному ході, її треба нести й в історії.
+
+### Складнощі
+
+- поточний лог-контур недостатньо повний для тонкої діагностики Telegram geometry;
+- через це по одному лише часовому проміжку не завжди можна реконструювати весь reply-сценарій;
+- довелося звіряти не лише логи, а й кодові шляхи та поточний стан пам'яті.
+
+### Рішення
+
+- не намагатися "запам'ятати це головою" між сесіями;
+- винести пакет у окремий документ;
+- у плані одразу розвести:
+  - що належить до Етапу 4;
+  - що можна fast-track-нути операційно;
+  - що є повноцінним Stage 5 voice-пакетом;
+  - що належить до admin/observability.
+
+### Фідбек Користувача
+
+- важливо не втрачати пояснення і не стискати їх до телеграфного списку;
+- задачі треба групувати, а не тримати розкиданими;
+- для задачі про reply-на-пост важливо було спочатку подивитися проблему, а вже потім її формалізувати.
+
+## 2026-04-08 - Сесія 047
+
+### Проблема / Ціль
+
+Почати реальну реалізацію `Package A: Telegram Geometry + Participant Identity`, а не лише тримати його в backlog. Критична ціль цієї сесії:
+
+- щоб reply на пост із `медіа + text/caption` йшов у модель як єдиний bundle;
+- щоб історія групового чату перестала плутати різних людей через безликий `user`.
+
+### Що Зроблено
+
+- У `media/router.py` з'явився structured media bundle:
+  - `[MEDIA]` тепер для `photo/video/voice/document` може містити `target_post_text` разом із `media_analysis` або `audio_transcript`;
+  - це прибирає попередню деградацію, коли в пам'ять потрапляв тільки опис медіа, а підпис target-поста губився.
+- У `app/message_logic.py` перед user message тепер зберігається окремий `[CHAT-TURN]` event у recent memory.
+- `[CHAT-TURN]` включає:
+  - `sender`
+  - `reply_to_bot`
+  - `reply_target_author`
+  - `reply_target_text`
+  - `reply_target_media_kind`
+  - `target_media_kind`
+  - `current_user_text`
+  - `resolved_instruction`
+- Це дає мінімальний participant-aware memory layer без повного memory redesign.
+- У `agent/search_task.py` і `agent/planner.py` історичні `[CHAT-TURN]` більше не ігноруються при побудові dialogue excerpt.
+
+### Перевірка
+
+Зелений таргетний пакет:
+
+- `tests/test_040_media_router.py`
+- `tests/test_060_message_logic.py`
+- `tests/test_061_message_logic_layers.py`
+- `tests/test_032_search_task.py`
+- `tests/test_031_planner.py`
+
+Результат: `36 passed`
+
+### Складнощі
+
+- Під час ширшого локального прогону сплив окремий пакет старих search-agent тестів у `tests/test_030_agent.py`, але вони не належать до цього geometry fix і не чіпались у цій сесії, щоб не змішувати Stage 4 з поточним search refactor.
+- Довелося окремо чистити тестові контракти після того, як порядок запису в пам'ять змінився з `user -> assistant` на `system[CHAT-TURN] -> user -> assistant`.
+
+### Рішення
+
+- Зафіксовано саме baseline fix, який уже прибирає два найгрубших live-дефекти.
+- Повний thread-aware Telegram semantics поки лишається окремим більшим кроком Етапу 4.
+
+## 2026-04-08 - Сесія 048
+
+### Проблема / Ціль
+
+Закрити fast-track пакет очищення контексту:
+
+- `/c@botname` у чаті має повністю стирати пам'ять поточного чату;
+- на сайті має з'явитися кнопка для очищення пам'яті без ручного лізіння в БД;
+- це має чистити саме memory layers, а не тільки "частину пам'яті", як було раніше.
+
+### Що Зроблено
+
+- У `db/memory_repository.py` додано явні delete helpers:
+  - `delete_recent_chat()`
+  - `delete_recent_all()`
+  - `delete_long_all()`
+  - `delete_core_all()`
+- У `memory/manager.py` змінено semantics:
+  - `clear_all(chat_id)` тепер чистить `recent + long-term + core`;
+  - додано `clear_global()` для глобального reset memory layers;
+  - `last_consolidation` теж скидається, щоб не лишався старий cooldown state.
+- У `app/message_logic.py` додано точну команду `/c@botname`:
+  - працює після auth;
+  - не йде в planner / media / search;
+  - не записується назад у пам'ять;
+  - відповідає confirmation message і зупиняє flow.
+- У `app/admin_ui.py`:
+  - додано helper `clear_bot_memory()`;
+  - додано POST route `/clear-memory`;
+  - на dashboard додано кнопку `Очистити пам'ять` з confirm-попередженням;
+  - action очищає глобальну пам'ять бота (`recent + long-term + core`).
+
+### Перевірка
+
+Локально зелений таргетний набір:
+
+- `tests/test_010_memory.py -k clear_`
+- `tests/test_060_message_logic.py`
+- `tests/test_061_message_logic_layers.py`
+- `tests/test_071_admin_ui.py`
+
+Результат: `5 passed`
+
+### Складнощі
+
+- Старі інтеграційні memory-тести в `tests/test_010_memory.py` усе ще локально впираються в відсутню MariaDB. Для цього пакета я відокремив саме нові unit-тести, щоб не плутати інфраструктурний шум із логікою фіксу.
+
+### Рішення
+
+- baseline по очищенню контексту вже в коді;
+- live deploy і Telegram/admin smoke-test лишаються наступним операційним кроком;
+- більш тонке per-chat очищення з адмінки поки не робив, бо це вже окреме UX-рішення, а не blocking runtime fix.
+
+## 2026-04-08 - Сесія 049
+
+### Проблема / Ціль
+
+Продовжити після fast-track пакету очищення пам’яті і взяти наступний незалежний пакет: `Voice In / Voice Out / TTS Commands`.
+
+Користувацький очікуваний baseline:
+
+- бот має реагувати на адресовані голосові повідомлення не тільки розпізнаванням, а й голосовою відповіддю;
+- команда `/a@botname + text` має озвучувати текст із команди;
+- команда `/v@botname` має озвучувати останню текстову відповідь бота в цьому чаті;
+- STT більше не може лишатися на старому stub-рівні.
+
+### Що Зроблено
+
+- У `core/env.py` додано окремі helpers для voice-контуру:
+  - `openai_stt_api_key()`
+  - `openai_tts_api_key()`
+  - `stt_base_url()`
+  - `tts_base_url()`
+  - `whisper_model()`
+  - `tts_model()`
+  - `vocalizer_voice()`
+- Створено новий canonical модуль `media/voice.py`:
+  - реальний STT через OpenAI audio transcriptions;
+  - реальний TTS через OpenAI audio speech;
+  - нормалізація text -> spoken text;
+  - chunking довгих відповідей для TTS;
+  - cleanup тимчасових voice-файлів після відправлення.
+- У `media/router.py` прибрано старий `whisper_tool`-stub із реального voice path.
+  Тепер `[MEDIA]` для `voice/audio` будується через `transcribe_audio()` і містить живий `audio_transcript`.
+- У `app/message_logic.py` додано:
+  - розбір voice-команд `/a` і `/v`;
+  - пошук останньої assistant-відповіді для `/v`;
+  - `respond_with_voice` для поточного voice-message;
+  - fallback на текст, якщо voice transport/TTS впаде;
+  - окремий voice-style context, щоб відповідь для озвучення не лізла в markdown/URL-кашу.
+- У `core/prompts.py` централізовано `VOICE_REPLY_STYLE_PROMPT`, щоб озвучувані відповіді мали окрему системну інструкцію, а не локальний хардкод.
+
+### Перевірка
+
+Локально зелений таргетний пакет:
+
+- `tests/test_031_planner.py`
+- `tests/test_032_search_task.py`
+- `tests/test_037_prompts.py`
+- `tests/test_040_media_router.py`
+- `tests/test_044_voice_router.py`
+- `tests/test_060_message_logic.py`
+- `tests/test_061_message_logic_layers.py`
+- `tests/test_062_voice_commands.py`
+
+Результат: `46 passed`
+
+Окремо `py_compile` зелений для змінених runtime-файлів.
+
+### Складнощі
+
+- Довелося обійти стару заглушку `whisper_tool.py`, яка формально існувала в репо, але не давала реальної транскрипції.
+- Частина старих тестових файлів мала зіпсовані кириличні рядки; щоб не множити хаос, `tests/test_040_media_router.py` переписано в чистому UTF-8 вигляді з тим самим покриттям плюс новий voice-case.
+- Live deploy поки свідомо не робив: спочатку закрив локальний baseline і таргетні тести.
+
+### Рішення
+
+- Пакет `Voice In / Voice Out / TTS Commands` тепер частково реалізований у canonical runtime, а не тільки описаний у плані.
+- Наступний логічний крок після цієї сесії: або live deploy + Telegram smoke-test голосового пакета, або перехід до admin observability, якщо треба спочатку покращити діагностику перед live.
+
+## 2026-04-08 - Сесія 050
+
+### Проблема / Ціль
+
+Після уточнення користувача звузити команду очищення контексту до строго таргетованої форми `/c@botname`. Причина продуктова, не косметична: у спільному чаті одночасно живе кілька ботів, тому bare `/c` або форма `@botname /c` не повинні зачіпати пам'ять жодного з них.
+
+### Що Зроблено
+
+- У `app/message_logic.py` уже зафіксовано точну перевірку тільки для exact-команди `/c@botname` без додаткового payload.
+- У `tests/test_060_message_logic.py` позитивний сценарій переведено на `/c@botx`.
+- Додано негативний тест на `@botx /c`: така репліка більше не очищає пам'ять і проходить як звичайне адресоване повідомлення.
+- У `plan.md` уточнено, що:
+  - baseline-команда очищення контексту — тільки `/c@botname`;
+  - bare `/c` і форма `@botname /c` навмисно не очищають пам'ять.
+
+### Перевірка
+
+- Заплановано таргетний прогін `message_logic`-тестів після завершення цього точкового виправлення.
+
+### Рішення
+
+- Контракт очищення пам'яті тепер вважається остаточним: тільки explicit `/c@botname`.
+- Це правило важливіше за "зручність короткої команди", бо інакше multi-bot чат стає небезпечним для контексту.
+
+## 2026-04-08 - Сесія 051
+
+### Проблема / Ціль
+
+Продовжити пакет `Admin Observability / Logs`, бо поточна сторінка логів у адмінці читає майже голий `journalctl` і не дає нормальної відповіді на практичні питання на кшталт:
+
+- хто саме написав останнє повідомлення;
+- який `trace` відповідає конкретному кейсу в чаті;
+- який маршрут обрався (`chat/search/media/voice`);
+- що саме було target bundle для media-case;
+- де саме зламався flow.
+
+### Що Зроблено
+
+- Створено `core/logging_setup.py` як спільний logging foundation для runtime й адмінки.
+- `run.py` переведено на централізований setup logging: тепер canonical runtime пише не лише в stdout/systemd, а й у rotating trace-file.
+- `app/admin_ui.py` теж переведено на той самий logging setup, щоб адмінка мала власний trace-file.
+- У `app/admin_ui.py` повністю розширено log-viewer:
+  - додано вибір джерела `auto / trace file / journalctl`;
+  - додано серверні фільтри `chat_id`, `trace`, `level`, `contains`;
+  - `/logs-text` тепер повертає вже відфільтрований текст, а не тільки сирий `journalctl`.
+- У `app/message_logic.py` додано щільніший geometry/flow trace:
+  - окремий `flow.geometry` з sender/reply-target details;
+  - окремий `flow.execute` з route/capability/turn-context.
+- У `media/router.py` додано окремі `media.*.target` логи з target message id, довжиною target text і user instruction.
+
+### Перевірка
+
+- `pytest -q --noconftest tests/test_060_message_logic.py tests/test_061_message_logic_layers.py tests/test_071_admin_ui.py` → `31 passed`
+- `py_compile` зелений для:
+  - `core/logging_setup.py`
+  - `run.py`
+  - `app/admin_ui.py`
+  - `app/message_logic.py`
+  - `media/router.py`
+
+### Складнощі
+
+- Поточна сторінка логів була жорстко зав'язана на `journalctl`, тому довелося не просто додати кнопку чи поле, а переробити сам контур читання логів.
+- Треба було не зламати локальні unit-тести адмінки, які імпортують `app.admin_ui` поза серверним режимом; через це logging setup винесено в `main()`, а не лишено як модульний side effect.
+
+### Рішення
+
+- Пакет D тепер має реальний локальний baseline, а не лише backlog-опис.
+- Наступний правильний крок у цьому ж пакеті — live deploy і перевірка `/logs` на сервері вже на реальних trace-файлах.
+
+## 2026-04-08 - Сесія 052
+
+### Проблема / Ціль
+
+Після live-тесту користувач показав критичний збій у базовому контекстному контурі: exact-команда `/c@saintaibot` не давала очікуваного ефекту, а наступне питання `про що ми в чаті говорили?` породжувало вигадану історію чату. Додатково з’ясувалося, що live-контур `smartest` взагалі сидів на старішому коді й не містив уже зроблених локально виправлень для `/c@botname` та нового логування.
+
+### Що Зроблено
+
+- Перевірено live-сервер і підтверджено, що `/opt/smartest/app` відставав від локального репозиторію:
+  - у live `app/message_logic.py` не було `_is_clear_context_command`;
+  - у live `run.py` ще не було нового `core/logging_setup.py`-based logging setup.
+- У `memory/manager.py` додано явний системний guard `[CONTEXT-STATE]` для повністю порожнього чату:
+  - якщо після `clear_all()` немає recent/core/long пам’яті, у контекст явно додається інструкція не вигадувати попередню розмову;
+  - це прибирає клас hallucination, коли модель після очищення “дописує” минулі теми сама.
+- У `tests/test_010_memory.py` додано окремий тест на порожню історію після очищення.
+- Під час staging deploy виявлено додаткові регресії в search/vision шарі:
+  - `run_agent()` не завжди вів пошукові репліки в direct search pipeline;
+  - follow-up типу `ну загугли` не використовував контекст як джерело пошукового rewrite;
+  - `media/vision.py` розійшовся з тестовим контрактом по `max_tokens`.
+- У `agent/search_task.py` це виправлено:
+  - розділено “hard command prefix” (`пошукай ...`) і “soft search intent” (`ну загугли`, `що нового`, `новини ...`);
+  - `hard prefix + конкретний запит` іде в `direct_normalized`;
+  - vague follow-up і пошукові репліки без явного query ідуть через composer/context fallback;
+  - `run_agent()` знову коректно маршрутизує такі кейси в explicit search flow.
+- У `media/vision.py` повернуто `max_tokens=400`, щоб runtime відповідав поточному тестовому контракту.
+- На staging виконано повну синхронізацію поточного репозиторію і прогнано повний suite:
+  - `/opt/smartest-staging && .venv/bin/python -m pytest -q --color=no` -> зелений повний прогін.
+- Після цього в live `/opt/smartest/app` синхронізовано актуальний runtime-код, перезапущено:
+  - `smartest-bot.service`
+  - `smartest-admin.service`
+
+### Перевірка
+
+- Локально:
+  - `pytest -q --noconftest tests/test_010_memory.py -k marks_empty_history` -> зелений
+  - `pytest -q --noconftest tests/test_060_message_logic.py tests/test_061_message_logic_layers.py tests/test_071_admin_ui.py` -> зелений
+  - `pytest -q --noconftest tests/test_032_search_task.py tests/test_030_agent.py tests/test_036_gemini_adapter.py` -> зелений
+- На staging:
+  - повний `pytest -q --color=no` -> зелений повний suite
+- На live:
+  - `smartest-bot.service` -> `active`
+  - `smartest-admin.service` -> `active`
+  - у `/opt/smartest/app/app/message_logic.py` підтверджено наявність `_is_clear_context_command` і `flow.memory_cleared`
+  - серверний probe через `memory_manager.clear_all()` + `select_context()` підтвердив наявність `[CONTEXT-STATE]` у порожньому чаті
+
+### Складнощі
+
+- Виявилось, що локальний прогрес був більший за live і staging, тому проблема користувача була викликана не лише логічною діркою, а й тим, що сервер запускав застарілий код.
+- Повний staging suite спочатку впав не через новий `/c` fix, а через старі розсинхрони в `search_task` і `vision`, які довелося закрити перед live deploy.
+
+### Рішення
+
+- Контракт `exact /c@botname` тепер реально живе не лише локально, а й на live-сервері.
+- Порожній чат після `clear_all()` тепер має явний anti-hallucination marker у memory context.
+- `smartest` повернуто в стан, де live-контур відповідає актуальному локальному runtime, а не старому зрізу репозиторію.
+
+## 2026-04-09 - Сесія 053
+
+### Проблема / Ціль
+
+Після стабілізації `/c` треба було повернутися до наступного незакритого user-facing пакета: `Voice In / Voice Out / TTS Commands`. Локальний baseline уже існував, але треба було:
+
+- підтвердити, що voice-пакет реально живий у staging і live;
+- не залишити розрив між user-вимогою `/a@botname`, `/v@botname` і фактичним контрактом тестів;
+- довести output-контур до більш природного для Telegram формату `.ogg`.
+
+### Що Зроблено
+
+- У `media/voice.py` voice output переведено з `.opus` на `.ogg`, залишаючи `response_format=\"opus\"`.
+- У `tests/test_062_voice_commands.py` додано окремі тести для targeted-форм:
+  - `/a@botname`
+  - `/v@botname`
+- Локально прогнано voice/message_logic пакет:
+  - `tests/test_044_voice_router.py`
+  - `tests/test_062_voice_commands.py`
+  - `tests/test_060_message_logic.py`
+  - `tests/test_061_message_logic_layers.py`
+- На staging синхронізовано voice-диф і прогнано той самий пакет — зелений.
+- На staging і live виконано server-side audio probe через реальний runtime:
+  - `synthesize_voice_chunks(...)`
+  - `transcribe_audio(...)`
+- Окремо перевірено probe з коректною кирилицею через unicode-escape, щоб не переплутати runtime-проблему з shell-encoding проблемою.
+- У live `/opt/smartest/app` синхронізовано `media/voice.py`, після чого перезапущено `smartest-bot.service`.
+
+### Перевірка
+
+- Локально:
+  - `pytest -q --noconftest tests/test_044_voice_router.py tests/test_062_voice_commands.py tests/test_060_message_logic.py tests/test_061_message_logic_layers.py` -> зелений
+  - `py_compile` для `media/voice.py` і `tests/test_062_voice_commands.py` -> зелений
+- На staging:
+  - той самий таргетний voice/message_logic пакет -> зелений
+  - server-side TTS -> STT probe на `.ogg` -> проходить
+- На live:
+  - `smartest-bot.service` після sync -> `active`
+  - TTS -> STT probe з українським текстом:
+    - generated `.ogg`
+    - transcript: `Привіт! Це тест голосового контуру Smartest.`
+
+### Складнощі
+
+- Перший server-side probe помилково запускався без підхоплення `/opt/smartest/.env`, тому виглядав так, ніби TTS key відсутній.
+- Другий probe показав, що transcription API не приймає output з розширенням `.opus`; для нашого контуру це природно підштовхнуло перейти на `.ogg`, що краще відповідає Telegram voice workflow.
+- Під час remote probe треба було окремо обійти shell-кодування, інакше український текст у команді ламався ще до TTS.
+
+### Рішення
+
+- Voice baseline тепер не лише локально “ніби готовий”, а підтверджений на staging і live технічним end-to-end probe.
+- `/a@botname` і `/v@botname` формалізовано тестами як частину контракту пакета.
+- Далі в цьому пакеті лишається вже не технічне оживлення контуру, а живий Telegram smoke-test і, за потреби, UI-конфіг для voice settings.
+
+## 2026-04-09 - Сесія 054
+
+### Проблема / Ціль
+
+Після voice-пакета треба було закрити ще один практичний хвіст, який уже був майже готовий локально: зробити live `/logs` не просто “існуючою сторінкою”, а реально перевіреним інструментом діагностики. Додатково був сенс добити два точкових фільтри, які прямо корисні для чатового дебагу:
+
+- `message_id`
+- `capability`
+
+### Що Зроблено
+
+- У `app/admin_ui.py` розширено `_filter_log_text()` і `_read_log_text()`:
+  - додано фільтрацію по `message_id`
+  - додано фільтрацію по `capability`
+- У `render_logs_page()` додано нові поля:
+  - `message_id`
+  - `capability`
+- У JS-параметрах сторінки (`buildParams()`) нові фільтри теж включено в `/logs` і `/logs-text`.
+- У `SmartestAdminHandler.do_GET()` передано нові query params у рендеринг сторінки та текстовий endpoint.
+- У `tests/test_071_admin_ui.py` розширено покриття:
+  - фільтрація тепер перевіряє `trace + chat_id + message_id + capability + level`
+  - HTML перевіряється на наявність `messageid-input` і `capability-input`
+- Після цього:
+  - локально прогнано `admin_ui + message_logic` пакет;
+  - на staging синхронізовано `app/admin_ui.py` і прогнано той самий пакет;
+  - у live синхронізовано `app/admin_ui.py`, перезапущено `smartest-admin.service`;
+  - перевірено HTTP-входом через реальну session-cookie на `127.0.0.1:8787`.
+
+### Перевірка
+
+- Локально:
+  - `pytest -q --noconftest tests/test_071_admin_ui.py tests/test_060_message_logic.py tests/test_061_message_logic_layers.py` -> зелений
+  - `py_compile app/admin_ui.py` -> зелений
+- На staging:
+  - `tests/test_071_admin_ui.py tests/test_060_message_logic.py tests/test_061_message_logic_layers.py` -> зелений
+- На live:
+  - `smartest-admin.service` -> `active`
+  - `/health` -> `200 ok`
+  - `/login` -> успішний redirect у session
+  - `/logs` -> `200`
+  - `/logs-text` -> `200`
+  - HTML сторінки містить `messageid-input` і `capability-input`
+  - `logs-text?message_id=252483` реально звужує trace до одного bot update line
+
+### Складнощі
+
+- Перевірка live `/logs` вимагала не тільки `curl`, а повноцінного session-cookie login flow, інакше probe потрапляв би лише на `/login`.
+- Частина початкових probe-скриптів ламалася через моє shell-обгортання, а не через саму адмінку.
+
+### Рішення
+
+- Пакет D тепер має не лише local baseline, а й підтверджений live runtime.
+- `/logs` можна вважати робочим operational tool для подальших geometry/search/media сесій.
+- Після цього найбільший незакритий user-facing пакет — уже `Telegram Geometry + Participant Identity`.
+
+## 2026-04-09 - Сесія 055
+
+### Проблема / Ціль
+
+Під час живого Telegram-тесту пошук поводився неправильно на популярній новині. У кейсі близько `00:20-00:22` за Києвом бот не був повністю "сліпим": він побудував контекстний news-query по попередньому відео/новині, але потім уперся в жорсткий runtime-guard і повернув стандартне:
+
+- `Не зміг зібрати достатньо надійних джерел...`
+
+Ключова продуктова проблема була саме тут:
+
+- якщо вже знайдено хоч якусь живу evidence-базу, модель має дати обережну відповідь по знайденому, а не отримувати від коду жорсткий відлуп;
+- live-пошук не повинен бути штучно обрізаний до одного провайдера, якщо архітектурно контур уже multi-provider.
+
+### Що Зроблено
+
+- Прочитано live `bot.log` у точному вікні інциденту.
+- Підтверджено реальний root cause:
+  - planner побудував news-запит про Hezbollah / Lebanon / Beirut / Dahieh;
+  - live retrieval фактично йшов через `SEARCH_PROVIDER=serper`;
+  - після трьох ітерацій runtime потрапляв у `search.insufficient_evidence` і не допускав synthesis, хоча partial evidence уже існувала.
+- У `agent/runner.py` змінено політику:
+  - окремо розведено `no_results`, `junk evidence` і `partial but actionable evidence`;
+  - synthesis тепер дозволяється для partial evidence, якщо вона не виглядає відвертим сміттям;
+  - у synthesis input додано `Evidence status`, щоб модель явно відповідала обережно, а не прикидалася, що картина повна;
+  - додано лог `search.best_effort_synthesis`.
+- У `tests/test_030_agent.py` додано покриття:
+  - partial evidence -> має йти в synthesis;
+  - junk evidence -> все ще має повертати clean failure без synthesis.
+- Змінено live-конфіг пошуку:
+  - `SEARCH_PROVIDER=auto`
+  - `SEARCH_PROVIDER_ATTEMPT_LIMIT=3`
+
+Це прибрало `serper-only` bottleneck і дозволило live runtime добирати evidence через fallback providers.
+
+### Перевірка
+
+- Локально:
+  - `pytest -q --noconftest tests/test_030_agent.py tests/test_032_search_task.py` -> зелений
+  - `py_compile agent/runner.py tests/test_030_agent.py` -> зелений
+- На staging:
+  - повний `.venv/bin/python -m pytest -q --color=no` -> зелений full suite
+- На live:
+  - оновлено `/opt/smartest/app/agent/runner.py`
+  - перезапущено `smartest-bot.service` -> `active`
+  - після перемикання search provider stack окремий server-side retrieval probe вже повертав `5` результатів по проблемних Hezbollah/Lebanon news-style queries через fallback `openai_search`, замість зупинки на одному `serper`-хіті
+
+### Складнощі
+
+- Live був не до кінця узгоджений із проєктною стратегією: код підтримував multi-provider retrieval, але сервер реально сидів на `serper`.
+- `Brave` у цьому серверному контурі зараз повертає `422` на протестовані кириличні news-запити, тому практичним live fallback-переможцем у цьому кейсі став `openai_search`.
+- Багаторядковий `.env` не можна безпечно тупо `source`-ити в bash для ad-hoc probe-скриптів.
+
+### Рішення
+
+- Search більше не є all-or-nothing контуром:
+  - нуль evidence -> clean failure;
+  - junk evidence -> clean failure;
+  - partial but real evidence -> best-effort synthesis із явною невизначеністю.
+- Live retrieval більше не штучно звужений до одного провайдера.
+- Наступний search-фокус після цього — уже не цей hard-fail branch, а якість rewrite/retry/provider strategy.
+
+## 2026-04-09 - Сесія 056
+
+### Проблема / Ціль
+
+Після останнього кола живих тестів користувач окремо наголосив, що бот має бачити **дати й час повідомлень**, інакше в груповому чаті він легше плутається в тому, хто коли що сказав. Це не декоративна prompt-правка, а частина `Telegram Geometry + Participant Identity`: часовий якір має бути в самій події, у transient turn context і в пам’яті.
+
+### Що Зроблено
+
+- У `adapters/base.py` розширено geometry-моделі:
+  - `ReplyTarget` тепер має `sent_at_utc` і `sent_at_local`;
+  - `MessageGeometry` тепер має `message_sent_at_utc` і `message_sent_at_local`.
+- У `app/chat_geometry.py`:
+  - додано витягування timestamp-ів із PTB / Telethon повідомлень;
+  - timestamp-и нормалізуються в UTC та локальний київський час;
+  - `render_turn_context_messages()` тепер додає до `[CHAT-GEOMETRY]`:
+    - `current_message_time_local`
+    - `current_message_time_utc`
+    - `reply_target_time_local`
+    - `reply_target_time_utc`
+- У `app/message_logic.py`:
+  - `[CHAT-TURN]` memory event тепер теж містить ці часові поля;
+  - `flow.geometry` лог збагачено `msg_time` і `reply_target_time`.
+- Додано окремий тестовий файл `tests/test_063_geometry_dates.py`:
+  - перевірка `render_turn_context_messages()`;
+  - перевірка `[CHAT-TURN]` memory event;
+  - перевірка `resolve_message_geometry()` для PTB повідомлень із реальними `date`.
+
+### Перевірка
+
+- Локально:
+  - `pytest -q --noconftest tests/test_060_message_logic.py tests/test_061_message_logic_layers.py tests/test_063_geometry_dates.py` -> зелений
+  - `py_compile adapters/base.py app/chat_geometry.py app/message_logic.py tests/test_063_geometry_dates.py` -> зелений
+- На staging:
+  - повний `.venv/bin/python -m pytest -q --color=no` -> зелений full suite
+- На live:
+  - синхронізовано `/opt/smartest/app/adapters/base.py`
+  - синхронізовано `/opt/smartest/app/app/chat_geometry.py`
+  - синхронізовано `/opt/smartest/app/app/message_logic.py`
+  - `smartest-bot.service` перезапущено -> `active`
+
+### Рішення
+
+- `Telegram Geometry` тепер має не лише `хто` і `на що reply`, а й `коли саме це відбулося`.
+- Це не закриває весь geometry-пакет, але дає моделі критично важливий часовий контекст для групового діалогу й подальшого reply-chain reasoning.
+
+## 2026-04-09 - Сесія 057
+
+### Проблема / Ціль
+
+Після додавання часових якорів лишався ще один відкритий шматок того самого geometry-пакета: бот уже бачив поточного `sender`, але все ще не мав окремого короткого зрізу **історії саме цього учасника**. Через це навіть при наявності `sender` у поточному ході модель могла бачити груповий діалог як загальний потік, а не як кілька звернень конкретної людини.
+
+### Що Зроблено
+
+- У `app/message_logic.py` додано `_build_participant_history_context()`:
+  - витягує з recent memory останні `[CHAT-TURN]` записи;
+  - фільтрує їх по поточному `sender`;
+  - будує окремий системний блок `[PARTICIPANT-HISTORY]`;
+  - додає туди `current_sender`, поточний час повідомлення, поточного reply-target автора і останні 1-4 ходи саме цього учасника.
+- `build_user_task()` тепер додає цей `[PARTICIPANT-HISTORY]` у `turn_context_msgs`, якщо релевантна історія знайдена.
+- У `agent/planner.py` planner перестав ігнорувати `[PARTICIPANT-HISTORY]` у dialogue excerpt.
+- У `agent/search_task.py` search composer / contextual excerpt теж перестав ігнорувати `[PARTICIPANT-HISTORY]`.
+- Додано окремий тестовий файл `tests/test_064_participant_history.py`:
+  - перевірка, що `build_user_task()` реально додає `[PARTICIPANT-HISTORY]`;
+  - перевірка, що planner excerpt його не губить;
+  - перевірка, що search context excerpt теж його не губить.
+
+### Перевірка
+
+- Локально:
+  - `pytest -q --noconftest tests/test_060_message_logic.py tests/test_061_message_logic_layers.py tests/test_063_geometry_dates.py tests/test_064_participant_history.py tests/test_031_planner.py tests/test_032_search_task.py` -> зелений
+  - `py_compile app/message_logic.py agent/planner.py agent/search_task.py tests/test_064_participant_history.py` -> зелений
+- На staging:
+  - повний `.venv/bin/python -m pytest -q --color=no` -> зелений full suite
+- На live:
+  - синхронізовано `/opt/smartest/app/app/message_logic.py`
+  - синхронізовано `/opt/smartest/app/agent/planner.py`
+  - синхронізовано `/opt/smartest/app/agent/search_task.py`
+  - `smartest-bot.service` перезапущено -> `active`
+
+### Рішення
+
+- Geometry-пакет тепер має вже не лише:
+  - `reply_target`
+  - `sender`
+  - `message/reply timestamps`
+
+  а й окремий participant-aware block для поточного мовця.
+- Це ще не повний reply-chain/thread model, але вже відчутно зменшує ризик, що бот зіллє кількох людей у групі в одну безлику історію.
+
+## 2026-04-09 - Сесія 058
+
+### Проблема / Ціль
+
+Після часових якорів і participant-aware history у geometry-пакеті лишався ще один реальний незакритий шматок: бот бачив лише один `reply_target`, але не бачив **ланцюжок reply до цього target**. Через це він уже краще розумів, хто і коли говорить, але все ще не міг природно відновлювати типову Telegram-ситуацію:
+
+- користувач відповідає на повідомлення бота;
+- те повідомлення бота було відповіддю на чужий пост або медіа;
+- отже поточне звернення фактично продовжує не тільки останню репліку, а цілу mini-thread глибше на 1-2 hop.
+
+Тобто потрібен був не “повний thread engine”, а принаймні **multi-hop reply-chain baseline**, який не обвалює поточний runtime.
+
+### Що Зроблено
+
+- У `adapters/base.py` `MessageGeometry` розширено полем:
+  - `reply_chain: tuple[ReplyTarget, ...]`
+- У `app/chat_geometry.py`:
+  - для PTB додано побудову `reply_chain` по вкладених `reply_to_message`;
+  - для Telethon додано async-прохід по `reply_to.reply_to_msg_id` через `client.get_messages(...)`;
+  - введено `append_reply_chain_lines(...)`, який рендерить ancestry-hops у `[CHAT-GEOMETRY]`.
+- У `app/message_logic.py`:
+  - `[CHAT-TURN]` memory event тепер теж містить `reply_chain_depth` і `reply_chain_hop_N_*` поля;
+  - це означає, що reply-chain тепер існує не лише в transient prompt, а й у короткій пам'яті ходу.
+- Додано окремий тестовий файл `tests/test_065_reply_chain.py`:
+  - перевірка reply-chain lines у `[CHAT-GEOMETRY]`;
+  - перевірка reply-chain lines у `[CHAT-TURN]`;
+  - перевірка nested PTB reply-chain у `resolve_message_geometry()`.
+
+### Перевірка
+
+- Локально:
+  - `py_compile adapters/base.py app/chat_geometry.py app/message_logic.py tests/test_065_reply_chain.py` -> зелений
+  - `pytest -q --noconftest tests/test_060_message_logic.py tests/test_061_message_logic_layers.py tests/test_063_geometry_dates.py tests/test_064_participant_history.py tests/test_065_reply_chain.py tests/test_031_planner.py tests/test_032_search_task.py` -> зелений
+- На staging:
+  - `/opt/smartest-staging` синхронізовано по змінених geometry/doc/test файлах;
+  - `.venv/bin/python -m pytest -q --color=no` -> зелений full suite
+- На live:
+  - у `/opt/smartest/app` синхронізовано `adapters/base.py`, `app/chat_geometry.py`, `app/message_logic.py` та оновлені docs;
+  - `smartest-bot.service` перезапущено і підтверджено як `active`
+
+### Рішення
+
+- Geometry-пакет тепер містить уже чотири шари baseline-контексту:
+  - direct reply target;
+  - message/reply timestamps;
+  - participant-aware recent history;
+  - multi-hop reply ancestry.
+- Це ще не повний thread-aware memory model, але це вже той мінімальний рівень, на якому модель перестає бачити чат лише як “одне повідомлення + один reply target”.
+
+## 2026-04-09 - Сесія 059
+
+### Проблема / Ціль
+
+Після живого фідбеку користувача стало очевидно, що voice-контур закритий лише частково. Команди `/a` і `/v` уже працювали, але **спілкування голосом як природне продовження текстового діалогу** було зламане концептуально:
+
+- user voice без тексту потрапляв у runtime не як змістовна репліка користувача, а як `[MEDIA]` + fallback prompt;
+- через це бот не сприймав voice як нормальний `user turn`, а радше як медіа-об’єкт;
+- reply на ботівський voice теж поводився крихко, бо voice-message існував у пам’яті радше як технічний ефект озвучення, а не як повноцінна частина розмови.
+
+### Що Зроблено
+
+- У `media/router.py` media-build flow для `voice/audio` змінено так, щоб він повертав не лише `[MEDIA]` bundle, а й окремий `semantic_text`:
+  - для user voice без тексту цим `semantic_text` стає транскрипт;
+  - `handle_ptb_mention()` і `handle_telethon_mention()` тепер повертають:
+    - `user_text`, якщо користувач написав текст;
+    - інакше `semantic_text` (транскрипт voice/audio);
+    - і лише в крайньому випадку `MEDIA_DEFAULT_TASK_PROMPT`.
+- У `app/message_logic.py` voice-turn тепер може зберігатися як реальний `user` message, навіть якщо початково не було `clean_text`:
+  - якщо поточне повідомлення `voice/audio`;
+  - якщо інструкція не є технічним fallback prompt;
+  - тоді `should_store_user_message=True`, а в `memory_recent` лягає саме транскрипт.
+- Це переводить user voice з режиму “окреме медіа десь збоку” в режим “звичайна репліка користувача, тільки надиктована голосом”.
+- Оновлено тести:
+  - `tests/test_044_voice_router.py` тепер перевіряє, що voice router повертає саме транскрипт, а не заглушку;
+  - `tests/test_062_voice_commands.py` доповнено кейсами:
+    - current voice message persist-иться як user transcript;
+    - text reply на ботівський voice обробляється без `@mention`.
+
+### Перевірка
+
+- Локально:
+  - `py_compile media/router.py app/message_logic.py tests/test_044_voice_router.py tests/test_062_voice_commands.py` -> зелений
+  - `pytest -q --noconftest tests/test_044_voice_router.py tests/test_060_message_logic.py tests/test_061_message_logic_layers.py tests/test_062_voice_commands.py tests/test_063_geometry_dates.py tests/test_064_participant_history.py tests/test_065_reply_chain.py` -> зелений
+
+### Рішення
+
+- Voice-пакет більше не зводиться до “TTS/STT utilities + slash-команди”.
+- З погляду пам’яті й контексту бот тепер має сприймати voice як нормальну розмовну репліку користувача.
+- Це ще не остаточний multimodal redesign, але це закриває саме той user-facing дефект, де голосові повідомлення випадали з “мозку” бота.
+
+## 2026-04-09 - Сесія 060
+
+### Проблема / Ціль
+
+Після чергового живого тесту користувач повідомив, що **voice reply на повідомлення бота в чаті знову ігнорується**. Перевірка live trace показала, що це не ignore-path і не проблема address gating: voice-повідомлення нормально входило в `reply_to_bot=True`, проходило через media router, отримувало transcript і будувало `UserTask`. Поломка виникала пізніше: planner евристично маршрутизував будь-який `voice/audio` target у capability `stt_voice`, а далі runtime намагався згенерувати змістовну відповідь через нечатову transcription-модель. На live це закінчувалося `openai.NotFoundError: This is not a chat model and thus not supported in the v1/chat/completions endpoint`.
+
+### Що Зроблено
+
+- У `agent/planner.py` змінено voice-евристику:
+  - `media_kind in {"voice", "audio"}` більше **не** веде в `route="voice"` / `capability="stt_voice"`;
+  - тепер такий хід іде в `route="chat"` / `capability="chat_final"` з note `voice_input_transcribed`.
+- Це формалізує правильний контракт:
+  - STT завершується в media-layer;
+  - далі voice-turn є звичайним діалоговим ходом;
+  - голосовість фінальної відповіді визначається `respond_with_voice`, а не окремою non-chat capability.
+- Додано регресійне покриття:
+  - `tests/test_031_planner.py` — planner для `voice` має повертати `chat_final`;
+  - `tests/test_061_message_logic_layers.py` — `plan_execution()` для voice-turn має лишатися в чат-контурі, а не в `stt_voice`.
+
+### Перевірка
+
+- Локально:
+  - `python -m py_compile agent/planner.py tests/test_031_planner.py tests/test_061_message_logic_layers.py` -> зелений
+  - `python -m pytest -q --noconftest tests/test_031_planner.py tests/test_061_message_logic_layers.py tests/test_062_voice_commands.py` -> `20 passed`
+- У live trace до фіксу було підтверджено:
+  - `reply_to_bot=True`
+  - `media.ptb.done ... semantic_text_len>0`
+  - `flow.task_built ... voice_reply=True`
+  - далі падіння в `chat.completions` на неchat-моделі
+
+### Рішення
+
+- Поточний баг локалізовано як **неправильне planner-routing рішення**, а не як проблема voice STT чи reply-detection.
+- Після цього фіксу природні voice-turn'и в reply-гілках більше не повинні падати на transcription capability.
+
+## 2026-04-09 - Сесія 061
+
+### Проблема / Ціль
+
+Добити geometry-пакет до рівня, де бот бачить не лише `sender` і `reply_target`, а й окремий message anchor, multi-hop `reply_chain`, а retrieval не зливає все в один загальний per-chat recent. Потрібен був уже не просто prompt-patch, а thread-aware baseline, який ще не дорівнює повному memory redesign, але вже підсовує в prompt релевантні turn-и саме з поточної reply-гілки.
+
+### Що Зроблено
+
+- У `adapters/base.py` до `MessageGeometry` додано `current_message_id`.
+- У `app/chat_geometry.py`:
+  - `resolve_message_geometry()` тепер заповнює `current_message_id` і для PTB, і для Telethon;
+  - `[CHAT-GEOMETRY]` тепер явно містить цей якір повідомлення.
+- У `app/message_logic.py`:
+  - додано thread-aware helper-функції поверх recent пам'яті;
+  - у recent-репрезентації почали збирати turn-bundles на основі `[CHAT-TURN]` + пов'язаних `user` / `assistant` повідомлень;
+  - з цих bundle-ів збирається `[THREAD-HISTORY]` для поточного ходу, який визначається по overlap між `reply_chain`, `reply_target`, `current_message_id` і пов'язаними `[CHAT-TURN]` записами;
+  - `build_user_task()` тепер додає `[THREAD-HISTORY]` у `turn_context_msgs` для planner/executor;
+  - `plan_execution()` тепер викликає planner не лише з global recent, а й з `turn_context_msgs`, щоб planner бачив саме поточну thread-гілку.
+- У `agent/planner.py` і `agent/search_task.py` оновлено excerpt-побудову: `[THREAD-HISTORY]` більше не ігнорується і тепер потрапляє в planner/search control-plane.
+
+### Перевірка
+
+- Прогнано:
+  - `python -m py_compile adapters/base.py app/chat_geometry.py app/message_logic.py agent/planner.py agent/search_task.py tests/test_061_message_logic_layers.py tests/test_064_participant_history.py`
+  - `python -m pytest -q --noconftest tests/test_061_message_logic_layers.py tests/test_063_geometry_dates.py tests/test_064_participant_history.py tests/test_065_reply_chain.py tests/test_031_planner.py tests/test_032_search_task.py`
+  - результат: `40 passed`
+- На staging `/opt/smartest-staging`:
+  - `.venv/bin/python -m pytest -q --color=no`
+  - повний suite зелений
+- Після цього код синхронізовано в live `/opt/smartest/app`, перезапущено `smartest-bot.service` і `smartest-admin.service`, обидва сервіси стали `active`.
+
+### Рішення
+
+- Це ще не повний thread engine і не окремий per-thread memory window.
+- Але це вже правильний thread-aware baseline: замість одного великого recent bot отримує акцентований зріз поточної reply-гілки.
+- Наступний природний крок у цьому напрямі — не ще один `[THREAD-HISTORY]` patch, а справжній thread-aware retrieval поверх recent memory.
+
+
+## 2026-04-09 - Сесія 062
+
+### Проблема / Ціль
+
+Користувач уточнив правильний контракт для geometry-пакета: reply-гілка в груповому чаті має бути лише **більш акцентованою** в prompt-геометрії, але бот при цьому повинен пам'ятати й загальний контекст чату. Окремо потрібно було перевірити, що бот не підмішує історію з інших чатів. Під час перевірки знайшов технічну дірку: `fetch_recent(chat_id, limit=N)` у repository повертав не останні `N` повідомлень, а найстаріші `N`, бо робив `ORDER BY pos ASC LIMIT N`.
+
+### Що Зроблено
+
+- У `db/memory_repository.py` виправлено `fetch_recent(chat_id, limit=N)`:
+  - тепер використовується descending subquery по `pos` з `LIMIT N`;
+  - зовнішній select повертає той самий recent window назад у `ORDER BY pos ASC`, щоб рантайм бачив останні повідомлення в правильному хронологічному порядку.
+- Окремо зафіксовано тестами repository-контракт:
+  - `tests/test_010_memory.py` тепер перевіряє, що recent memory завжди фільтрується по `chat_id`;
+  - для `limit` перевіряється саме логіка latest-window, а не oldest-window.
+- Підтверджено правильне архітектурне трактування поточного geometry baseline:
+  - `[THREAD-HISTORY]` додається поверх загальної recent-пам'яті;
+  - planner досі бачить і thread-акцент, і звичайний recent context;
+  - міжчатовий витік на рівні recent repository не підтверджено, бо всі query прив'язані до `chat_id`.
+
+### Перевірка
+
+- Локально:
+  - `python -m py_compile db/memory_repository.py tests/test_010_memory.py` -> зелений
+  - `python -m pytest -q --noconftest tests/test_010_memory.py -k "fetch_recent_"` -> зелений
+  - `python -m pytest -q --noconftest tests/test_061_message_logic_layers.py tests/test_063_geometry_dates.py tests/test_064_participant_history.py tests/test_065_reply_chain.py` -> зелений
+- На staging `/opt/smartest-staging`:
+  - `.venv/bin/python -m pytest -q --color=no` -> повний suite зелений
+- У live `/opt/smartest/app`:
+  - синхронізовано `db/memory_repository.py`
+  - `smartest-bot.service` перезапущено, сервіс `active`
+
+### Рішення
+
+- Поточний geometry baseline тепер відповідає правильному напрямку: гілка не відрізає пам'ять чату, а лише підсвічує релевантну лінію розмови.
+- Найближчий відкритий крок після цього не дрібний багфікс, а вже справжній `per-thread memory window` поверх загального chat-memory.
+
+## 2026-04-09 - Сесія 063
+
+### Проблема / Ціль
+
+Користувач окремо попросив перевірити, щоб на сервері не накопичувались безкінечно тимчасові медіа або історії. Логи можна зберігати, але media artifacts після обробки мають очищатись. Аудит коду показав, що voice-output уже чистився, video-path у `media/video.py` теж мав cleanup, але `photo`, `audio`, `document` і частина voice-input download-потоку в `media/downloader.py` / `media/router.py` не мали гарантованого видалення після обробки.
+
+### Що Зроблено
+
+- Перевірено live server:
+  - `/tmp/aisus_media` не був засмічений на момент перевірки;
+  - кількість файлів там дорівнювала `0`;
+  - memory tables у live БД не виглядали роздутими (`memory_recent`, `memory_long`, `memory_core` залишались малими).
+- У `media/downloader.py` додано:
+  - `cleanup_downloaded_media_sync()` / `cleanup_downloaded_media()`;
+  - безпечну перевірку, що cleanup працює тільки всередині `MEDIA_TMP`;
+  - прибирання порожніх піддиректорій після видалення файлів;
+  - `purge_stale_media_tmp_sync()` / `purge_stale_media_tmp()` для stale cleanup після рестартів.
+- У `media/router.py` PTB/Telethon media-flow тепер завжди викликає cleanup downloaded paths у `finally`, незалежно від успішної чи аварійної обробки.
+- У `run.py` додано startup purge stale media temp files.
+
+### Перевірка
+
+- Локально:
+  - `python -m py_compile media/downloader.py media/router.py run.py tests/test_040_media_router.py tests/test_066_media_cleanup.py` -> зелений
+  - `python -m pytest -q --noconftest tests/test_040_media_router.py tests/test_044_voice_router.py tests/test_062_voice_commands.py tests/test_066_media_cleanup.py` -> `15 passed`
+- На staging `/opt/smartest-staging`:
+  - `.venv/bin/python -m pytest -q --color=no` -> повний suite зелений
+- У live `/opt/smartest/app`:
+  - код синхронізовано;
+  - `smartest-bot.service` перезапущено;
+  - після рестарту `/tmp/aisus_media` залишився порожнім.
+
+### Рішення
+
+- Тимчасові медіа більше не повинні накопичуватись безконтрольно навіть якщо користувачі активно шлють фото/войси/документи.
+- Логи свідомо лишаються збереженими.
+- Історія чату як файловий смітник не накопичується; її зростання контролюється memory-бюджетами й каскадною компресією в `memory/manager.py`.
+
+## 2026-04-10 - Сесія 064
+
+### Проблема / Ціль
+
+Користувач окремо запитав про Telegram `кружечки` (video notes): бот повинен їх сприймати як нормальне медіа. Аудит коду показав, що поточний runtime взагалі не виділяв `video_note` як окремий вхід: Bot API adapter дивився тільки на `photo/video/voice/document`, geometry helper теж не класифікував `video_note` як `video`, а downloader не вмів скачати `message.video_note`.
+
+### Що Зроблено
+
+- У `adapters/base.py` `UnifiedMessage` розширено прапором `has_video_note`.
+- У `adapters/telegram_bot.py`:
+  - `has_video` тепер істинний і для `msg.video_note`;
+  - окремо пишеться `has_video_note`;
+  - логування update тепер показує й `video_note`.
+- У `adapters/userbot.py` додано baseline routing для Telethon-side round-video detection через `video_note` / `round` як `video`.
+- У `app/chat_geometry.py`:
+  - `_ptb_media_kind()` класифікує `video_note` як `video`;
+  - `_telethon_media_kind()` теж трактує round video як `video`.
+- У `media/downloader.py` Bot API downloader тепер вміє скачати `message.video_note` і зберігає його як `.mp4` у `MEDIA_TMP`.
+
+### Перевірка
+
+- Локально:
+  - `python -m py_compile adapters/base.py adapters/telegram_bot.py adapters/userbot.py app/chat_geometry.py media/downloader.py tests/test_063_geometry_dates.py tests/test_066_media_cleanup.py` -> зелений
+  - `python -m pytest -q --noconftest tests/test_040_media_router.py tests/test_060_message_logic.py tests/test_061_message_logic_layers.py tests/test_063_geometry_dates.py tests/test_066_media_cleanup.py` -> `30 passed`
+- На staging `/opt/smartest-staging`:
+  - `.venv/bin/python -m pytest -q --color=no` -> повний suite зелений
+- У live `/opt/smartest/app`:
+  - код синхронізовано;
+  - `smartest-bot.service` перезапущено;
+  - статус `active` підтверджено.
+
+### Рішення
+
+- Кружечки тепер входять у canonical media-flow як `video`, а не губляться до початку аналізу.
+- Це baseline-підтримка: з погляду продукту кружечок тепер має поводитись як reply-target або current media video.
+
+## 2026-04-10 - Сесія 065
+
+### Проблема / Ціль
+
+Користувач попросив не просто згадати кружечки в документах, а нормально зафіксувати, що саме з ними треба робити далі. Ключова вимога була в тому, щоб не зводити задачу до телеграфних тез, які можна трактувати довільно. Потрібно було залишити мотивацію, проблематику, концептуальну модель і етапність, щоб будь-яка інша модель або розробник могли зрозуміти не тільки “що робити”, а й “чому саме так”.
+
+### Що Зроблено
+
+- У `docs/project/plan.md` вже був доданий окремий розгорнутий пакет по Telegram кружечках як повноцінному типу повідомлення.
+- У цій сесії цей пакет синхронізовано ще й з `docs/project/telegram-geometry.md`, щоб кружечки були описані не лише як media-task, а і як окрема проблема prompt-геометрії.
+- У geometry-документі окремо зафіксовано, що кружечок не можна вважати просто звичайним `video`, бо в нього інша соціальна роль у чаті: це коротке персональне відеоповідомлення, ближче до voice-message з візуальним шаром, ніж до зовнішнього ролика.
+- Там же окремо описано, чому для кружечка потрібні:
+  - явна мітка `video_note` у службовій геометрії;
+  - розділення візуального аналізу та speech-transcription;
+  - правильний synthesis з урахуванням reply-контексту;
+  - чесне capability-представлення в admin UI.
+
+### Перевірка
+
+- Ця сесія була суто документальною.
+- Код, staging, live і сервіси не змінювалися.
+- Перевірено лише те, що новий пакет логічно продовжує вже зафіксований план, а не суперечить йому.
+
+### Рішення
+
+- Пакет по кружечках тепер зафіксований не як дрібний routing-fix, а як окремий поетапний напрям робіт з власною мотивацією, проблематикою і критеріями завершення.
+- Подальшу реалізацію треба робити вже поверх цього уточненого контракту, а не поверх спрощеної ідеї “кружечок = просто відео”.
+
+## 2026-04-10 - Сесія 066
+
+### Проблема / Ціль
+
+Користувач описав новий великий пакет функціональності: генерацію подкастів на основі попереднього контексту розмови, з явним наміром користувача, підтвердженням теми, збиранням великого тематичного матеріалу і відправкою цього матеріалу в зовнішній сервіс NotebookLM. Додатково було надано Google Cloud identifiers і окремо поставлено вимогу не пхати секрети в коміти, а продумати нормальний UI/серверний контур. Завданням цієї сесії було не писати інтеграцію, а дослідити актуальний стан Google API, зрозуміти, чи підходить він для нашого сценарію, і зафіксувати це в документації так, щоб потім можна було реалізовувати без повторного архітектурного хаосу.
+
+### Що Зроблено
+
+- Проведено актуальне дослідження по офіційних Google джерелах.
+- Підтверджено, що для Smartest підходить не `audio overview` notebook-метод, а standalone `Podcast API` у NotebookLM Enterprise.
+- Зафіксовано, що Podcast API працює через long-running operation і віддає MP3 на download endpoint.
+- Зафіксовано важливе обмеження: Podcast API доступний на умовах allowlist, тому сам факт наявності service account ще не означає, що інтеграція вже можлива.
+- Окремо зафіксовано, що надані користувачем значення схожі на service account identity, але їх недостатньо для бойової інтеграції. Потрібні project settings, IAM role і реальний OAuth-capable credential flow на VPS.
+- Створено новий детальний документ `docs/project/notebooklm-podcast-integration.md`, де розписано:
+  - продуктову модель функції;
+  - різницю між `audio overview` і `Podcast API`;
+  - що саме повинен робити Smartest до зовнішнього виклику;
+  - як мають зберігатися секрети;
+  - як це має виглядати в admin UI;
+  - поетапний план реалізації.
+- У `docs/project/plan.md` додано окремий статусний блок, який прив'язує цей пакет до загального плану проєкту і пояснює його залежності від geometry та пам’яті.
+
+### Перевірка
+
+- Ця сесія була дослідницько-документальною.
+- Код, staging, live і сервіси не змінювалися.
+- Перевірено узгодженість нової документації з поточним capability-first напрямом Smartest.
+
+### Рішення
+
+- Пакет генерації подкастів офіційно зафіксований як окремий сервісний напрям, а не як імпровізована команда “зроби подкаст”.
+- Подальша реалізація має йти через standalone NotebookLM Podcast API, із власним intent/scoping/dossier/executor lifecycle.
+- Секрети для цього сервісу повинні керуватися через серверний секретний контур та admin UI, але не через git і не через документацію.
+
+### Додаткове Уточнення Після Перечитування
+
+Після повторної перевірки документації окремо зафіксовано ще одну обов’язкову вимогу користувача: podcast-сервіс не повинен існувати наполовину. Поки в UI та серверному контурі не заповнені й не підтверджені всі обов’язкові дані, він має бути не просто прихованою опцією, а повністю відсутнім для runtime, planner і prompt-архітектури. Це уточнення додано і в `notebooklm-podcast-integration.md`, і в `plan.md`.
+
+## 2026-04-10 - Сесія 067
+
+### Проблема / Ціль
+
+Після дослідницького пакета по NotebookLM користувач попросив перейти від опису до першого практичного етапу: не будувати одразу весь dossier/executor lifecycle, а спочатку зробити безпечний каркас. Цей каркас мав одночасно вирішити три речі. По-перше, сервіс подкастів повинен бути fail-closed: поки немає повної валідної конфігурації і успішної перевірки доступу, він не має впливати на runtime та planner. По-друге, бот повинен уміти розпізнавати саме явне бажання створити подкаст і заводити confirmation state по темі, але не запускати жоден зовнішній executor напівготовим. По-третє, в admin UI потрібно було дати безпечний шлях завантажити service account JSON так, щоб секрет ліг на сервер поза git і відразу проходив readiness-check.
+
+### Що Зроблено
+
+- Додано новий модуль `core/podcast.py`, який формалізує runtime-конфіг подкастів, визначає fail-closed readiness, працює з service account JSON, кладе секрет у окреме secret-сховище поза репозиторієм і вміє робити реальний health-check до NotebookLM Podcast API.
+- Додано `.secrets/` у `.gitignore`, щоб локальний fallback-secret storage теж не міг випадково поїхати в git.
+- У `db/migrations/004_podcast_state.sql` і `db/settings_repository.py` заведено persisted pending-state для подкастів. Тепер confirmation по темі не живе у випадковому словнику процесу і не втрачається при рестарті бота.
+- Додано `app/podcast_intent.py` з окремим шаром розпізнавання явного podcast intent, витягування творчого побажання до формату, грубого topic-label і confirmation parsing (`так`, `ні`, скасування).
+- У `app/message_logic.py` подкастний контур посаджено до planner. Це означає, що явний запит на подкаст більше не йде у звичайний чат/search flow. Якщо сервіс не готовий, бот чесно відповідає, що capability ще не налаштований. Якщо сервіс готовий, бот заводить pending-state і перепитує підтвердження теми.
+- У `app/admin_ui.py` додано NotebookLM Podcast panel: поля `project id` і `location`, прапорець увімкнення capability, secure upload service account JSON, кнопка повторної перевірки доступу і відображення реального readiness status. При цьому секрет не пишеться в `.env`, у конфігу лишається лише шлях і службовий статус.
+- До `requirements.txt` додано `google-auth`, бо без нього readiness-check не може чесно підняти OAuth token для Google API.
+
+### Перевірка
+
+- `python -m py_compile core/podcast.py app/podcast_intent.py app/message_logic.py app/admin_ui.py db/settings_repository.py` -> зелений.
+- `pytest -q --noconftest tests/test_071_admin_ui.py tests/test_072_podcast_integration.py tests/test_073_podcast_message_flow.py tests/test_061_message_logic_layers.py tests/test_031_planner.py` -> зелений.
+- Додатково: `pytest -q --noconftest tests/test_060_message_logic.py tests/test_071_admin_ui.py tests/test_072_podcast_integration.py tests/test_073_podcast_message_flow.py` -> зелений.
+
+### Рішення
+
+- Перший етап podcast-пакета тепер існує не лише в документах, а й у коді: readiness gate, pending confirmation state і secure admin UI вже зібрані в один керований контур.
+- Сервіс залишено fail-closed: поки readiness не зелений, planner і runtime не повинні поводитися так, ніби подкаст-generation уже реально доступний.
+- Наступний етап після цього фундаменту — не нові секрети чи ще одна кнопка, а реальний topic-scoped dossier builder і request mapper до NotebookLM Podcast API.
+
+## 2026-04-10 - Сесія 068
+
+### Контекст
+
+Після того як користувач перевірив admin UI uploader, система показала очікуваний проміжний статус: service account валідний, але сам `Podcast API` повертає `HTTP 404 Method not found`. Це підтвердило попередній висновок із дослідження: проблема вже не в credential, а в фактичній недоступності Google endpoint для цього проєкту. Користувач попросив не зупинятися на цьому і перейти до наступного етапу, який не залежить від allowlist-доступу, але реально просуває інтеграцію вперед.
+
+### Що Зроблено
+
+- Додано новий модуль `app/podcast_dossier.py`, який збирає `topic-scoped dossier` по підтвердженій темі подкасту.
+- У dossier builder закладено не один випадковий текстовий фрагмент, а кілька шарів матеріалу:
+  - релевантні `recent`-turn-и, зібрані з `[CHAT-TURN]` bundle-ів;
+  - користувацькі акценти й сигнали інтересу по темі;
+  - тематично релевантні `core facts`;
+  - тематично релевантні `long-memory` summaries.
+- Додано нову міграцію `db/migrations/005_podcast_dossier.sql` і оновлено `db/settings_repository.py`, щоб dossier можна було зберігати як окремий persisted artifact на рівні конкретного чату.
+- У `app/message_logic.py` confirmation-потік подкасту тепер не зупиняється на фразі “тему прийняв”, а реально будує dossier і зберігає його в `settings`.
+- Окремо виправлено очищення контексту: `/c@botname` тепер зносить не тільки message-memory, а й `podcast_pending` та `podcast_dossier`, бо це теж похідна пам'ять чату.
+- Оновлено пакет тестів:
+  - `tests/test_060_message_logic.py`
+  - `tests/test_073_podcast_message_flow.py`
+  - новий `tests/test_074_podcast_dossier.py`
+
+### Перевірка
+
+- Локально:
+  - `python -m py_compile app/podcast_dossier.py app/message_logic.py db/settings_repository.py tests/test_060_message_logic.py tests/test_073_podcast_message_flow.py tests/test_074_podcast_dossier.py` -> зелений.
+  - `pytest -q --noconftest tests/test_060_message_logic.py tests/test_073_podcast_message_flow.py tests/test_074_podcast_dossier.py` -> зелений.
+- На staging:
+  - `/opt/smartest-staging` синхронізовано з новими файлами;
+  - повний `.venv/bin/python -m pytest -q --color=no` -> зелений full suite.
+- На live:
+  - у `/opt/smartest/app` синхронізовано `app/podcast_dossier.py`, `app/message_logic.py`, `db/settings_repository.py`, `db/migrations/005_podcast_dossier.sql`;
+  - `smartest-bot.service` перезапущено і підтверджено як `active`;
+  - окремо перевірено `migrations_log`: `005_podcast_dossier.sql` реально застосована в бойовій БД.
+
+### Рішення
+
+- Подкастний пакет більше не складається лише з intent + confirmation + readiness. У коді вже існує наступний реальний шар — dossier builder, який збирає підготовчий матеріал до майбутнього зовнішнього job.
+- Незважаючи на те, що Google endpoint поки лишається недоступним, розвиток пакета не стопориться: ми просунулися настільки, наскільки це можливо без реального `podcasts` access.
+- Наступний великий етап після цього — `request mapper` і `executor lifecycle`, але робити їх має сенс або після відкриття доступу до Google endpoint, або з чітким mocked/test harness контуром, щоб не будувати сліпий executor у порожнечу.
+
+## 2026-04-10 - Сесія 069
+
+### Проблема
+
+Користувач повідомив, що бот у Telegram виглядає мертвим. Live-логи показали інше: polling був живий, апдейти доходили, але addressed-повідомлення випадали ще до нормального user flow, бо `process_message()` трактував їх як `not_addressed`. Поломка була в Telegram geometry, а не в рантаймі чи транспорті.
+
+### Що Зроблено
+
+- У `app/chat_geometry.py` допрацьовано `_has_mention_ptb()`, щоб PTB `text_mention` вважався повноцінною згадкою бота, якщо entity вказує на `bot.id` або `bot.username`.
+- Це прибирає ситуацію, коли користувач реально згадує бота в Telegram UI, але прихована згадка не проходить addressed-gate і весь flow просто мовчить.
+- Додано regression test у `tests/test_063_geometry_dates.py`, який перевіряє `text_mention` так само суворо, як і буквальний `@username` у тексті.
+
+### Перевірка
+
+- Локально:
+  - `python -m py_compile app/chat_geometry.py tests/test_063_geometry_dates.py` -> зелений
+  - `pytest -q --noconftest tests/test_063_geometry_dates.py tests/test_060_message_logic.py` -> зелений
+- На staging:
+  - синхронізовано кодову базу;
+  - `.venv/bin/python -m pytest -q --color=no` -> зелений full suite.
+
+### Рішення
+
+- Причина зламаного Telegram-flow була не в падінні сервісу, а в неправильній обробці типу згадки, який Telegram надсилає як hidden `text_mention`.
+- Після фіксу бот однаково сприймає і буквальне `@botname`, і приховану згадку з Telegram UI.
+
+## 2026-04-10 - Сесія 070
+
+### Проблема
+
+Після фіксу `text_mention` бот усе ще міг мовчати в live. Друга перевірка показала, що addressed-повідомлення вже доходять до runtime, але злітають пізніше: критичні capability були переведені на Gemini через UI, а сам ключ Gemini виявився невалідним.
+
+### Що Зроблено
+
+- У live `/opt/smartest/.env` перевірено, що через UI на Gemini були переведені:
+  - `chat_final`
+  - `planner_reasoning`
+  - `search_synthesis`
+  - `search_query_*`
+  - `search_evaluator`
+  - `memory_summary`
+  - `vision_image`
+  - `video_understanding`
+  - `document_context`
+- Підтверджено по live-логу, що `PROVIDER_GEMINI_API_KEY` невалідний: `Gemini request failed with status 400: API_KEY_INVALID`.
+- Щоб не тримати бота мертвим, критичні capability в live `.env` тимчасово повернуто на OpenAI:
+  - `CAPABILITY_CHAT_FINAL_*`
+  - `CAPABILITY_PLANNER_REASONING_*`
+  - `CAPABILITY_SEARCH_SYNTHESIS_*`
+  - `CAPABILITY_SEARCH_QUERY_PLANNER_*`
+  - `CAPABILITY_SEARCH_QUERY_COMPOSER_*`
+  - `CAPABILITY_SEARCH_EVALUATOR_*`
+  - `CAPABILITY_MEMORY_SUMMARY_*`
+  - `CAPABILITY_VISION_IMAGE_*`
+  - `CAPABILITY_VIDEO_UNDERSTANDING_*`
+  - `CAPABILITY_DOCUMENT_CONTEXT_*`
+- Для цих capability зафіксовано `gpt-4o-mini`; image/video fallback теж переведено в OpenAI-compatible режим, щоб runtime не ламався на порожньому Gemini path.
+- Після цього `smartest-bot.service` перезапущено.
+
+### Перевірка
+
+- `systemctl is-active smartest-bot.service` -> `active`
+- Додатковий live sanity-check через `run_simple(..., capability="chat_final")` повернув валідну відповідь уже без Gemini-помилки.
+- У live-лозі після рестарту є `runtime.boot` і `telegram_bot.polling_started`.
+
+### Рішення
+
+- Другий блокер був уже не в geometry, а в конфігурації capability bindings: UI дозволив перевести критичні маршрути на Gemini, хоча Gemini key був зламаний.
+- До моменту появи валідного Gemini-ключа базовий текстовий і мультимодальний baseline в live має лишатися на OpenAI, інакше бот просто не відповідає.
+
+## 2026-04-10 - Сесія 071
+
+### Проблема
+
+Користувач повідомив, що бот відповідає на редагування повідомлень у Telegram. Це був неправильний runtime-flow: edited updates не повинні взагалі доходити до normal user turn.
+
+### Що Зроблено
+
+- У `adapters/telegram_bot.py` додано `_is_edited_update()`.
+- PTB-адаптер тепер пропускає `edited_message`, `edited_channel_post` і `edited_business_message` ще до побудови `UnifiedMessage`.
+- У trace з’явився окремий skip-сигнал: `telegram_bot.skip_update ... reason=edited_message`.
+- Додано regression test у `tests/test_067_telegram_bot_adapter.py` на edited vs regular update.
+
+### Перевірка
+
+- Локально:
+  - `python -m py_compile adapters/telegram_bot.py tests/test_067_telegram_bot_adapter.py` -> зелений
+  - `pytest -q --noconftest tests/test_067_telegram_bot_adapter.py tests/test_060_message_logic.py` -> зелений
+- На staging:
+  - синхронізовано кодову базу;
+  - `.venv/bin/python -m pytest -q --color=no` -> зелений full suite.
+
+### Рішення
+
+- Edited updates більше не потрапляють у runtime message flow і не створюють фальшиві user turn-и в пам’яті чи відповідях бота.
+
+## 2026-04-10 - Сесія 072
+
+### Проблема
+
+Відтворено регресію в сценарії `reply -> video -> targeted question`: бот відповідав так, ніби не бачив змісту самого відео. Проблема була не в reply-геометрії, а в тому, що аудіодоріжка відео все ще проходила через старий stub і не потрапляла в нормальний media-flow.
+
+### Що Зроблено
+
+- По live trace підтверджено, що reply на відео доходив правильно, target message визначався як `video`, а media route запускався.
+- Локалізовано справжню причину: `media/video.py` усе ще ходив через `whisper_tool` stub, який створював порожній `.txt`.
+- У `media/voice.py` додано `transcribe_audio_sync()`.
+- У `media/video.py` `transcribe_audio_mp3()` переведено на реальний STT через `media.voice.transcribe_audio_sync`, а не на stub.
+- У `media/router.py` для `video`-bundle тепер окремо пишеться `audio_transcript`, якщо він витягнувся під час `analyze_video(...)`.
+- Оновлено regression tests у `tests/test_040_media_router.py`: окремо перевірено video mention, reply на media target, reply на video target і появу `audio_transcript` у `[MEDIA]`.
+- У `tests/test_041_video_pipeline.py` додано test, який гарантує, що `transcribe_audio_mp3()` більше не падає назад на stub-path.
+
+### Перевірка
+
+- Локально:
+  - `python -m py_compile media/voice.py media/video.py media/router.py tests/test_040_media_router.py tests/test_041_video_pipeline.py` -> зелений
+  - `pytest -q --noconftest tests/test_040_media_router.py tests/test_041_video_pipeline.py tests/test_060_message_logic.py tests/test_061_message_logic_layers.py` -> `27 passed`
+- На staging:
+  - синхронізовано кодову базу;
+  - `.venv/bin/python -m pytest -q --color=no` -> зелений full suite.
+- У live:
+  - код синхронізовано в `/opt/smartest/app`;
+  - `smartest-bot.service` перезапущено;
+  - `systemctl is-active smartest-bot.service` -> `active`.
+
+### Рішення
+
+- Поломка була не в тому, що бот не вмів replied-video target, а в тому, що аудіозміст відео губився через stub-рівень.
+- Після фіксу live video-flow формує не лише загальний summary, а й окремий `audio_transcript`, якщо у відео є мовлення.
+
+## 2026-04-10 - Сесія 073
+
+### Проблема
+
+Користувач окремо вимагав підтримку альбомів як одного Telegram-поста, а не випадкового single target. До цього runtime працював лише з одним media message, тому кілька фото або змішаний фото+відео пост спотворювалися ще до prompt-архітектури.
+
+### Що Зроблено
+
+- У `adapters/base.py` до `UnifiedMessage` додано `media_group_id`.
+- PTB і Telethon адаптери (`adapters/telegram_bot.py`, `adapters/userbot.py`) тепер передають `media_group_id` / `grouped_id` у runtime.
+- Створено `media/album_registry.py`, який збирає album-posts у short-lived registry ще до access gate. Це дозволяє при reply на один елемент альбому підняти весь sibling-набір.
+- У `app/message_logic.py` album-observer запускається на кожному incoming message ще до access routing, щоб пост не розпався на окремі елементи.
+- У `media/downloader.py` додано `download_from_ptb_album(...)` і `download_from_telethon_album(...)`.
+- У `media/router.py` з’явився album-aware bundle path:
+  - `target_media_type: album`
+  - `album_group_id`
+  - `album_item_count`
+  - `album_route_media_kind`
+  - `target_post_text`
+  - `album_item_N_type`
+  - `album_item_N_post_text`
+  - `album_item_N_media_analysis`
+  - `album_item_N_audio_transcript`
+- Mixed album (`photo+video`) більше не обрізається до першого елемента: router обирає `route_kind=video`, якщо в наборі є хоча б один відео-елемент, але в `[MEDIA]` лишається інформація про весь пост.
+- У `core/prompts.py` оновлено capability prompts для `vision_image` і `video_understanding`, щоб модель бачила `target_media_type: album` як один Telegram-пост, а не як довільний список summary-блоків.
+
+### Перевірка
+
+- Локально:
+  - `python -m py_compile ...` для album/media пакета -> зелений
+  - `pytest -q --noconftest tests/test_040_media_router.py tests/test_041_video_pipeline.py tests/test_061_message_logic_layers.py tests/test_063_geometry_dates.py tests/test_068_album_registry.py` -> зелений
+- На staging:
+  - синхронізовано album/media пакет;
+  - `.venv/bin/python -m pytest -q --color=no` -> зелений full suite.
+- У live:
+  - код синхронізовано в `/opt/smartest/app`;
+  - `smartest-bot.service` перезапущено;
+  - `systemctl is-active smartest-bot.service` -> `active`.
+
+### Рішення
+
+- Telegram-альбом більше не трактується як випадковий media target, а має окремий media-bundle контракт.
+- Це ще не фінальна реалізація всієї геометрії альбому, але вже не одноелементний сурогат: prompt-архітектура бачить caption, порядок елементів і змішану структуру поста.
+- На цей пакет додано окремі regression tests, щоб наступні зміни не зламали album/media-flow ще раз.
+
+## Сесія 2026-04-10: Фікс live-crash на альбомах
+
+Після користувацького тесту о 22:52 з'ясувалося, що album baseline у бот дійсно доходив, але runtime падав уже всередині media-flow. По live-логах відтворено точну помилку: PTB `Message` не дозволяє довільний `setattr`, а я намагався записати в нього `_smartest_media_route_kind`.
+
+Що зроблено:
+- прибрано службовий `setattr` із raw Telegram/Telethon message object;
+- `handle_ptb_mention()` і `handle_telethon_mention()` переведено на явний tuple-контракт `(user_text, route_kind)`;
+- `app/message_logic.py` підсаджено на новий контракт без побічного state на raw message;
+- оновлено регресійні тести для voice/media/message шва;
+- локальний таргетний пакет зелений;
+- staging повний `pytest -q --color=no` зелений;
+- live задеплоєно, `smartest-bot.service` після рестарту активний.
+
+Регресійний принцип користувача зафіксовано ще раз: на кожен user-facing фікс має бути окремий regression test, щоб новий пакет не ламав уже живу функцію.
+
+## Сесія 2026-04-10: One-shot execution для Telegram-альбомів
+
+Після наступного користувацького фідбеку з'ясувалося, що попередній album baseline хоч і збирав sibling-елементи в bundle, але execution layer все ще поводився так, ніби кожен media update у Telegram є окремою подією для відповіді. У результаті бот відповідав тричі на один альбом із трьох картинок.
+
+Що зроблено:
+- у `media/album_registry.py` додано окремий one-shot processing state для `media_group_id`: `_PROCESSING` і `_HANDLED`;
+- addressed album flow тепер має claim/finish контракт: перший релевантний item бере альбом у роботу, дає settle-вікно на добір sibling-ів і тільки він один запускає аналіз та відповідь;
+- усі наступні album updates тієї самої групи після цього не проходять у повний runtime, а відсікаються як duplicate execution;
+- у `app/message_logic.py` з'явилися `flow.album_claimed` і `flow.album_skip_duplicate` лог-події;
+- додано регресійні тести на сам registry-claim та на message-flow сценарій `3 album items -> 1 bot reply`.
+
+Перевірка:
+- локальний album/message/media пакет зелений;
+- staging повний `pytest -q --color=no` зелений;
+- live задеплоєно, `smartest-bot.service` активний.
+
+## Сесія 078 — Фікс admin UI для video_understanding
+- Дата: 2026-04-11
+- Проблема: у панелі керування capability `video_understanding` могла відображатися як Gemini-only, але поле моделі підтягувало несумісний legacy fallback на кшталт `gpt-4o-mini`. Це вводило в оману і дозволяло зберегти криву пару provider/model.
+- Що зроблено: в `app/admin_ui.py` додано нормалізацію capability binding по допустимих provider/model для кожного `model_type`; `video_understanding` тепер не може ні відмалюватися, ні зберегтися як OpenAI-модель. На фронті модельний список примусово перебудовується при завантаженні сторінки.
+- Перевірка: локально pytest -q --noconftest tests/test_071_admin_ui.py зелений; на staging повний pytest -q --color=no зелений; у live перезапущено smartest-admin.service, health-check ok.
+
+
+## 2026-04-12 — Сесія 079: Аудит і критичні фікси (Фаза 1)
+
+### Проблема / Ціль
+
+Повний аудит кодових змін із сесій 066-078 (codex). Виявлено 6 критичних багів, 8 серйозних, 18 дрібних. Задача — виправити Фазу 1 (критичне).
+
+### Що зроблено
+
+**Аудит:**
+- Повна перевірка через 5 паралельних агентів: album flow, геометрія/адаптери, медіа-пайплайн, planner/memory, тести/podcast.
+- Зведено у `docs/project/audit-2026-04-12.md` з пріоритезацією по фазах.
+
+**Фікс A1+A2 — Альбоми: 3 відповіді замість 1 (`app/message_logic.py`):**
+- Корнева причина: гейт `if msg.media_group_id and _should_use_media_route(geometry)` вимагав `geometry.addressed`, але тільки 1 з 3 album items мав addressed=True — решта обходили гейт і провокували окремі відповіді.
+- Виправлено: гейт тепер `if msg.media_group_id` без умов — будь-який album member або claim, або silent return. Після settle перевіряється addressing по всіх зібраних items (не тільки по claiming message). Якщо є caption/текст хоч в одного item — album вважається addressed, текст береться з items.
+
+**Фікс A3 — `fetch_page` не імпортовано (`agent/runner.py`):**
+- Додано `from agent.tools.fetch_page import fetch_page`. Без цього `NameError` при кожному виклику tool `fetch_page`.
+
+**Фікс A4 — Agent tool loop одноразовий (`agent/runner.py`):**
+- `tools=None` замінено на `tools=tools` в continuation call. До цього модель не могла зробити 2+ tool calls — `max_steps` де-факто ігнорувався.
+
+**Фікс A6 — None crash в memory (`memory/importance.py`, `memory/reflection.py`):**
+- `.content.strip()` замінено на `(... .content or "").strip()`. AttributeError при None відповіді від LLM.
+
+### Перевірка
+
+- `py_compile` по всіх змінених файлах → OK.
+- Live задеплоєно, `smartest-bot.service` активний.
+
+### Рішення
+
+Фаза 1 закрита. Фаза 2 (серйозне: video event loop block, album photo error handling, vision exception, long-term retrieval budget, asyncio.Lock) і Фаза 3 (tech debt) лишаються у `docs/project/audit-2026-04-12.md`.
+
+## 2026-04-12 — Сесія 080: Vision prompt + File too big
+
+### Проблема / Ціль
+
+1. Бот не бачить деталі на картинках — опис занадто короткий (88 символів). Промпт був одним рядком "Опиши стисло", а `max_tokens=400` обрізав відповідь.
+2. При спробі скачати велике відео (>20MB) бот крашився з `error=File is too big` без повідомлення юзеру.
+
+### Що зроблено
+
+**Vision prompt (`core/prompts.py`, `media/vision.py`):**
+- Замінено одрядковий промпт на детальну інструкцію з 6 пунктів: текст на картинці дослівно, люди та впізнання, об'єкти/техніка, місце/обстановка, графіки/скріншоти, загальний контекст.
+- `max_tokens` збільшено з 400 до 1000.
+
+**File too big (`media/router.py`):**
+- Обгорнуто download у try/except для обох адаптерів (PTB і Telethon).
+- При помилці "too big" бот відповідає: "Файл занадто великий (ліміт 20 МБ). Надішли стиснуту версію або скріншот."
+- Решта виключень прокидається як раніше.
+
+### Перевірка
+
+- `py_compile` по всіх змінених файлах → OK.
+- Live задеплоєно, `smartest-bot.service` і `smartest-admin.service` активні.
+
+### Уточнення (сесія 080)
+
+По фідбеку: замість системного повідомлення "файл занадто великий" в чат, помилка тепер інжектиться в промпт бота як частина `[MEDIA]` контексту. Бот знає, що він НАМАГАВСЯ подивитись відео, але воно завелике, і може відповісти відповідно з урахуванням тексту, що є.
+
+Також заодно (B2+B3 з аудиту):
+- Album items: один поганий item більше не вбиває весь альбом — `continue` замість `return`, error підставляється в analysis конкретного item.
+- Photo/video/audio analysis: обгорнуто в try/except, error підставляється в промпт замість crash.
+
+Змінені файли: `media/downloader.py`, `media/router.py`.
+
+## 2026-04-12 — Сесія 081: Аудит Фаза 2 — серйозні проблеми
+
+### Проблема / Ціль
+
+Продовження аудиту codex-змін (066-078). Фаза 2: серйозні проблеми стабільності (B1-B8).
+
+### Що зроблено
+
+- **B1** (`media/router.py`): `describe_images` і `analyze_video` обгорнуті в `asyncio.to_thread()` — більше не блокують event loop.
+- **B2+B3** (`media/router.py`): Вже зроблено в сесії 080.
+- **B4** (`media/vision.py`): `except RuntimeError` → `except Exception` — ловить всі API помилки.
+- **B5** (`adapters/userbot.py`): Telethon voice більше не ставить `has_document=True` одночасно з `has_voice=True`.
+- **B6** (`memory/manager.py`): Окремий retrieval budget 8K замість storage budget 30K для `_select_long_relevant`. Контролюється через `MEMORY_LONG_RETRIEVAL_BUDGET`.
+- **B7** (`media/album_registry.py`): Проаналізовано — не баг. `threading.Lock` захищає синхронні dict-операції, а async claim→settle→process вже захищений claim pattern.
+- **B8** (`adapters/telegram_bot.py`): `filters.ALL` замінено на `filters.TEXT | filters.PHOTO | filters.VIDEO | filters.VIDEO_NOTE | filters.VOICE | filters.AUDIO | filters.Document.ALL | filters.CAPTION`.
+
+### Перевірка
+
+Аудит-документ оновлено, всі B-items позначені як виправлені або відхилені. Фаза 2 завершена.
+
+## 2026-04-13 — Сесія 082: Аудит Фаза 3 — tech debt cleanup
+
+### Проблема / Ціль
+
+Завершення аудиту codex-змін. Фаза 3: дрібні проблеми, dead code, tech debt (C1-C18).
+
+### Що зроблено
+
+Виправлено 9 з 18 пунктів, решта свідомо пропущена (безпечні, косметичні, або by design):
+
+- **C1** (`agent/runner.py`): Видалено dead code `_format_sources` та всі мертві call sites.
+- **C2** (`media/video.py`): Прибрано `frames` з результату `analyze_video` — вказували на видалені файли.
+- **C3** (`media/video.py`): Прибрано `CLEANUP_KEEP_WHISPER_TXT` та мертву логіку Whisper `.txt` файлів.
+- **C6** (`memory/manager.py`): `asyncio.get_event_loop()` → `asyncio.get_running_loop()`.
+- **C8** (`memory/reflection.py`): Budget check тепер враховує токени замінюваного факту.
+- **C9** (`memory/reflection.py`): `hasattr(last, "replace")` → `isinstance(last, datetime)`.
+- **C11** (`media/downloader.py`): Cleanup порожньої директорії при невдалому Telethon download.
+- **C12** (`media/voice.py`): Дедуплікація `MEDIA_TMP` — імпортується з `downloader.py`.
+- **C14** (`app/message_logic.py`): Видалено dead variable `album_handled`.
+
+Пропущено: C4 (безпечне подвійне видалення), C5 (caption=None не впливає), C7 (груба оцінка достатня), C10 (косметика), C13 (greedy regex потрібний для nested JSON), C15-C18 (потребують окремого рефакторингу або by design).
+
+### Перевірка
+
+`py_compile` по всіх змінених файлах → OK. Аудит завершено повністю: 3 фази, всі пункти промарковані.
+
+## 2026-04-13 — Сесія 083: Виправлення Кодування Документації
+
+### Проблема / Ціль
+
+Користувач повідомив, що в `docs/project/devlog.md`, `docs/project/plan.md`, `docs/project/server-smartest.md` і частині інших документів видно битий текст. Проблема виявилася змішаною:
+
+- частина блоків була реально пошкоджена попередніми записами;
+- частина markdown-файлів уже містила нормальний UTF-8 текст, але без BOM, тому окремі Windows-редактори відкривали їх як неправильне кодування й показували казябрики;
+- пошкодження були не лише в `devlog`, а й у `plan`, `server-smartest` та суміжних docs-блоках.
+
+### Що Зроблено
+
+- Проведено повний прохід по `docs/project` і `docs/research` з перевіркою на:
+  - invalid UTF-8;
+  - replacement chars `�`;
+  - control chars;
+  - послідовності `????`.
+- У `docs/project/devlog.md`, `docs/project/plan.md`, `docs/project/server-smartest.md` і `docs/project/telegram-geometry.md` вручну замінено реально пошкоджені блоки на нормальний український текст.
+- Після текстових правок усі markdown-файли в `docs` переведено в `UTF-8 with BOM`, щоб Windows-редактори не вгадували кодування навмання.
+- У `.editorconfig` додано окреме правило для `docs/project/*.md` і `docs/research/*.md`: `charset = utf-8-bom`.
+
+### Перевірка
+
+- Локальний скан по всій `docs` після правок -> `CLEAN`.
+- Перевірено початкові байти ключових файлів:
+  - `docs/project/server-smartest.md`
+  - `docs/project/devlog.md`
+  - `docs/project/plan.md`
+  Вони тепер починаються з BOM `EF BB BF`.
+
+### Рішення
+
+- Проблему треба трактувати не як "битий лише один файл", а як загальний docs-encoding issue.
+- Для цього пакета важливо не лише переписати зіпсовані абзаци, а й зафіксувати формат збереження, інакше казябрики повернуться при наступному редагуванні на Windows.
+
+## 2026-04-13 — Сесія 084: Runtime-Хвиля Capability-Level Reasoning
+
+### Проблема / Ціль
+
+Почато реалізацію пакета `reasoning-implementation.md`. До цього reasoning plumbing у коді існувала, але була фактично мертвою: planner міг повернути `use_reasoning=True`, але downstream runtime усе одно жив на старій глобальній логіці з `OPENAI_REASONING_MODEL` і відправляв звичайний запит без реальних reasoning-параметрів. Окремо planner і `agent/runner.py` мали різні trigger-и для "подумай", що створювало ще одну тиху розбіжність між planner path і direct agent path.
+
+### Що Зроблено
+
+- У `core/env.py` додано capability-level reasoning helpers:
+  - `can_reason(provider, model)`
+  - `capability_reasoning_enabled(capability)`
+  - `capability_reasoning_effort(capability)`
+  - новий capability-aware contract для `gemini_thinking_level()` і `gemini_thinking_budget()`
+- З `core/env.py` видалено вже мертві глобальні helper-и:
+  - `reasoning_model()`
+  - `reasoning_effort()`
+  - `provider_supports_reasoning()`
+- У `agent/llm.py` reasoning runtime переведено на capability policy:
+  - `_maybe_reasoning_args()` тепер працює від `ProviderBinding`, а не від глобального env;
+  - `_pick_model()` більше не шукає окрему global reasoning model і спеціально підміняє тільки DeepSeek на `deepseek-reasoner`, коли reasoning реально дозволений;
+  - Gemini path отримав `reasoning_active` і capability-aware `thinkingConfig` для Gemini 3.x / 2.5;
+  - OpenAI-compatible transport тепер не відправляє `temperature`, коли reasoning реально активний для GPT-5/o-series;
+  - для reasoning-active GPT-5/o-series `max_tokens` мапиться у `max_completion_tokens`;
+  - DeepSeek reasoner не отримує OpenAI-style reasoning kwargs і не отримує зайвий `temperature`.
+- Створено окремий shared helper `core/reasoning.py`, щоб planner і runner більше не жили на різних наборах trigger-ів.
+- У `agent/planner.py`:
+  - `_needs_reasoning()` переведено на shared explicit trigger detection;
+  - після planner decision додано capability gate, який гасить `use_reasoning`, якщо policy для capability його не дозволяє.
+- У `agent/runner.py` direct-agent path теж переведено на той самий shared reasoning trigger helper.
+- Додано й оновлено регресійні тести:
+  - `tests/test_031_planner.py`
+  - `tests/test_036_gemini_adapter.py`
+  - `tests/test_075_reasoning_runtime.py` (новий файл)
+
+### Перевірка
+
+- `py_compile` по:
+  - `core/env.py`
+  - `core/reasoning.py`
+  - `agent/llm.py`
+  - `agent/planner.py`
+  - `agent/runner.py`
+  - reasoning-тестах -> `OK`
+- Таргетний пакет:
+  - `tests/test_030_agent.py`
+  - `tests/test_031_planner.py`
+  - `tests/test_036_gemini_adapter.py`
+  - `tests/test_061_message_logic_layers.py`
+  - `tests/test_075_reasoning_runtime.py`
+  -> `33 passed`
+- Повний локальний `pytest -q` не є валідним сигналом для цього середовища: впирається в `MariaDB` на `127.0.0.1:3306` ще на session fixture stage, тобто це інфраструктурний blocker, а не reasoning-регресія.
+
+### Рішення
+
+- Runtime truth для reasoning уже почала відповідати документу: capability policy тепер реально впливає на transport.
+- UI reasoning controls свідомо лишено на наступну хвилю, щоб не малювати operational surface поверх ще неузгодженого runtime.
+- Перед live rollout reasoning policy треба окремо пройти staging/full pytest у середовищі з реальною `MariaDB`, а не вважати локальний Windows-хост джерелом істини для цього пакета.
+
+## 2026-04-13 — Сесія 085: UI-Хвиля Capability-Level Reasoning
+
+### Проблема / Ціль
+
+Після runtime-хвилі reasoning-пакет лишався напівзавершеним: transport і planner уже жили на capability-level policy, але адмінка не давала цю policy ані побачити, ані коректно налаштувати. У такому стані система все ще мала розрив між runtime truth і operational truth: reasoning уже існує як реальний runtime-контракт, але панель керування поводиться так, ніби цього шару немає.
+
+### Що Зроблено
+
+- У `app/admin_ui.py` додано capability-level reasoning controls без окремого legacy-screen:
+  - checkbox `Reasoning`;
+  - `Effort` select (`low / medium / high`);
+  - server-side save-path для `CAPABILITY_*_REASONING_ENABLED` і `CAPABILITY_*_REASONING_EFFORT`;
+  - client-side availability check, щоб unsupported model автоматично вимикала reasoning checkbox.
+- UI прив’язаний до того самого capability contract, що й runtime:
+  - доступність reasoning визначається через `can_reason(provider, model)`;
+  - якщо selected provider/model reasoning не підтримують, checkbox стає disabled і не може зберегти невалідний стан;
+  - якщо reasoning ввімкнено, effort зберігається явно, а якщо ні — policy не протікає випадково в runtime.
+- Оновлено регресії в `tests/test_071_admin_ui.py`:
+  - перевірка, що reasoning controls з’являються для supported model;
+  - перевірка, що reasoning controls disabled для unsupported model.
+
+### Перевірка
+
+- `py_compile`:
+  - `app/admin_ui.py`
+  - `tests/test_071_admin_ui.py`
+  -> `OK`
+- Таргетний reasoning/UI пакет:
+  - `tests/test_031_planner.py`
+  - `tests/test_036_gemini_adapter.py`
+  - `tests/test_071_admin_ui.py`
+  - `tests/test_075_reasoning_runtime.py`
+  -> `37 passed`
+- Розширений локальний пакет:
+  - `tests/test_030_agent.py`
+  - `tests/test_031_planner.py`
+  - `tests/test_036_gemini_adapter.py`
+  - `tests/test_061_message_logic_layers.py`
+  - `tests/test_071_admin_ui.py`
+  - `tests/test_075_reasoning_runtime.py`
+  -> `33 passed`
+
+### Рішення
+
+- Пакет `reasoning-implementation.md` тепер уже не лише частково оживлений у runtime, а й має відповідний operational surface в адмінці.
+- Далі по цьому пакету немає сенсу робити ще локальні зміни без deploy: наступний реальний крок — staging/full pytest у середовищі з `MariaDB`, потім live deploy і операційна перевірка reasoning policy на сервері.
+
+## 2026-04-13 — Сесія 086: Staging + Live Deploy Для Reasoning-Пакета
+
+### Проблема / Ціль
+
+Після runtime- і UI-хвиль reasoning-пакет уже був готовий локально, але ще не пройшов production-подібний цикл `staging -> full pytest -> live deploy`. Без цього reasoning-рефакторинг не можна було вважати завершеним, бо transport-логіка змінювалась у критичному `llm/planner/runner` шляху.
+
+### Що Зроблено
+
+- У staging `/opt/smartest-staging` синхронізовано reasoning-пакет:
+  - `core/env.py`
+  - `core/reasoning.py`
+  - `agent/llm.py`
+  - `agent/planner.py`
+  - `agent/runner.py`
+  - `app/admin_ui.py`
+  - reasoning-тести
+  - `docs/project/plan.md`
+  - `docs/project/devlog.md`
+- Під час staging verification виліз не reasoning-фейл, а роз’їзд між локальним репо й staging по `media/vision.py`: локальні тести вже очікували `max_tokens=1000`, а на staging лишався старий файл із `400`. Після синхронізації `media/vision.py` повний staging `pytest -q --color=no` пройшов повністю.
+- Після зеленого staging reasoning-пакет синхронізовано в live `/opt/smartest/app`:
+  - `core/env.py`
+  - `core/reasoning.py`
+  - `agent/llm.py`
+  - `agent/planner.py`
+  - `agent/runner.py`
+  - `app/admin_ui.py`
+  - `media/vision.py`
+  - `docs/project/plan.md`
+  - `docs/project/devlog.md`
+- Після live sync перезапущено:
+  - `smartest-bot.service`
+  - `smartest-admin.service`
+
+### Перевірка
+
+- Staging:
+  - повний `.venv/bin/python -m pytest -q --color=no` -> зелений
+- Live:
+  - `systemctl is-active smartest-bot.service` -> `active`
+  - `systemctl is-active smartest-admin.service` -> `active`
+  - `curl -fsS http://127.0.0.1:8787/health` -> `ok`
+
+### Рішення
+
+- `reasoning-implementation.md` тепер не лише локально реалізований, а й проведений через staging/full pytest та синхронізований у live.
+- З цього моменту reasoning-пакет переходить із фази "реалізація" у фазу "операційне ввімкнення policy": далі треба вже не переписувати код, а вирішувати, для яких capability reasoning реально вмикати в адмінці й з яким effort.
+
+## 2026-04-13 — Сесія 087: Live-Fix Для Gemini Reasoning Trigger І Thinking Contract
+
+### Проблема / Ціль
+
+Після реального ввімкнення reasoning у live бот перестав відповідати на адресоване повідомлення типу `@saintaibot ... Запусти різонінг`. Треба було не гадати, а розвести дві окремі поломки: чи explicit trigger взагалі доходить до planner/runtime, і чи не ламається сам transport при Gemini reasoning path.
+
+### Що Знайдено
+
+- У live trace на `message_id=253326` повідомлення дійшло до planner, але `flow.planner_decision` показав `reasoning=False`, хоча в тексті була пряма команда на reasoning.
+- Той самий хід далі впав не в Telegram-flow, а в Gemini transport:
+  - `Gemini request failed with status 400`
+  - `Thinking level MINIMAL is not supported for this model`
+- Причина виявилась подвійною:
+  - `core/reasoning.py` містив зіпсований список українських trigger-фраз і не покривав формулювання `запусти різонінг`;
+  - `core/env.py` для `gemini-3.x` відправляв `thinkingLevel=minimal` навіть коли reasoning неактивний, а live-модель `gemini-3.1-pro-preview` це відхиляє.
+
+### Що Зроблено
+
+- `core/reasoning.py` повністю переписано в нормальний UTF-8 і розширено explicit reasoning triggers:
+  - `запусти різонінг`
+  - `увімкни різонінг`
+  - `включи різонінг`
+  - `use reasoning`
+  - `enable reasoning`
+- `agent/planner.py` тепер примусово зберігає `use_reasoning=True`, якщо:
+  - користувач явно просить reasoning;
+  - capability policy для цього capability дозволяє reasoning.
+  Це прибирає сценарій, коли planner-model повертає `use_reasoning=false` всупереч прямій команді користувача.
+- `core/env.py` для `gemini-3.x` змінив contract:
+  - без активного reasoning `thinkingConfig` взагалі не відправляється;
+  - при `reasoning_effort=none` thinking level більше не мапиться в `minimal`, а піднімається до `low`, щоб не ламати Gemini transport.
+
+### Перевірка
+
+- Локально reasoning-регресії:
+  - `tests/test_031_planner.py`
+  - `tests/test_036_gemini_adapter.py`
+  - `tests/test_071_admin_ui.py`
+  - `tests/test_075_reasoning_runtime.py`
+  -> зелений таргетний пакет.
+- На staging `/opt/smartest-staging` прогнано повний `.venv/bin/python -m pytest -q --color=no` -> зелений full suite.
+- У live `/opt/smartest/app` reasoning hotfix синхронізовано і `smartest-bot.service` перезапущено.
+- Додатковий live sanity-probe через `run_simple()` на нейтральному запиті пройшов успішно: runtime уже не падає на Gemini transport, а повертає відповідь.
+- Окремо перевірено фактичний live env: `CAPABILITY_CHAT_FINAL_REASONING_ENABLED` зараз порожній, тобто reasoning policy для фінальної відповіді ще не ввімкнена, навіть якщо planner-level reasoning already enabled.
+
+### Рішення
+
+- Reasoning-пакет уже не просто "увімкнений", а витримав перший live-regression на реальному Gemini config.
+- Після цього reasoning-команди типу `запусти різонінг` більше не повинні губитися в trigger helper, а Gemini 3 path не повинен падати через наш старий `minimal` thinking baseline.
+- Якщо користувач хоче не лише стабільну відповідь, а саме thinking-mode на фінальному тексті, наступний крок уже не кодовий: треба окремо увімкнути `Reasoning` саме для capability `chat_final` в адмінці.
+
+## 2026-04-13 — Сесія 088: Voice Command Timeout Fix Без Текстового Фолбеку
+
+### Проблема / Ціль
+
+Після ввімкнення voice-команд `/a` і `/v` виліз ще один production баг: якщо TTS/Telegram transport не встигав віддати voice reply, бот не повертав коротку технічну помилку, а вивалював у чат повний текст, який мав бути озвучений. Для `/v` це особливо погано: команда озвучки перетворювалась на звичайний текстовий дубль великої попередньої відповіді.
+
+### Що Знайдено
+
+- У live trace для `message_id=253440` команда `voice_command=speak_last_reply` відпрацювала до етапу TTS/send.
+- Далі стався `Timed out` не в planner і не в TTS prompt-building, а в Telegram send path:
+  - traceback ішов через `telegram.request._httpxrequest`
+  - тобто transport timeout стався під час надсилання voice response.
+- Поточний код у `app/message_logic.py` на будь-яку помилку в `send_voice_response()` робив неправильний фолбек:
+  - `await send_response(msg, voice_text)`
+  - тобто замість службової помилки скидав у чат сам текст для озвучки.
+
+### Що Зроблено
+
+- `media/voice.py`:
+  - для PTB voice send додано явні timeout-и:
+    - `read_timeout=180`
+    - `write_timeout=180`
+    - `connect_timeout=30`
+    - `pool_timeout=30`
+  Це зменшує ризик фальшивих timeout-ів на довших або повільніших voice upload.
+- `app/message_logic.py`:
+  - для `/a` і `/v` прибрано текстовий фолбек на сам voice payload;
+  - замість цього команда повертає коротке службове повідомлення:
+    - для `/v`: `Не зміг надіслати озвучку останнього повідомлення. Спробуй ще раз трохи пізніше.`
+    - для `/a`: `Не зміг надіслати озвучку. Спробуй ще раз трохи пізніше.`
+
+### Перевірка
+
+- Локально пройдено:
+  - `tests/test_062_voice_commands.py`
+  - `tests/test_076_voice_command_fallback.py`
+  -> зелений таргетний пакет.
+- Окремо додано нові регресії:
+  - що `/v` при timeout не скидає в чат повний текст попередньої відповіді;
+  - що PTB voice transport використовує розширені timeout-и.
+- На staging `/opt/smartest-staging` прогнано повний `.venv/bin/python -m pytest -q --color=no` -> зелений full suite.
+
+### Рішення
+
+- Команди озвучки більше не повинні перетворюватися на текстовий дубль контенту при transport failure.
+- Якщо transport ще раз впаде, користувач побачить коротке службове повідомлення, а не повний текст, який мав бути озвучений.
+
+## 2026-04-13 — Сесія 084: Security audit + dead code cleanup
+
+### Проблема / Ціль
+
+Повний security audit кодової бази + пошук dead files на видалення.
+
+### Що зроблено
+
+**Security fixes:**
+- **V1 CRITICAL** (`deploy/deploy.cjs`, `deploy/clear_memory.cjs`): SSH credentials (host, user, password) прибрані з коду → читаються з `deploy/.env` (додано в `.gitignore`).
+- **V2 HIGH** (`media/video.py`): FFmpeg виклики переписані з `shell=True` на `subprocess.check_call([...])` без shell. Усунуто потенційну command injection.
+- **V3 HIGH** (`agent/tools/fetch_page.py`): Додано SSRF protection — `_is_safe_url()` блокує приватні IP, localhost, cloud metadata endpoints.
+- **V4 MEDIUM** (`app/admin_ui.py`): Rate limiting на логін — 5 невдалих спроб з одного IP → блок на 5 хвилин.
+- **V5 MEDIUM** (`app/admin_ui.py`): Verbose exception details в flash messages замінені на generic повідомлення. Деталі логуються.
+
+**Dead code видалено (12 файлів, 3 директорії):**
+- `src/` — вся директорія (legacy wrappers: message_handler, message_wrapper, openai_wrapper, voice_processor, config_reader, heroku_config_parser). Ніде не імпортувались.
+- `knowledge/` — вся директорія (glossary.py — ніде не імпортується).
+- `commands/` — порожня директорія.
+- `memory/prompts.py` — re-export, ніде не імпортується.
+- `whisper_tool.py` — stub, ніде не імпортується.
+- `configs/config.ini` — legacy конфіг з API ключами в plain text.
+- `tests/test_037_prompts.py` — видалено legacy тест `test_legacy_config_reader`.
+
+**.gitignore оновлено:**
+- Додано `deploy/.env`, `deploy/node_modules/`, `deploy/*.tar.gz`.
+
+### Документ
+
+Повний security audit: `docs/project/security-audit-2026-04-13.md`
+
+## 2026-04-15 - Сесія 085
+
+### Проблема / Ціль
+
+Бот не відповідав на повідомлення з явним запитом пошуку. Користувач написав "ні, на воді як пальне, шукай!" — planner правильно обрав route=search, але search gate (бінарний класифікатор SEARCH/CHAT) помилково повернув CHAT, заблокувавши пошук. Fallback на chat дав порожню відповідь від Gemini.
+
+### Що зроблено
+
+**Root cause:** `is_explicit_search_request()` не розпізнавала "шукай" — тільки "пошукай". Коли ця функція повертає False, search gate активується і може заблокувати пошук.
+
+**Виправлення (3 рівні захисту):**
+
+1. **`agent/search_task.py`** — розширено `SEARCH_INTENT_PATTERNS`:
+   - Додано: `шукай`, `гугли`, `загуглити`, `перевір в інтернеті`, `search`, `google`, `look up`
+   - Тепер `is_explicit_search_request("шукай!")` → True
+
+2. **`agent/planner.py`** — додано explicit search override:
+   - Якщо heuristic вирішив search (explicit_search_intent) а LLM planner повернув chat, heuristic перемагає
+   - Search gate повністю пропускається коли `is_explicit_search_request` = True (вже було, тепер працює)
+
+3. **`core/prompts.py`** — оновлено `SEARCH_GATE_SYSTEM_PROMPT`:
+   - Явні команди пошуку (шукай, пошукай, погугли) = БЕЗЗАПЕРЕЧНИЙ SEARCH
+   - Додано правило: "Користувач знає, чого хоче"
+
+**Тести:** `test_031_planner.py` — 2 нових тести, `test_032_search_task.py` — розширено перевірку intent patterns.
+
+## 2026-04-17 - Сесія 086 (Multitenant, Етап 1)
+
+### Проблема / Ціль
+
+Починаємо імплементацію багатокористувацького режиму згідно з документом `docs/project/multitenant-plan.md`. Мета — перетворити single-tenant бот у продукт для широкого загалу: кожен юзер має акаунт із pre-paid балансом, кожен чат має власника, провайдерські ключі в пулі з балансуванням, перевірка доступу на кожному повідомленні.
+
+Це **Етап 1** із 7: схема БД і базові репозиторії. Після нього існуючий бот продовжує працювати без змін, але отримує фундамент для наступних етапів (gateway, policy, TG UI, monopay).
+
+### Ключові рішення (зафіксовані в документі)
+
+- Pre-paid баланс у гривнях, списання атомарне (`SELECT FOR UPDATE`).
+- Один `owner_account_id` на чат, контролює політику доступу і ліміти.
+- Кожен sub-виклик (planner, search composer, evaluator, final synthesis) — окрема транзакція, згрупована по `turn_id`. Жодної агрегації в одну — юзер бачить повний breakdown.
+- Твій акаунт = звичайний акаунт із великим балансом (999999 грн), без spеціальних флагів чи кодових шляхів.
+- На етапах 1-4 оплата не робиться — баланси встановлюються вручну через адмінку або SQL. Monobank — окремо на етапі 5.
+- Існуюча таблиця `chats` зберігається (PK `chat_id` = tg_chat_id); просто ALTER ADD COLUMN для `owner_account_id`, `tg_chat_type`. Пам'ять (`memory_recent`, `memory_long`, `memory_core`) залишається per-chat_id.
+
+### Що зроблено в Етапі 1
+
+Міграція `006_multitenant.sql`: нові таблиці `users`, `accounts`, `chat_policies`, `chat_access`, `user_settings`, `turns`, `transactions`, `provider_keys`, `topups`, `pricing`. ALTER `chats` — додано `owner_account_id`, `tg_chat_type`.
+
+Репозиторії: `db/accounts_repository.py`, `db/chats_repository.py`, `db/transactions_repository.py`, `db/keypool_repository.py`, `db/topups_repository.py`, `db/users_repository.py`.
+
+Seed-скрипт `scripts/seed_owner_account.py` — створює твій акаунт із балансом 999999 грн, прив'язує існуючі чати до нього.
+
+### Що залишилось (наступні етапи)
+
+- Етап 2: Ключовий пул у `provider_keys` + LLM gateway (`billing/gateway.py`), інтеграція в `agent/llm.py`, прокидання `billing_context` через planner/search_task/memory.
+- Етап 3: Policy enforcement (access_mode, caps, bans) у `app/message_logic.py`.
+- Етап 4: Telegram команди (`/settings`, `/balance`, `/topup`, `/mode`, `/allow`, `/ban`).
+- Етап 5: Monobank інтеграція.
+- Етап 6: ToS/Privacy/Refund.
+- Етап 7: Бета.
+
+Інша модель може підхопити роботу, прочитавши план у `docs/project/multitenant-plan.md`.
+
+## 2026-04-17 - Сесія 087 (Multitenant, Етап 2 — billing scaffold)
+
+### Контекст
+
+Продовження `multitenant-plan.md`. Етап 1 (Сесія 086) дав схему БД і репозиторії. Етап 2 — ключовий пул і LLM gateway: кожен LLM-виклик має писати рядок у `transactions` із прив'язкою до `turn_id` і `account_id`.
+
+Цей коміт вводить **скелет шару `billing/`** і не змінює поведінку існуючих callsite — `agent.llm.chat_once` працює як раніше. Інтеграція в `app/message_logic.py` (створення `turn_id` на старті повідомлення, виклик через `chat_once_billed`, фіналізація turn) — наступна порція роботи в межах Етапу 2.
+
+### Що зроблено
+
+Створена нова гілка `multitenant` (від `gpt_wiser`) — туди йдуть усі коміти Етапів 1-7, merge у `master` тільки після end-to-end success.
+
+Новий пакет `billing/`:
+
+- `billing/context.py` — `BillingContext` (frozen dataclass: `turn_id`, `account_id`, `chat_id`, `user_id`, `capability_hint`). Передається через шари. `is_complete()` — guard для no-op у тестових/bootstrap-шляхах.
+- `billing/pricing.py` — `compute_cost_uah(provider, model, kind, tokens_in, tokens_out, unit_count)`. `Decimal` всюди, кванти `0.000001` USD / `0.0001` UAH. `compute_cost_from_row` — pure функція для тестів. Fallback (markup 40%, rate 40 UAH/USD) керується через `BILLING_DEFAULT_MARKUP_PCT` / `BILLING_DEFAULT_UAH_PER_USD`.
+- `billing/crypto.py` — AES-256-GCM шифрування ключів через `BILLING_MASTER_KEY` (`v1:` префікс). XOR-stream fallback (`v0:`) тільки якщо `cryptography` не встановлено — для dev/test, не для prod.
+- `billing/keypool.py` — service layer над `db.keypool_repository`: `register_key` (encrypt+insert), `acquire` (LRU + cooldown), `record_success/rate_limit/error`, `reset_cooldowns`. Готово до інтеграції з `agent/llm.py` у наступному кроці Етапу 2.
+- `billing/gateway.py` — серце шару. `log_llm_transaction(response, billing_context, capability, provider, model, ...)` — витягує usage із response, рахує cost через `pricing`, пише `transactions` рядок. No-op якщо `billing_context` неповний. `chat_once_billed(messages, capability, billing_context, **kw)` — async-обгортка: викликає `agent.llm.chat_once` (sync), мірить latency, логує транзакцію, обробляє exception (status='failed', error_text).
+
+Підтримка Gemini в gateway: розширено `agent/llm.py::_chat_once_gemini` — тепер response має поле `usage` (SimpleNamespace із `prompt_tokens`/`completion_tokens`) із `usageMetadata`. `_extract_usage` у gateway розуміє і OpenAI SDK, і dict, і Gemini формат.
+
+Seed-скрипт `scripts/seed_pricing.py` — заповнює `pricing` цінами квітня 2026 для основних моделей (OpenAI gpt-5.4 line, Gemini 3.1 flash/pro, Claude opus 4.7 / sonnet 4.6 / haiku 4.5 через OpenRouter, DeepSeek, Whisper, OpenAI TTS). Search-провайдери (Brave, Tavily) — як `kind='search'` з `unit_usd` за query. Markup і rate переоприділяються env-змінними при запуску.
+
+### Тести
+
+`tests/test_080_billing_pricing.py` — pure-computation: відомий рядок із markup, комбінація input+output+unit, fallback при відсутньому рядку, нульовий usage → нульовий cost.
+
+`tests/test_081_billing_crypto.py` — round-trip із дефолтним ключем, відмова на невалідному base64, відмова на невідомому prefix, зміна master-key ламає decrypt.
+
+`tests/test_082_billing_gateway.py` — `_extract_usage` для трьох форматів (OpenAI obj, dict Gemini, missing); `log_llm_transaction` no-op без context, повний запис із cost-monkeypatch, override token counts і `kind='search_api'`.
+
+Локальний smoke-тест (без БД): pure-логіка проходить (`pricing` → 56.0000 UAH для 1M token cap; AES round-trip; usage extraction; context guard). Pytest fixture conftest.py вимагає реальну MariaDB — на dev-машині це OK, на CI треба підняти контейнер.
+
+### Зміна підходу: ContextVar замість прокидання параметра
+
+Початковий план казав "функції типу `plan_message`, `summarize_block`, `compress_entry` отримують новий параметр `billing_context`". На практиці це ~30 файлів механічних змін, які закопують реальну зміну (whо нащо логує що) в шум сигнатур. Замість цього зробив `billing/runtime.py` з `ContextVar[BillingContext]`:
+
+- `current_billing_context()` — читає активний контекст із потоку coroutine
+- `use_billing_context(ctx)` — async context manager, set/reset на boundary
+- asyncio автоматично копіює контекст у дочірні `create_task`, тому fan-out planner→search→memory→vision підхоплює без змін у проміжних шарах
+
+Це дає такий самий ефект (per-turn ідентичність у транзакціях) без сигнатурного шуму. Описано на верху `billing/runtime.py`.
+
+### Інтеграція в chat_once
+
+`agent/llm.chat_once` тепер обгорнутий: при вході — `time.monotonic()`, при виході — `_maybe_emit_billing(...)`, який:
+
+1. Читає `current_billing_context()` із runtime.
+2. Якщо None або неповний → no-op.
+3. Інакше — schedule fire-and-forget `loop.create_task(log_llm_transaction(...))`. Latency = `int((monotonic_now - started)*1000)`. На failure log_transaction шириться через `add_done_callback`.
+
+Те саме для exception path — `status='failed'`, `error_text=str(exc)[:500]`.
+
+Для refactor чистоти існуюча логіка диспатчу винесена в `_dispatch_chat_once` (приватний). Це дало однакове місце для timing/billing-обгортки як для OpenAI-compatible, так і для Gemini native шляху.
+
+### Інтеграція в app/message_logic
+
+`process_message` тепер так:
+
+```python
+async def process_message(msg):
+    geometry = await resolve_message_geometry(msg)
+    session_state = ...
+    billing_ctx = await begin_turn(chat_id=..., user_id=..., ...)
+    finalize_state = {"status": "completed", "route": None, "capability": None}
+    try:
+        async with use_billing_context(billing_ctx):
+            await _handle_message_inner(msg, ..., finalize_state=finalize_state)
+    except Exception:
+        finalize_state["status"] = "failed"
+        raise
+    finally:
+        await end_turn(billing_ctx, **finalize_state)
+```
+
+`_handle_message_inner` — це по суті старий body `process_message`, єдина відмінність: після `plan_execution(...)` записує `route`/`capability` у `finalize_state`. Усі ранні return (album skip, voice command, podcast) проходять через finally → finalize_turn все одно викликається.
+
+`begin_turn` (новий `billing/bootstrap.py`):
+1. `upsert_user(tg_user_id, ...)` — зберігаємо ідентифікацію.
+2. `ensure_chat(chat_id, tg_chat_type=...)`.
+3. `resolve_account_for(user_id, chat_id)` — спершу шукає особистий акаунт, потім fallback до `chat.owner_account_id`. Якщо немає → `None` (бот відповідає, але без логування транзакцій — Stage 3 жорстко це закриє).
+4. `create_turn(...)` → `BillingContext`.
+
+`end_turn` агрегує `total_cost_uah` із дочірніх transactions через UPDATE…SET у `finalize_turn`.
+
+### Тести
+
+Нові:
+- `tests/test_083_billing_runtime.py` — ContextVar isolation: default None, set/restore, nested, propagation в `create_task`, sibling-isolation, exception cleanup.
+- `tests/test_084_chat_once_billing_hook.py` — chat_once без context → no log; з context → schedule succeeds (300/70 tokens, capability='planner', status='success'); failure path → status='failed', error_text встановлено.
+
+Smoke (без conftest БД): hook end-to-end працює, no-context call працює, всі модулі імпортуються (planner/runner/search_task/memory/media/message_logic).
+
+### Не зроблено в Етапі 2 (відкладається)
+
+1. **Перенос ключів `.env` → `provider_keys`** — сам shell ще на `.env`. `billing.keypool.register_key` готовий. Зробимо seed-скрипт `scripts/seed_provider_keys.py` коли вирішимо feature-flag для `agent/llm._get_client`.
+2. **CI з тест-БД** — автotest fixture у conftest.py вимагає реальну MariaDB; локально pytest падає на setup. На dev-машині користувача працює — це окреме інфра-питання.
+
+### Що далі (Етап 3)
+
+`billing/policy.py` — preflight перевірка балансу (естімейт токенів через `len(text)/3.5 + резерв 20%`), per-user/per-chat денні ліміти (sum транзакцій за добу), access_mode (open/whitelist/admins_only/owner_only), bans. Інтеграція точкова в `app/message_logic.check_access` і preflight перед кожним `chat_once`.
+
+Auto-assign owner: коли в чат пишуть, у якого `owner_account_id IS NULL` і пише юзер з активним акаунтом — його акаунт стає owner'ом чату.
+
+## 2026-04-18 - Сесія 088 (Multitenant, Етап 3 — policy + atomic debit)
+
+### Контекст
+
+Продовження `multitenant-plan.md`. Етап 2 (Сесія 087) дав ContextVar-propagation і логування transactions з пост-фактум записом. Етап 3 закриває **два нових гейти на кожне повідомлення**:
+
+1. **Access** — policy chat_policies.access_mode (open / whitelist / admins_only / owner_only) плюс per-user chat_access рядки (banned / allowed / delegated_admin).
+2. **Budget** — preflight естімейт вартості повідомлення проти балансу і per-user/per-chat денних лімітів.
+
+Плюс атомний debit: успішна LLM-транзакція тепер не лише пишеться в `transactions`, а й зменшує `accounts.balance_uah`.
+
+### Що зроблено
+
+**`billing/policy.py`** — новий модуль. Публічний API:
+- `AccessDecision(allowed, reason, message)` / `BudgetDecision(allowed, reason, estimated_uah, available_uah, message)` — dataclasses. `message` optional: якщо None → silent block (анти-спам), якщо set → надсилаємо користувачу.
+- `assign_owner_if_unassigned(chat_id, account_id)` — якщо чат не має власника, привласнює. Повертає True на факт призначення (для логу).
+- `check_chat_access(chat_id, user_id, account_id)` — по-user рядки (banned/allowed/delegated_admin) перекривають policy. Інакше — mode-based: open passes all, owner_only пускає лише owner'а, admins_only = owner (Stage 3 мінімум), whitelist без рядка → відмова з повідомленням. Fail-closed на unknown mode.
+- `estimate_tokens_in(text)` — груба оцінка `len(text) / 3.5`, мінімум 1 токен.
+- `estimate_tokens_out(capability)` — heuristic dict (chat_final=800, planner=80, search_compose=60, search_eval=80, search_summary=600, memory_summary=200, vision=400, voice=100). Невідома capability → 600.
+- `estimate_message_cost(text, capability, provider, model, safety_factor=Decimal('1.2'))` — якщо provider/model задані, рахує через `billing.pricing.compute_cost_uah`; без них fallback 0.5 UAH / 1k output tokens. Safety factor 1.2 — запас на неточний estimate.
+- `check_budget(account_id, chat_id, user_id, estimated_uah)` — перевіряє: акаунт існує і active, balance ≥ estimated, per_user_daily_cap не перевищений, per_chat_daily_cap не перевищений. Per-cap блок silent (повідомлення=None), insufficient_balance показує UAH-повідомлення з підказкою `/topup`.
+
+**`billing/gateway.py`** — атомний debit. Після успішного `log_transaction(status='success', cost_uah > 0)` викликається `debit_account(account_id, cost_uah)`. Два catch'а: `InsufficientBalanceError` → warning (preflight уже пройшов, це edge-case конкурентного spend), `Exception` → exception log. Транзакція залишається в БД для reconciliation, навіть якщо debit не вдався — важливо щоб observed cost не зникав.
+
+**`app/message_logic.py`** — інтеграція:
+- Після `begin_turn`, якщо `billing_ctx` є, викликається `billing_policy.assign_owner_if_unassigned(chat_id, account_id)`. Лог `billing.owner_assigned` на факт.
+- Новий helper `_enforce_multitenant_policy(...)` після legacy `check_access` гейта. Якщо `billing_ctx is None` → skip (backward compat для чатів без акаунту під час rollout). Інакше — `check_chat_access` → `check_budget` → True. На блокування: пишемо `finalize_state["status"] = "policy_blocked"` (access) або `"budget_blocked"` (budget), надсилаємо повідомлення якщо є, повертаємо False → `_handle_message_inner` повертає з `return`. `process_message.finally` викликає `end_turn` зі статусом блокування (оба значення є в `_VALID_TURN_STATUS`).
+- `_handle_message_inner` тепер приймає `billing_ctx` і `user_text_preview` як явні параметри — ContextVar достатньо для `chat_once`, але для preflight ми хочемо явний account_id без залежності від `current_billing_context()` всередині helper'а.
+
+### Тести
+
+**`tests/test_085_billing_policy.py`** — hermetic, усі db-виклики monkeypatched:
+- `estimate_tokens_in` (empty=0, non-empty≥1), `estimate_tokens_out` (dict lookup + default 600).
+- `estimate_message_cost` — шлях із compute_cost_uah (0.10 × 1.2 = 0.12 UAH), fallback (80 tokens/1k × 0.5 × 1.2 = 0.048 UAH).
+- `assign_owner_if_unassigned` — missing chat, already owned, success.
+- `check_chat_access` — open allows, banned blocks з message, whitelisted row bypasses mode, whitelist without row → not_whitelisted+message, owner_only allows owner / silent-blocks non-owner, admins_only silent-blocks non-owner, no_owner+no_account → blocked з prompt.
+- `check_budget` — account missing, frozen, insufficient_balance (показує message), user_daily_cap / chat_daily_cap (silent), within-limits allows з available_uah=balance.
+
+Smoke-тест (без БД): вся логіка зелена. Pytest-конт-тест-стійка потребує реальну MariaDB (той самий обмежувач, що в Сесії 087).
+
+### Не зроблено в Етапі 3 (наступне)
+
+1. Commands: `/balance`, `/topup`, `/settings` — Етап 4.
+2. Delegated_admin перевірка в admins_only — для Stage 3 мінімум лише owner проходить. Delegated_admin row у `chat_access` уже пропускається через gate (рядок bypassує mode), але окремої логіки для "delegated_admin може запрошувати інших" ще нема. Зроблю разом із адмінськими командами Етапу 4.
+3. Pricing-aware preflight — зараз usamo `capability="chat_final"` для оцінки. Після Етапу 4 інтегруємо binding-aware (знаємо provider/model планера до його запуску).
+
+### Що далі (Етап 4)
+
+Telegram команди: `/balance` (показує залишок, добові витрати), `/topup amount` (готує monobank-посилання — Етап 5 додає провайдера), `/settings` (per-chat mode, caps, custom API key), `/allow @user` / `/ban @user` (per-user rows). Плюс `/start` у приваті — створює акаунт і прив'язує sender.
+
+## 2026-04-18 - Сесія 089 (Multitenant, Етап 4 — Telegram-команди)
+
+### Контекст
+
+Етап 3 (Сесія 088) закрив access + budget гейти. Тепер потрібен UI для власників чатів і нових юзерів — без веб-адмінки або ручного SQL. Оскільки ми вже маємо один PTB message-handler, який маршрутизує все через `app/message_logic.process_message`, логічно вбудувати команди туди, а не робити окремі PTB `CommandHandler`-и (це подвоїло б маршрутизацію).
+
+### Що зроблено
+
+**`billing/commands.py`** — новий модуль. Точка входу — `try_handle_command(msg, geometry, billing_ctx)`. Повертає `CommandResult(handled, response_text, finalize_status, route, capability)` або `None` (не команда → fall through).
+
+- `parse_command(text, bot_username)` — вирізає trailing `@botname` у групах (і коректно віддає None, якщо команда для іншого бота). Повертає `(cmd, rest)` або None.
+- `_COMMAND_NAMES`: `/start`, `/balance`, `/topup`, `/mode`, `/allow`, `/ban`, `/unban`, `/cap`, `/settings`.
+
+Хендлери:
+
+- **`/start`** (лише в приваті): `upsert_user`, якщо акаунт відсутній — `create_account(owner_user_id=..., initial_balance_uah=0)`. Без welcome-bonus v1 (плановано в Section 3.6). У групі — redirect на приватний чат.
+- **`/balance`**: показує `balance_uah`, `total_spent_uah`, `total_topup_uah`, `sum_chat_spent_today` (якщо в групі), і до 5 останніх turn-ів із `list_turns_for_account` з cost breakdown.
+- **`/topup <amount>`**: мінімум 50 грн (узгоджено в Section 3.6), валідація суми з підтримкою коми як десяткового роздільника. Записує рядок у `topups` зі статусом `created` і нотаткою `telegram_command`. Повідомлення про Етап 5 — щоб юзер не думав, що посилання прийде негайно.
+- **`/mode <open|whitelist|admins_only|owner_only>`** (owner-only): `update_chat_policy(access_mode=...)`.
+- **`/allow @user`** / **`/ban @user`** / **`/unban @user`** (owner-only): резолвить `@username` через `get_user_by_username` — якщо юзер ще не взаємодіяв із ботом, повертає зрозумілу відмову. На успіху — `upsert_chat_access(role='allowed'/'banned', added_by=sender_uid)` або `remove_chat_access`.
+- **`/cap user|chat <amount>`** (owner-only): `update_chat_policy(per_user_daily_cap_uah=...)` або `per_chat_daily_cap_uah`. `0` = без ліміту.
+- **`/settings`** (owner-only): read-only dashboard — поточний mode, ліміти, кількість allowed/banned юзерів, hint про інші команди.
+
+Перевірка власника — через спільний хелпер `_require_chat_owner`: (1) user_id резолвиться, (2) акаунт sender-а існує, (3) `chats.owner_account_id` задано і = sender-account. Друге і третє дають чисті повідомлення про помилку, замість silent-block (у власник-командах silent block лише спантеличить).
+
+**`app/message_logic.py`** — інтеграція. Новий блок на самому початку `_handle_message_inner` (до `check_access` legacy і до multitenant policy):
+
+```python
+command_result = await billing_commands.try_handle_command(
+    msg=msg, geometry=geometry, billing_ctx=billing_ctx,
+)
+if command_result is not None:
+    finalize_state["status"] = command_result.finalize_status
+    finalize_state["route"] = command_result.route
+    finalize_state["capability"] = command_result.capability
+    if command_result.response_text:
+        await send_response(msg, command_result.response_text)
+    return
+```
+
+Причина розмістити команди до легасі-пароля: свіжий юзер без облікового запису повинен мати змогу написати `/start` або `/balance`. Для власник-команд перевірка ownership всередині хендлера — чат-пароль тут зайвий.
+
+### Тести
+
+**`tests/test_086_billing_commands.py`** — 20 hermetic тестів, усі db-виклики monkeypatched:
+- `parse_command` — бара / з аргументами / з `@botname` суфіксом / для іншого бота / не-команда / невідома.
+- `_parse_amount` — `50`, `50,5`, `50.5`, empty, "abc", `-10`, `0`.
+- `/start` — redirect в групі / створення акаунта / показ балансу існуючому.
+- `/balance` — no_account / з turns + chat_today (тільки в групі).
+- `/topup` — invalid format / below 50 / no_account / створює `topups` рядок.
+- `/mode` — non-owner / invalid mode / success.
+- `/allow` — unknown user / success (перевіряємо upsert args включно з `added_by`).
+- `/ban` / `/unban` — перевірка ролі + видалення рядка.
+- `/cap user 10` / `/cap chat 100` — upsert правильного kwargs.
+- `try_handle_command` — non-command → None / dispatch / exception → `finalize_status='failed'`.
+
+Smoke-тест (поза pytest/MariaDB): 15/15 OK. Pytest як і раніше потребує живу БД для conftest fixture.
+
+### Відкриті питання / наступне
+
+- **Inline keyboards** — v1 використовує суто текстові команди. Якщо виявиться, що юзери губляться в аргументах (особливо `/cap`, `/mode`), додамо keyboard у Session 090+.
+- **Per-user налаштування** — `/settings` поки показує тільки chat-policy. User-level (дефолтна модель, голос, persona) — коли інтегрую per-(user, chat) override у core/provider_registry.
+- **Delegated admin** — rows з `role='delegated_admin'` у `chat_access` пропускаються через access gate, але ще не мають прав керувати `/mode`/`/allow`/`/ban`. Розширю `_require_chat_owner` у `_require_chat_admin` коли будуть реальні use-case.
+- **`/balance` breakdown по transactions** — зараз ми показуємо тільки turn summaries. Повний breakdown (planner → composer → search → evaluator → final) з розділу 3.3 плану — наступна ітерація, з `get_transactions_for_turn` + форматуванням дерева.
+
+### Що далі (Етап 5)
+
+Monobank Invoice API: `billing/monopay.py` — POST /invoice/create, webhook endpoint у admin_ui, звірка `invoice_id` з `topups`. Коли webhook приходить зі `status=success` → атомне credit_account + `update_topup_status('success')` + Telegram-повідомлення юзеру.
+
+## 2026-04-18 - Сесія 090 (Portal Architecture — фіксація архітектури)
+
+### Контекст
+
+Після завершення Stages 1-4 (DB schema, gateway, policy, TG commands) виникло питання: де адмін бачить юзерів, витрати, ключі провайдерів? Де юзери бачать свій баланс і витрати? Яким буде login для web portal?
+
+### Ключові рішення
+
+**Telegram Login Widget (квітень 2026):**
+Telegram релізнув новий Login Widget — sign-up + login + phone request + permission to message в одному безкоштовному попапі. JWT підписується Telegram, верифікується через `oauth.telegram.org/.well-known/jwks.json` (RS256). Замінює старий iframe-widget.
+
+Фронтенд: `Telegram.Login.init({ client_id: BOT_ID, request_access: ['phone'] }, callback)`.  
+Бекенд: `python-jose[cryptography]` для JWT decode + verify.
+
+**Auth-архітектура (три шари):**
+1. `smartest.klawa.top` — User Portal + Admin (Telegram Login)
+2. `smartest.klawa.top/admin` — Admin Panel, доступний якщо `tg_user_id in ADMIN_TG_USER_IDS`
+3. `[HIDDEN].smartest.klawa.top` — Admin Backdoor (password login, існуючий механізм), URL тільки в `.env`, не публікується
+
+Мотивація backdoor: якщо Telegram Login Widget недоступний або бот-токен компрометований — адмін не залишається без доступу.
+
+**Admin Dashboard (Stage 4.5A):**
+- `/admin/users` — таблиця з сортуванням: username, first_seen, last_seen, balance, total_spent, turns_total/today/7d, tokens_in/out, улюблена модель (MODE aggregate)
+- `/admin/users/<id>` — деталь + кнопка "Поповнити баланс" → `credit_account` + рядок у `topups(status='success', note='admin_manual')`
+- `/admin/transactions` — global лог з фільтрами
+- `/admin/chats` — чати з policy info
+- `/admin/keys` — key pool management: додати (encrypt → store), enable/disable, stats (spent_usd, last_error, cooldown)
+
+**User Portal (Stage 4.5B):**
+- `/` — dashboard: баланс, витрати сьогодні/місяць, останні turns
+- `/history/<turn_id>` — turn breakdown (planner → search → final), Section 3.3 плану
+- `/topup` — поки заглушка, потім Monobank
+- `/settings` — per-user налаштування (модель, голос, persona) через `user_settings` таблицю зі Stage 1
+
+**Provider Key Pool UI:**
+Ключі зберігаються зашифрованими AES-256-GCM через існуючий `billing/crypto.py`. У UI показується тільки `key_hash[:8]...last4`. Адмін може додати/вимкнути/видалити ключ без ручного `.env` редагування.
+
+### Документи
+
+- Детальна архітектура: `docs/project/portal-architecture.md` (новий)
+- Оновлено `multitenant-plan.md` — додано Stage 4.5 між Stages 4 і 5
+
+### Порядок імплементації
+
+1. Stage 4.5A (admin dashboard, без нового login) — зараз
+2. Дрібниці зі Stage 4 (`/balance` per-transaction breakdown, delegated_admin)
+3. Закомітити Stages 1-4 uncommitted work
+4. Stage 4.5B (Telegram Login + user portal)
+5. Деплой на `multitenant` гілку з rollback-здатністю
+
+### Що далі
+
+Починаємо Stage 4.5A: нові репо-функції `list_users_with_stats`, `list_transactions_filtered`, `list_chats_with_policy`, `credit_account_admin`, потім HTML-сторінки в admin_ui.
+
+## 2026-04-18 - Сесія 091 (Multitenant Stage 4 — /model + user_settings runtime override)
+
+### Контекст
+
+Після аудиту `multitenant-plan.md` і Stage 4 стало очевидно, що найбільший функціональний gap не в policy-командах, а саме в персональному виборі моделей. `/settings` уже існував, але був майже read-only: показував політику чату і не давав людині реально обрати модель. Через це весь multitenant-контур залишався напівготовим: база, облік і policy вже були, а користувацький перехід із single-tenant на персональні моделі — ні.
+
+### Що зроблено
+
+**1. Runtime override через `BillingContext.meta`**
+
+- `billing/bootstrap.py` тепер під час `begin_turn()` завантажує `get_user_settings(user_id)` і кладе це в `BillingContext.meta["user_settings"]`.
+- `core/provider_registry.py` навчився читати ці налаштування й підміняти binding для capability до звернення до `.env`.
+- Override обмежений трьома model-групами:
+  - `chat` → `chat_final`
+  - `think` → `planner_reasoning`, `memory_summary`
+  - `media` → `vision_image`
+- Якщо юзер підсунув невалідну пару provider/model, runtime тихо падає назад на server default, а не ламає turn.
+
+**2. Новий `core/model_preferences.py`**
+
+- Виніс у єдине місце contract для Telegram model picker:
+  - slug групи
+  - title/description
+  - ключі в `user_settings`
+  - mapping capability → група
+  - дозволені провайдери і моделі
+- Це стало джерелом істини і для командного меню, і для provider binding.
+
+**3. Відновив і переписав `billing/commands.py`**
+
+- Файл був випадково вибитий із дерева під час великого патчу; відновив його й одразу зібрав заново.
+- Старі Stage 4 команди збережені: `/start`, `/balance`, `/topup`, `/mode`, `/allow`, `/ban`, `/unban`, `/cap`, `/settings`.
+- Додав нову `/model`.
+- Для `/settings` і `/model` зʼявився inline-flow:
+  - корінь з трьома групами
+  - список провайдерів тільки з реально доступними ключами
+  - список моделей усередині обраного провайдера
+  - запис у `user_settings`
+  - reset до server default
+
+**4. PTB callback handling**
+
+- `adapters/telegram_bot.py` отримав `CallbackQueryHandler`.
+- Callback-и `mtmodel:*` не йдуть у загальний message flow, а обробляються окремо як UI-подія, редагуючи те саме Telegram-повідомлення з inline-клавіатурою.
+- Це зменшило ризик побічних ефектів у geometry/auth/policy пайплайні.
+
+**5. Transport для markup**
+
+- `app/message_logic.py::send_response()` тепер вміє передавати `reply_markup` для PTB-відповідей.
+- Command-layer повертає `CommandResult.response_markup`, і message flow не губить inline-клавіатуру на шляху до Telegram.
+
+### Тести
+
+Прогнав hermetic пакет без MariaDB:
+
+- `tests/test_086_billing_commands.py`
+- `tests/test_087_user_model_binding.py`
+- `tests/test_067_telegram_bot_adapter.py`
+- `tests/test_033_provider_registry.py`
+- `tests/test_060_message_logic.py`
+- `tests/test_061_message_logic_layers.py`
+- `tests/test_083_billing_runtime.py`
+
+Результат: локальний цільовий пакет зелений (`60 passed`).
+
+### Що це змінило продуктово
+
+Smartest перестав бути системою, де multitenant існує тільки в БД і policy, але не в UX. Тепер людина реально може персонально обрати модель у Telegram, а runtime реально цей вибір поважає. Це не закриває весь Stage 4 повністю, бо голос, persona і `/balance` breakdown ще попереду, але головний функціональний gap `/settings без моделей` більше не існує.
+
+### Що далі
+
+1. Прогнати повний `pytest` на staging-контурі з MariaDB.
+2. Задеплоїти Stage 4 hot path у live.
+3. Після цього перейти до `Stage 4.5A` — admin dashboard (`/admin/users`, `/admin/transactions`, `/admin/chats`, `/admin/keys`).
+
+## 2026-04-18 - Сесія 092 (Multitenant Stage 4.5A — admin users slice)
+
+### Контекст
+
+Після завершення Stage 4 з Telegram `/model` стало очевидно, що наступний практичний блок — не user portal, а внутрішній admin dashboard. Потрібен мінімальний multitenant control surface, через який можна подивитися користувачів, їхній баланс, активність і вручну поповнити рахунок до Monobank-етапу.
+
+Повний Stage 4.5A великий, але найкорисніший перший slice очевидний:
+- `/admin/users`
+- `/admin/users/<id>`
+- `/admin/users/<id>/credit`
+
+Це дає живий operational контур уже зараз, не чекаючи `/admin/transactions`, `/admin/chats`, `/admin/topups`, `/admin/keys`.
+
+### Що зроблено
+
+Новий query-layer: `db/admin_repository.py`
+
+- `normalize_user_sort(...)` — whitelist для sortable колонок, щоб admin UI не генерував SQL із вільного рядка.
+- `list_users_with_stats(...)` — таблиця користувачів зі статистикою:
+  - username / first_name
+  - first_seen / last_seen
+  - balance / total_spent / total_topup
+  - turns total / today / 7d
+  - tokens_in / tokens_out
+  - favorite_model через агрегат по `transactions`
+- `get_user_admin_detail(...)` — один зріз по юзеру:
+  - профіль
+  - account summary
+  - owned chats
+  - recent turns
+  - recent transactions
+  - recent topups
+  - user_settings
+- `credit_account_admin(...)` — тимчасовий ручний credit-flow до Monobank:
+  - створює account, якщо його ще нема
+  - пише manual topup row
+  - кредитує баланс
+
+Оновлений `app/admin_ui.py`
+
+- Доданий окремий admin HTML shell для multitenant сторінок, не змішуючи це з великою конфіг-панеллю.
+- Додано `render_admin_users_page(...)`.
+- Додано `render_admin_user_detail_page(...)`.
+- Додано path parsers:
+  - `_parse_admin_user_detail_path(...)`
+  - `_parse_admin_user_credit_path(...)`
+- Нові маршрути:
+  - `GET /admin` -> redirect на `/admin/users`
+  - `GET /admin/users`
+  - `GET /admin/users/<id>`
+  - `POST /admin/users/<id>/credit`
+- На dashboard додано прямий перехід у `/admin/users`.
+
+Ручне поповнення
+
+- У деталці користувача є форма:
+  - сума
+  - обов'язкова нотатка
+- Після успішного поповнення сторінка повертає flash із новим балансом.
+- Це тимчасовий Stage 4.5A механізм, поки Stage 5 (Monobank) ще відкладений.
+
+### Тести
+
+Додані нові регресії:
+
+- `tests/test_088_admin_repository.py`
+  - sanitize sort
+  - query args для user list
+  - manual credit flow
+- `tests/test_089_admin_dashboard.py`
+  - dashboard link на `/admin/users`
+  - user list render
+  - user detail render
+  - admin path parsers
+
+Також прогнаний пакет:
+- `tests/test_071_admin_ui.py`
+- `tests/test_088_admin_repository.py`
+- `tests/test_089_admin_dashboard.py`
+
+Результат локально: зелений.
+
+### Верифікація і деплой
+
+- На staging `/opt/smartest-staging` задеплоєно тільки цей admin slice:
+  - `app/admin_ui.py`
+  - `db/admin_repository.py`
+  - `docs/project/devlog.md`
+  - `docs/project/multitenant-plan.md`
+  - відповідні тести
+- Після цього staging пройшов **повний** `.venv/bin/python -m pytest -q --color=no` -> зелений.
+- У live `/opt/smartest/app` задеплоєно той самий slice.
+- Перезапущено `smartest-admin.service`.
+- Smoke-check:
+  - `/health` -> `ok`
+  - `GET /admin/users` без сесії -> `303 /login`
+  - `db/admin_repository.py` і `app/admin_ui.py` на сервері присутні
+
+### Результат
+
+Stage 4.5A більше не "не розпочато". У Smartest вже є перший живий multitenant admin slice:
+- список користувачів
+- деталка користувача
+- ручне поповнення
+
+Це ще не весь admin dashboard, але вже дає операційний контроль над балансами і активністю без заходу в БД руками.
+
+### Що далі
+
+Наступні кроки всередині Stage 4.5A:
+1. `/admin/transactions`
+2. `/admin/chats`
+3. `/admin/topups`
+4. `/admin/keys`
+
+Після цього можна або йти в Stage 4.5B (Telegram Login + user portal), або добивати Stage 2 keypool integration — залежно від того, що сильніше блокує rollout.
+
+## 2026-04-18 - Сесія 093 (Multitenant Stage 4.5A — admin transactions)
+
+### Контекст
+
+Після users slice наступним найкориснішим шматком Stage 4.5A став не `/admin/chats`, а саме глобальний журнал транзакцій. Без нього адміністратор бачить окремого користувача, але не бачить загальної картини витрат: хто зараз палить бюджет, які capability дорожчі, чи є фейли на конкретному провайдері, і як поводяться витрати по часу.
+
+Тому друга хвиля Stage 4.5A пішла в `/admin/transactions`: це operational сторінка для щоденної діагностики, а не просто ще одна табличка.
+
+### Що зроблено
+
+Оновлений `db/admin_repository.py`
+
+- Додано `normalize_transaction_sort(...)` — whitelist для sortable колонок transactions-таблиці.
+- Додано `_build_transaction_filters(...)` — спільний builder для:
+  - text search
+  - capability
+  - provider
+  - model
+  - status
+  - kind
+  - date_from / date_to
+- Додано `list_transactions_with_stats(...)`:
+  - global log з join на `users` і `chats`
+  - повертає `tg_username`, `first_name`, `chat_title`, `tg_chat_type`
+  - дозволяє шукати по user id, username, turn id, chat id, capability, provider і model
+- Додано `get_transactions_summary(...)`:
+  - `total_rows`
+  - `total_cost_uah`
+  - `total_tokens_in`
+  - `total_tokens_out`
+  - `success_count`
+  - `failed_count`
+  - `rate_limited_count`
+  - `avg_latency_ms`
+
+Оновлений `app/admin_ui.py`
+
+- У multitenant admin shell додано навігаційне посилання на `/admin/transactions`.
+- Додано `render_admin_transactions_page(...)`.
+- Додано `GET /admin/transactions`.
+- Додано `_handle_admin_transactions_page(...)`.
+- Сторінка має:
+  - summary metrics зверху
+  - filter form
+  - sortable таблицю
+  - лінки на `/admin/users/<id>` із кожного рядка
+
+Фільтри сторінки:
+
+- Пошук (`q`) — user id, `@username`, turn id, chat id, model
+- `capability`
+- `provider`
+- `model`
+- `status`
+- `kind`
+- `date_from`
+- `date_to`
+
+### Тести
+
+Додані нові регресії:
+
+- `tests/test_090_admin_transactions.py`
+  - sanitize sort fallback
+  - query/filter args для transactions list
+  - summary query reuse
+  - HTML render сторінки `/admin/transactions`
+
+Також повторно прогнано admin-пакет:
+
+- `tests/test_088_admin_repository.py`
+- `tests/test_089_admin_dashboard.py`
+- `tests/test_090_admin_transactions.py`
+
+Локально пакет зелений.
+
+### Верифікація і деплой
+
+- Спочатку оновлено `multitenant-plan.md` і `devlog.md`, щоб staging/live уже їхали з актуальним статусом.
+- Потім у staging `/opt/smartest-staging` синхронізовано:
+  - `db/admin_repository.py`
+  - `app/admin_ui.py`
+  - `tests/test_090_admin_transactions.py`
+  - docs по multitenant
+- Після цього staging пройшов повний `.venv/bin/python -m pytest -q --color=no` -> зелений.
+- Після зеленого staging той самий slice задеплоєно в live `/opt/smartest/app` з backup у `app.prev`.
+- Перезапущено тільки `smartest-admin.service`.
+- Live smoke-check:
+  - `smartest-admin.service` -> `active`
+  - `curl http://127.0.0.1:8787/health` -> `ok`
+  - `GET /admin/transactions` без сесії -> `303 /login`
+
+### Результат
+
+Stage 4.5A отримав другий живий slice:
+
+- `/admin/users`
+- `/admin/users/<id>`
+- `/admin/users/<id>/credit`
+- `/admin/transactions`
+
+Це вже дає не тільки керування балансами, а й глобальну прозорість витрат на рівні runtime.
+
+### Що далі
+
+Наступні кроки Stage 4.5A тепер такі:
+1. `/admin/chats`
+2. `/admin/topups`
+3. `/admin/keys`
+
+Після цього треба або закривати `Stage 2` keypool integration, або переходити до `Stage 4.5B` user portal + Telegram Login.
+
+## 2026-04-18 - Сесія 094 (Multitenant Stage 4.5A — admin chats)
+
+### Контекст
+
+Після users slice і глобального журналу транзакцій залишався ще один великий blind spot: самі чати. В admin dashboard вже було видно, хто витрачає гроші, але не було нормального зрізу по тому, **де саме** ці витрати живуть: які чати мають owner, який у них access_mode, які ліміти виставлені, скільки вони витрачають сьогодні й загалом, і де взагалі починає формуватись operational ризик.
+
+Саме тому наступним шматком Stage 4.5A став `/admin/chats`. Це не декоративна сторінка, а базовий control surface для multitenant-політик на рівні чатів.
+
+### Що зроблено
+
+Оновлений `db/admin_repository.py`
+
+- Додано `normalize_chat_sort(...)` — whitelist для sortable колонок chats-сторінки.
+- Додано `_build_chat_filters(...)` — спільний builder для:
+  - text search
+  - `access_mode`
+  - `tg_chat_type`
+- Додано `list_chats_with_stats(...)`:
+  - повертає chat row + policy row + owner info
+  - додає `spent_today_uah`, `spent_total_uah`, `last_turn_at`
+  - додає `allowed_count`, `delegated_admin_count`, `banned_count`
+  - дозволяє шукати по `chat_id`, `title`, owner username / owner name
+- Додано `get_chats_summary(...)`:
+  - `total_chats`
+  - `owned_chats`
+  - `restricted_chats`
+  - `total_spent_today_uah`
+  - `total_spent_uah`
+
+Оновлений `app/admin_ui.py`
+
+- У multitenant admin shell додано навігаційне посилання на `/admin/chats`.
+- Додано `render_admin_chats_page(...)`.
+- Додано `GET /admin/chats`.
+- Додано `_handle_admin_chats_page(...)`.
+- Сторінка показує:
+  - chat id
+  - title
+  - type
+  - owner
+  - access mode
+  - user/chat daily caps
+  - spend today / total
+  - last activity
+  - access counts
+
+Фільтри сторінки:
+
+- `q` — chat id, title, owner
+- `access_mode`
+- `tg_chat_type`
+
+### Тести
+
+Додані нові регресії:
+
+- `tests/test_091_admin_chats.py`
+  - sanitize sort fallback
+  - query/filter args для chats list
+  - summary query reuse
+  - HTML render сторінки `/admin/chats`
+
+Також повторно прогнано admin-пакет:
+
+- `tests/test_088_admin_repository.py`
+- `tests/test_089_admin_dashboard.py`
+- `tests/test_090_admin_transactions.py`
+- `tests/test_091_admin_chats.py`
+
+Локально пакет зелений.
+
+### Верифікація і деплой
+
+- Перед staging sync оновлено `multitenant-plan.md` і `devlog.md`, щоб статус Stage 4.5A уже відображав новий slice.
+- Потім у staging `/opt/smartest-staging` синхронізовано:
+  - `db/admin_repository.py`
+  - `app/admin_ui.py`
+  - `tests/test_091_admin_chats.py`
+  - docs по multitenant
+- Після цього staging прогнано повним `.venv/bin/python -m pytest -q --color=no` -> зелений.
+- Після зеленого staging той самий slice задеплоєно в live `/opt/smartest/app` з backup у `app.prev`.
+- Перезапущено тільки `smartest-admin.service`.
+- Live smoke-check:
+  - `smartest-admin.service` -> `active`
+  - `curl http://127.0.0.1:8787/health` -> `ok`
+  - `GET /admin/chats` без сесії -> `303 /login`
+
+### Результат
+
+Stage 4.5A тепер має ще один робочий зріз:
+
+- `/admin/users`
+- `/admin/users/<id>`
+- `/admin/users/<id>/credit`
+- `/admin/transactions`
+- `/admin/chats`
+
+Тобто multitenant admin dashboard уже показує не тільки людей і транзакції, а й самі чати як operational unit із політиками та витратами.
+
+### Що далі
+
+Наступні кроки Stage 4.5A:
+1. `/admin/topups`
+2. `/admin/keys`
+
+Після цього треба повертатися або до `Stage 2` keypool integration, або до `Stage 4.5B` user portal + Telegram Login.
+
+## 2026-04-18 - Сесія 095 (Multitenant Stage 4.5A — admin topups)
+
+### Контекст
+
+Після users, transactions і chats у Stage 4.5A лишався ще один важливий operational blind spot: поповнення. Баланси вже можна було кредитувати вручну, але в адмінці не було глобального audit trail, де видно всі topup-події в одному місці: ручні поповнення від адміна, майбутні Monobank invoice-и, статуси, суми, пов'язані акаунти й юзери. Без цього billing-контур лишався неповним: гроші на баланс заводяться, але централізованого журналу для перевірки і розбору інцидентів немає.
+
+Саме тому наступним slice Stage 4.5A став `/admin/topups`.
+
+### Що зроблено
+
+Оновлений `db/admin_repository.py`
+
+- Додано `normalize_topup_sort(...)` — whitelist для sortable колонок topups-сторінки.
+- Додано `_build_topup_filters(...)` — спільний builder для:
+  - text search
+  - `status`
+  - `date_from`
+  - `date_to`
+- Додано `list_topups_with_stats(...)`:
+  - повертає topup row + account id + user info
+  - додає `monopay_invoice_id`, `monopay_url`, `paid_at`
+  - дозволяє шукати по `topup id`, `account id`, `user id`, `@username`, імені та нотатці
+- Додано `get_topups_summary(...)`:
+  - `total_topups`
+  - `total_amount_uah`
+  - `success_amount_uah`
+  - `manual_amount_uah`
+  - `pending_count`
+
+Оновлений `app/admin_ui.py`
+
+- У multitenant admin shell додано навігаційне посилання на `/admin/topups`.
+- Додано `render_admin_topups_page(...)`.
+- Додано `GET /admin/topups`.
+- Додано `_handle_admin_topups_page(...)`.
+- Сторінка показує:
+  - created at
+  - topup id
+  - user
+  - account id
+  - status
+  - amount
+  - paid at
+  - invoice id / link
+  - note
+
+Фільтри сторінки:
+
+- `q` — topup id, account id, user, note, invoice
+- `status`
+- `date_from`
+- `date_to`
+
+### Тести
+
+Додані нові регресії:
+
+- `tests/test_092_admin_topups.py`
+  - sanitize sort fallback
+  - query/filter args для topups list
+  - summary query reuse
+  - HTML render сторінки `/admin/topups`
+
+Також повторно прогнано admin-пакет:
+
+- `tests/test_088_admin_repository.py`
+- `tests/test_089_admin_dashboard.py`
+- `tests/test_090_admin_transactions.py`
+- `tests/test_091_admin_chats.py`
+- `tests/test_092_admin_topups.py`
+
+Локально пакет зелений.
+
+### Верифікація і деплой
+
+- Перед staging sync оновлено `multitenant-plan.md`, `devlog.md` і `server-smartest.md`, щоб статус Stage 4.5A уже відображав новий slice.
+- Потім у staging `/opt/smartest-staging` синхронізовано:
+  - `db/admin_repository.py`
+  - `app/admin_ui.py`
+  - `tests/test_092_admin_topups.py`
+  - docs по multitenant
+- Після цього staging прогнано повним `.venv/bin/python -m pytest -q --color=no` -> зелений.
+- Після зеленого staging той самий slice задеплоєно в live `/opt/smartest/app` з backup у `app.prev`.
+- Перезапущено тільки `smartest-admin.service`.
+- Live smoke-check:
+  - `smartest-admin.service` -> `active`
+  - `curl http://127.0.0.1:8787/health` -> `ok`
+  - `GET /admin/topups` без сесії -> `303 /login`
+
+### Результат
+
+Stage 4.5A тепер має ще один робочий slice:
+
+- `/admin/users`
+- `/admin/users/<id>`
+- `POST /admin/users/<id>/credit`
+- `/admin/transactions`
+- `/admin/chats`
+- `/admin/topups`
+
+Тобто admin dashboard уже показує повний базовий billing trail: хто витрачає, в яких чатах, і як саме заводяться гроші на баланс.
+
+### Що далі
+
+Наступні кроки Stage 4.5A:
+1. `/admin/keys`
+
+Після цього треба повертатися або до `Stage 2` keypool integration, або до `Stage 4.5B` user portal + Telegram Login.
+
+## 2026-04-18 - Сесія 096 (Multitenant Stage 2 — keypool runtime integration)
+
+### Контекст
+
+Після users/transactions/chats/topups у Stage 4.5A головний незакритий архітектурний борг лишався в Stage 2: multitenant billing уже існує, але runtime усе ще тягнув провайдерські ключі з `.env`. Тобто база, транзакції й owner-per-chat уже працювали, а execution path усе ще був фактично single-tenant.
+
+Задача цього slice — не просто "додати ще один helper", а реально підключити `provider_keys` до LLM runtime так, щоб кожен атрибутований turn:
+- міг взяти ключ із pool;
+- записував `key_id` у транзакцію;
+- відмічав успіх / rate-limit / auth-error на рівні конкретного ключа;
+- але при цьому не ламав старий runtime, якщо pool ще не засіяний і доводиться падати назад у `.env`.
+
+### Що зроблено
+
+Оновлений `core/provider_registry.py`
+
+- `ProviderBinding` розширено полями:
+  - `key_id`
+  - `key_label`
+  - `key_source`
+- Додано keypool-aware resolution:
+  - при активному `BillingContext` runtime спочатку пробує взяти ключ через `billing.keypool.acquire(provider)`;
+  - взятий ключ кешується в `BillingContext.meta["_provider_key_cache"]` у межах одного turn;
+  - capability-specific `CAPABILITY_<NAME>_API_KEY` усе ще має найвищий пріоритет;
+  - якщо pool порожній або недоступний, binding чесно падає назад у звичний `.env` fallback.
+
+Оновлений `billing/keypool.py`
+
+- `acquire(...)` тепер перед вибором ключа викликає `clear_cooldowns()`, щоб `rate_limited` ключі реально повертались у rotation після завершення cooldown.
+
+Оновлений `billing/gateway.py`
+
+- `log_llm_transaction(...)` тепер:
+  - отримує `key_id`;
+  - після успішного billed call робить `record_success(...)`;
+  - на rate-limit помилках робить `record_rate_limit(...)`;
+  - на auth/API-key помилках робить `record_error(..., disable=True)`.
+- `chat_once_billed(...)` тепер протягує `binding.key_id` у transaction log.
+
+Оновлений `agent/llm.py`
+
+- background billing logger (`_maybe_emit_billing`) тепер теж протягує `binding.key_id`, тобто keypool attribution працює не тільки через `chat_once_billed(...)`, а й через existing direct `chat_once(...)` path з ContextVar billing.
+
+### Тести
+
+Оновлені регресії:
+
+- `tests/test_033_provider_registry.py`
+  - keypool key має пріоритет над provider `.env` key в attributed turn
+  - capability-specific key перекриває pool
+  - pool key кешується в межах одного turn
+  - без billing context keypool взагалі не чіпається
+- `tests/test_082_billing_gateway.py`
+  - success path оновлює keypool stats
+  - rate-limit path ставить cooldown
+  - auth-error path відключає невалідний ключ
+- повторно прогнано:
+  - `tests/test_083_billing_runtime.py`
+  - `tests/test_087_user_model_binding.py`
+
+Локальний пакет зелений.
+
+### Верифікація і деплой
+
+- Перед staging sync оновлено `multitenant-plan.md`, `devlog.md` і `server-smartest.md`.
+- У staging `/opt/smartest-staging` синхронізовано:
+  - `core/provider_registry.py`
+  - `billing/keypool.py`
+  - `billing/gateway.py`
+  - `agent/llm.py`
+  - `tests/test_033_provider_registry.py`
+  - `tests/test_082_billing_gateway.py`
+  - docs по multitenant
+- Після цього staging прогнано повним `.venv/bin/python -m pytest -q --color=no`.
+- Після зеленого staging той самий slice задеплоєно в live `/opt/smartest/app` з backup у `app.prev`.
+- Перезапущено `smartest-bot.service` і `smartest-admin.service`.
+
+### Результат
+
+Stage 2 більше не є "написано, але не підключено". Runtime тепер реально вміє:
+
+- брати провайдерський ключ із `provider_keys`;
+- пам'ятати, який саме ключ використався в turn;
+- записувати `key_id` у транзакції;
+- реагувати на 429 і auth-failures на рівні пулу.
+
+При цьому rollout лишається безпечним: якщо pool ще не засіяний, runtime не падає, а відступає до `.env`.
+
+### Що далі
+
+Найближчі кроки тепер такі:
+1. `/admin/keys` — закрити Stage 4.5A і дати нормальний UI для seed/enable/disable/statistics по ключах.
+2. Засіяти `provider_keys` реальними ключами й зменшити залежність від `.env` fallback.
+3. Окремо довести `pricing` таблицю до реальних тарифів, щоб Stage 2 був закритий не тільки по runtime, а й по економіці.
+
+## 2026-04-18 - Сесія 097 (Multitenant Stage 4.5A — admin keys)
+
+### Контекст
+
+Після users, transactions, chats, topups і runtime keypool integration останнім незакритим шматком Stage 4.5A лишався `/admin/keys`. Без нього multitenant keypool уже технічно працював, але операційно лишався напівсирим: seed, enable/disable і visibility по cooldown/error доводилось робити SQL-ом або кодом, а не через адмінку.
+
+Задача цього slice — не просто намалювати ще одну таблицю, а дати справжню керовану поверхню над `provider_keys`, яка:
+- не витікає raw secrets назад у HTML;
+- використовує той самий encryption path, що й runtime;
+- дає безпечний whitelist-sort/filter контракт;
+- дозволяє вручну повернути ключ із `invalid` / `disabled` / `rate_limited` у `active`.
+
+### Що зроблено
+
+Оновлений `db/admin_repository.py`
+
+- Додано keypool-specific helpers:
+  - `normalize_key_sort(...)`
+  - `list_provider_keys_with_stats(...)`
+  - `get_provider_keys_summary(...)`
+- Фільтри працюють по:
+  - `q`
+  - `provider`
+  - `status`
+- `ORDER BY` будується тільки через whitelist map, без сирого user input.
+
+Оновлений `db/keypool_repository.py`
+
+- `set_key_status(...)` тепер при поверненні ключа в `active` очищає `cooldown_until`, щоб ручний re-enable справді повертав ключ у rotation, а не лишав його формально active, але фактично заблокованим.
+
+Оновлений `app/admin_ui.py`
+
+- Додано nav link `/admin/keys`.
+- Додано рендер сторінки `render_admin_keys_page(...)`.
+- Додано маршрути:
+  - `GET /admin/keys`
+  - `POST /admin/keys/add`
+  - `POST /admin/keys/<id>/toggle`
+- Для add flow використовується існуючий `billing.keypool.register_key(...)`, тобто:
+  - ключ шифрується тим самим AES-GCM контуром;
+  - у базу йде ciphertext + hash, а не raw secret.
+- Для таблиці ключів введено маскування:
+  - prefix з `sha256[:8]`
+  - suffix з останніх 4 символів після розшифровки
+  - raw key у HTML не з'являється.
+- У UI є:
+  - summary по кількості ключів і статусах;
+  - таблиця зі spent USD, requests, cooldown, last error;
+  - add form;
+  - enable/disable toggle.
+
+### Тести
+
+Додано `tests/test_093_admin_keys.py`:
+
+- safe fallback для `normalize_key_sort(...)`
+- SQL/filter whitelist для `list_provider_keys_with_stats(...)`
+- summary-query для `get_provider_keys_summary(...)`
+- render-regression на:
+  - add form
+  - toggle action
+  - masked key
+  - відсутність raw secret у HTML
+- parser для `/admin/keys/<id>/toggle`
+
+Додатково повторно прогнано ширший admin-пакет:
+
+- `tests/test_071_admin_ui.py`
+- `tests/test_088_admin_repository.py`
+- `tests/test_089_admin_dashboard.py`
+- `tests/test_090_admin_transactions.py`
+- `tests/test_091_admin_chats.py`
+- `tests/test_092_admin_topups.py`
+- `tests/test_093_admin_keys.py`
+
+### Верифікація і деплой
+
+- Оновлено `multitenant-plan.md`, `devlog.md`, `server-smartest.md`.
+- У staging `/opt/smartest-staging` синхронізовано:
+  - `app/admin_ui.py`
+  - `db/admin_repository.py`
+  - `db/keypool_repository.py`
+  - `tests/test_093_admin_keys.py`
+  - docs по multitenant
+- Після sync staging прогнано повним `.venv/bin/python -m pytest -q --color=no`.
+- Після зеленого staging slice задеплоєно в live `/opt/smartest/app` з backup у `app.prev`.
+- Перезапущено `smartest-admin.service`.
+
+### Результат
+
+Stage 4.5A більше не має дірки в keypool UI. Тепер admin dashboard реально замкнутий у базовий multitenant control plane:
+
+- `/admin/users`
+- `/admin/users/<id>`
+- `POST /admin/users/<id>/credit`
+- `/admin/transactions`
+- `/admin/chats`
+- `/admin/topups`
+- `/admin/keys`
+
+Тобто seed / enable / disable / audit visibility по provider keys більше не залежать від ручного SQL.
+
+### Що далі
+
+Найближчі кроки після закриття Stage 4.5A:
+1. Засіяти `provider_keys` реальними ключами через `/admin/keys` і поступово витиснути `.env` fallback.
+2. Довести `pricing` таблицю до реальних тарифів, щоб Stage 2 закрився не тільки по runtime, а й по економіці.
+3. Починати `Stage 4.5B`: user portal + Telegram Login.
+
+---
+
+## Session 091 — 2026-04-18 — Технічний аудит multitenant гілки (Opus 4.7)
+
+**Контекст.** Над гілкою `gpt_wiser` (multitenant-робота) до цього працювала інша модель. Вона закрила Stage 4.5A (admin dashboard), довела keypool до runtime-інтеграції і додала вибір моделі в Telegram через `/model` з inline-клавіатурами. Я провів аудит того, що зроблено, що недокручено, і одна принципова річ — чи готова архітектура до сотні паралельних юзерів.
+
+**Куди записано детальний результат.** Повний звіт пішов у `docs/project/multitenant-plan.md`, Section 12 ("Технічний аудит 2026-04-18 (Opus 4.7)"). Там 6 підрозділів: що зроблено добре, 9 пронумерованих проблем (P1-P9), окрема велика секція про блокування event loop, список того що гарантовано не зламалось, порядок наступних дій, acceptance-критерії для перевірки.
+
+**Найважливіші знахідки у двох реченнях.**
+
+1. **Event loop блокується на кожному LLM-виклику.** `agent/llm.py:508::chat_once` синхронна, викликає sync OpenAI SDK і `requests.post` для Gemini, а з async `run_agent`/`run_capability`/`run_search`/`planner`/`search_task`/`chat_once_billed` кличеться напряму без `asyncio.to_thread`. Результат: 100 юзерів обслуговуються послідовно, кожен блокує всіх інших на 5-30 секунд, бот практично не масштабується. Фікс — обгорнути 8 callsite-ів в `asyncio.to_thread` (мінімум) або переписати на `AsyncOpenAI` + `httpx.AsyncClient` (правильно).
+
+2. **Baseline не готовий до реальних юзерів:** `pricing` таблиця порожня (всі transactions = 0 UAH), usage extraction для Gemini повертає 0/0 токенів, `/balance` досі без sub-transaction breakdown, TTS capability не входить у media-групу, voice і persona не в `/settings`. 131 файл uncommitted — деплою не буде поки не розберемо по стадіях.
+
+**Що зроблено добре, і це варто зберегти:**
+- `db/admin_repository.py` (867 рядків) і `app/admin_ui.py` (3635 рядків) — якісний адмін control plane зі безпечним sort через whitelist колонок.
+- `core/model_preferences.py` + `/model` inline keyboards — юзер в Telegram бачить тільки провайдерів з живими ключами.
+- `core/provider_registry.py::resolve_provider_binding` — чистий шлях з user_settings override + keypool cache на turn.
+- `billing/gateway.py` тепер протягує `key_id`, `record_success/rate_limit/error` — keypool rotation і cooldown живий.
+- Media pipeline (`media/voice.py`, `media/router.py`, `media/downloader.py`) давно загорнутий у `asyncio.to_thread` — цей патерн треба скопіювати на `chat_once`.
+- 7 нових тестових файлів (087-093) покривають multitenant-додавання.
+
+**Чому це важливо занотувати саме зараз.** Інша модель закрила великий пласт Stage 4.5A і `/model`-UI, а тепер черга — P0 блокери перед деплоєм. Якщо наступна сесія не знатиме про 12.3 (event loop) і 12.2.P7 (empty pricing), вона може вирішити "давайте задеплоїмо staging" і отримати замерзлий бот + 0 UAH списань.
+
+**Порядок робіт для наступної моделі** (детально в multitenant-plan.md §12.5):
+1. `asyncio.to_thread` для `chat_once` у 8 callsite-ах + тест на паралельність
+2. `DB_POOL_SIZE=50` у `.env`, thread pool sizing у `run.py`
+3. Seed `pricing` таблиці реальними тарифами квітня 2026
+4. Fix Gemini usage extraction у `agent/llm.py::_chat_once_gemini`
+5. Keypool-first policy у `resolve_provider_binding`
+6. TTS в media-групу, voice/persona в `/settings`
+7. Sub-transaction breakdown у `/balance`
+8. Розібрати 131 uncommitted файл у серію комітів по стадіях на гілку `multitenant`
+
+**Acceptance-критерії для фінального закриття Stage 4.5A+core** (з multitenant-plan.md §12.6):
+- тест `test_094_concurrent_llm.py` — 20 паралельних `run_capability` за час < 2× одного виклику
+- на staging `SELECT SUM(cost_uah) FROM transactions` після 10 turns — ненульова, розподілена по всіх провайдерах (включно з Gemini)
+- admin dashboard `/admin/users/<id>` — balance змінюється на точну суму списань, `key_id` всюди не NULL
+- `/balance turn <id>` показує planner → memory → search → chat окремо
+- PM2 logs без "event loop was blocked" при 20 одночасних запитах
+
+Session 092 — починати з Частини А (12.3). Після неї — все інше по §12.5.
+
+---
+
+## 2026-04-18 - Сесія 098 (Multitenant — репріоритизація плану після аудиту)
+
+### Контекст
+
+Після `Session 091` стало видно, що старий порядок "закрили Stage 4.5A, далі йдемо або в portal/login, або в косметичні Telegram-хвости" більше не відповідає реальному стану системи. Адмінський контур уже достатньо добрий, щоб ним користуватись, але ядро multitenant-рантайму ще має два системні борги: блокування event loop на sync LLM-викликах і незакриту економіку білінгу (`pricing`, Gemini usage, `.env` fallback як тіньовий основний сценарій).
+
+Це не той випадок, коли можна "ще трохи поробити UI, а потім повернутись". Якщо не зафіксувати новий порядок прямо в плані, наступна сесія легко піде в `Stage 4.5B` або polishing `/settings`, хоча головний ризик зараз зовсім не там.
+
+### Що зроблено
+
+Оновлено `docs/project/multitenant-plan.md`, щоб після аудиту там більше не було двох паралельних черг задач.
+
+У верхній частині плану тепер явно зафіксовано:
+
+- що активний спринт після аудиту — це runtime/core blockers з `§12.5`, а не `Stage 4.5B`;
+- що в "Що блокує деплой" першим пунктом іде event loop blocking, а не Telegram/UI-хвости;
+- що порожня `pricing` таблиця, Gemini usage extraction і `.env` fallback описані як реальні блокери економіки, а не другорядні задачі;
+- що `/balance` breakdown і voice/persona лишаються важливими, але стоять після runtime/performance і billing correctness;
+- що `Stage 4.5B` свідомо відсунений до моменту, коли ядро перестане бути крихким під навантаженням.
+
+Окремо в самому плані додано нову секцію "Поточний робочий порядок після аудиту 2026-04-18", де порядок уже сформульований прозою, а не тільки списком з `§12.5`. Це зроблено навмисно: наступна модель має зрозуміти не лише що робити, а й чому саме цей порядок тепер правильний.
+
+### Тести
+
+Кодових тестів не було, бо це чисто документаційна сесія. Перевірка полягала в тому, що:
+
+- новий верхній блок плану більше не суперечить висновкам `Session 091`;
+- `§12.5` лишився джерелом деталізації, але тепер підтриманий явним top-level пріоритетом;
+- старий неактуальний імпульс "після Stage 4.5A йдемо прямо в portal/login" більше не домінує в документі.
+
+### Результат
+
+План знову став узгодженим з аудитом. Тепер якщо нова сесія відкриє тільки верхню частину `multitenant-plan.md`, вона вже побачить правильний порядок: спочатку event loop, потім capacity, потім pricing + Gemini usage, потім keypool-first policy, і лише після цього user-facing хвости та portal.
+
+### Що далі
+
+Наступна робоча сесія по multitenant має починатись з Частини А `§12.3`:
+
+1. знайти всі async callsite-и `chat_once`;
+2. перевести їх на безпечний async bridge (`asyncio.to_thread` як мінімальний фікс);
+3. додати concurrency regression test;
+4. після цього переходити до capacity tuning і економічних фіксів з `§12.5`.
+
+---
+
+## 2026-04-19 - Сесія 099 (Multitenant §12.3 Part A — async bridge для sync LLM path)
+
+### Контекст
+
+Після аудиту в `Session 091` головний найближчий блокер був не в UI, а в execution path: `chat_once` лишався синхронним і викликався з async-контуру напряму. Це означало, що навіть при закритих Stage 4/4.5 multitenant-бот під реальним навантаженням поводився б майже послідовно: один LLM-виклик блокував event loop для всіх інших.
+
+Ця сесія закриває саме **Частину А з §12.3**. Завдання було не переписати весь transport на `AsyncOpenAI`/`httpx`, а прибрати найгрубіше блокування через безпечний проміжний крок: `asyncio.to_thread` у всіх async-місцях, де ми досі смикали sync LLM path напряму.
+
+### Що зроблено
+
+Оновлений `app/message_logic.py`
+
+- `plan_execution(...)` більше не викликає `plan_message(...)` напряму в async-контурі.
+- Planner тепер запускається через `await asyncio.to_thread(...)`, тому синхронний planner LLM path не блокує event loop повідомлень.
+
+Оновлений `agent/runner.py`
+
+- Усі sync `chat_once(...)` всередині async execution path переведені на `await asyncio.to_thread(...)`:
+  - search synthesis
+  - `run_capability(...)`
+  - перший reasoning/tool step у `run_agent(...)`
+  - наступні tool-loop ітерації
+- LLM-backed search evaluation теж більше не викликається напряму:
+  - `evaluate_search_step(...)`
+  - `evaluate_evidence(...)`
+  обгорнуті в thread bridge там, де їх кличе async runtime.
+
+Оновлений `agent/search_task.py`
+
+- `build_search_task(...)`, `plan_search_queries(...)` і `build_search_tasks(...)` більше не виконують LLM-backed composer/planner синхронно всередині async функцій.
+- `_build_single_search_task_from_context(...)` і `_plan_with_model(...)` тепер запускаються через `asyncio.to_thread(...)` із публічних async entrypoint-ів.
+
+Оновлений `billing/gateway.py`
+
+- `chat_once_billed(...)` більше не блокує event loop прямим sync LLM-викликом.
+- Сам виклик `chat_once(...)` переведений на thread bridge перед логуванням transaction.
+
+Оновлені memory-контури:
+
+- `memory/summarizer.py`
+- `memory/importance.py`
+- `memory/reflection.py`
+
+Там async функції теж більше не викликають `chat_once(...)` напряму. Це важливо, бо memory-фон міг так само серіалізувати корисні turn-и, навіть якщо основний chat path уже був би переведений.
+
+### Тести
+
+Додано новий файл `tests/test_094_concurrent_llm.py`:
+
+- `test_run_capability_offloads_chat_once_to_threads`
+  - перевіряє, що паралельні `run_capability(...)` справді заходять у `chat_once(...)` одночасно, а не по одному;
+- `test_run_capability_preserves_billing_context_inside_thread`
+  - перевіряє, що `BillingContext` не губиться при переході через `asyncio.to_thread(...)`;
+- `test_plan_execution_offloads_planner_call`
+  - окремо страхує planner path у `message_logic.plan_execution(...)`.
+
+Локально прогнано цільові пакети:
+
+- `tests/test_030_agent.py`
+- `tests/test_031_planner.py`
+- `tests/test_032_search_task.py`
+- `tests/test_038_search_evaluator.py`
+- `tests/test_043_search_synthesis.py`
+- `tests/test_060_message_logic.py`
+- `tests/test_061_message_logic_layers.py`
+- `tests/test_082_billing_gateway.py`
+- `tests/test_083_billing_runtime.py`
+- `tests/test_094_concurrent_llm.py`
+
+Усі локально зелені.
+
+### Верифікація і деплой
+
+- На staging `/opt/smartest-staging` синхронізовано runtime slice:
+  - `app/message_logic.py`
+  - `agent/runner.py`
+  - `agent/search_task.py`
+  - `billing/gateway.py`
+  - `memory/summarizer.py`
+  - `memory/importance.py`
+  - `memory/reflection.py`
+  - `tests/test_094_concurrent_llm.py`
+- Після sync прогнано **повний** `.venv/bin/python -m pytest -q --color=no` — зелений.
+- Після цього slice задеплоєно в live `/opt/smartest/app`.
+- Перед upload оновлено backup змінених файлів у `/opt/smartest/app.prev`.
+- Перезапущено `smartest-bot.service`.
+- Live verification:
+  - `smartest-bot.service` -> `active`
+  - systemd journal після рестарту без негайного traceback
+
+### Результат
+
+Частина А з `§12.3` більше не лишається планом. Найгрубіше блокування event loop на sync LLM-викликах знято: async execution path більше не кличе `chat_once(...)` напряму там, де це ламає паралельність.
+
+Це ще не фінальне performance-закриття всього multitenant runtime. Але тепер наступний спринт уже чесно зміщується з "прибрати blocking" на "довести середовище і економіку до нового execution path".
+
+### Що далі
+
+Після закриття Частини А наступний порядок такий:
+
+1. Частина Б з `§12.3` — `DB_POOL_SIZE`, sizing thread pool у `run.py`, перевірка acceptance під навантаженням.
+2. Seed `pricing` таблиці реальними тарифами.
+3. Fix Gemini usage extraction.
+4. Після цього вже keypool-first policy, `/balance` breakdown і user-facing хвости Stage 4.
+
+---
+
+## 2026-04-19 - Сесія 100 (Multitenant §12.3 Part B — DB pool і default executor sizing)
+
+### Контекст
+
+Після закриття Part A event loop уже не блокувався прямими sync LLM-викликами, але це було лише половиною performance-фіксу. Аудит прямо вказував, що без збільшення `DB_POOL_SIZE` і явного sizing для default thread pool ми просто перенесемо bottleneck в інше місце: з event loop у малий DB pool і дефолтний executor.
+
+Ця сесія закриває саме **Part B з §12.3**. Її мета — не “косметично додати ще дві змінні”, а довести execution environment до нового thread-bridge path так, щоб staging/live уже жили не на випадкових дефолтах Python і старому `DB_POOL_SIZE=10`.
+
+### Що зроблено
+
+Оновлений `core/env.py`
+
+- Додано `db_pool_size()` з production-default `50`.
+- Додано `llm_thread_pool_size()` з default `128`.
+
+Оновлений `db/connection.py`
+
+- `get_db_config()` більше не читає `DB_POOL_SIZE` напряму з локального `_env(..., "10")`.
+- Розмір пулу тепер централізовано йде через `core.env.db_pool_size()`, тому runtime і документація спираються на один контракт.
+
+Оновлений `run.py`
+
+- Додано `configure_runtime_executor(...)`.
+- На старті runtime тепер явно ставить `ThreadPoolExecutor(max_workers=LLM_THREAD_POOL_SIZE)` як default executor для `asyncio.to_thread(...)`.
+- У логах з'являється `runtime.executors_configured ...`, щоб на сервері було видно, з яким sizing піднявся процес.
+- На shutdown runtime тепер явно викликає `loop.shutdown_default_executor()`, а не покладається лише на непрозорий фінальний teardown циклу.
+
+Оновлений `.env-example`
+
+- Додано:
+  - `DB_POOL_SIZE=50`
+  - `LLM_THREAD_POOL_SIZE=128`
+
+### Тести
+
+Додано новий файл `tests/test_095_runtime_sizing.py`:
+
+- `test_db_pool_size_default_and_override`
+- `test_llm_thread_pool_size_default_and_override`
+- `test_configure_runtime_executor_sets_default_executor`
+- `test_main_shuts_down_default_executor`
+
+Локально прогнано:
+
+- `tests/test_033_provider_registry.py`
+- `tests/test_082_billing_gateway.py`
+- `tests/test_083_billing_runtime.py`
+- `tests/test_094_concurrent_llm.py`
+- `tests/test_095_runtime_sizing.py`
+
+Усі цільові локальні тести зелені.
+
+### Верифікація і деплой
+
+- На staging `/opt/smartest-staging` синхронізовано:
+  - `core/env.py`
+  - `db/connection.py`
+  - `run.py`
+  - `.env-example`
+  - `tests/test_095_runtime_sizing.py`
+- У staging `.env` виставлено:
+  - `DB_POOL_SIZE=50`
+  - `LLM_THREAD_POOL_SIZE=128`
+- Після цього прогнано **повний** `.venv/bin/python -m pytest -q --color=no` — зелений.
+- Після staging slice задеплоєно в live `/opt/smartest/app`.
+- Перед upload оновлено backup змінених файлів у `/opt/smartest/app.prev`.
+- У live `.env` виставлено:
+  - `DB_POOL_SIZE=50`
+  - `LLM_THREAD_POOL_SIZE=128`
+- Перезапущено `smartest-bot.service`.
+- Live verification:
+  - `smartest-bot.service` -> `active`
+  - `curl http://127.0.0.1:8787/health` -> `ok`
+  - `/opt/smartest/.env` уже містить `DB_POOL_SIZE=50` і `LLM_THREAD_POOL_SIZE=128`
+
+### Результат
+
+Part B з `§12.3` більше не лишається теорією. Runtime тепер живе на явному executor sizing і не впирається в старий pool-size default. Це не закриває весь performance-аудит назавжди, але знімає конкретний operational хвіст, який залишався після Part A.
+
+### Що далі
+
+Після закриття `§12.3 Parts A-B` наступний пріоритет уже не portal і не admin polish:
+
+1. Seed `pricing` таблиці реальними тарифами.
+2. Fix Gemini usage extraction.
+3. Після цього перевести runtime у keypool-first policy і добивати `/balance` breakdown та решту user-facing хвостів.
+
+## 2026-04-19 — Multitenant billing correctness: pricing seed + Gemini usage
+
+### Контекст
+
+Після закриття `§12.3 Parts A-B` наступний незакритий P0-блок уже був не в performance, а в чесності білінгу. У плані це висіло як дві окремі проблеми: порожня `pricing` таблиця і некоректний usage extraction для Gemini. Поки ці два місця лишались старими, multitenant-контур міг виглядати готовим, але фактично продовжувати логувати частину транзакцій у `0 UAH`.
+
+Окремо виліз ще один операційний хвіст: після того як `bootstrap_db()` почав автоматично сіяти `pricing`, утиліта `scripts/seed_pricing.py` стала робити подвійний прохід і друкувати неправдивий результат про кількість вставлених рядків. Це теж треба було закрити в цій самій сесії, інакше операторський інструмент залишався б брехливим.
+
+### Що зроблено
+
+Оновлений `billing/pricing_seed.py`
+
+- Додано канонічний набір `DEFAULT_PRICING_ROWS` для актуального модельного каталогу проєкту.
+- Seed-логіка стала консервативною: за замовчуванням вставляються лише missing rows, а `force=True` робить явний upsert.
+- Seed покриває LLM, STT, TTS і search-моделі, які реально присутні в поточному runtime-контурі.
+
+Оновлений `db/bootstrap.py`
+
+- `bootstrap_db()` тепер після `init_db()` і `apply_migrations()` автоматично викликає `seed_pricing_defaults()`.
+- Це означає, що порожня `pricing` таблиця більше не залежить від ручного SQL або від того, чи хтось не забув запустити окремий seed-скрипт.
+
+Оновлений `scripts/seed_pricing.py`
+
+- Скрипт більше не викликає `bootstrap_db()` напряму.
+- Замість цього він окремо робить `init_db()` + `apply_migrations()` і лише потім викликає `seed_pricing_defaults(...)`.
+- Через це скрипт знову чесно показує, скільки рядків він реально вставив або оновив, а не друкує нуль після автоматичного bootstrap seed.
+
+Оновлений `agent/llm.py`
+
+- Gemini wrapper тепер мапить `usageMetadata` у `.usage` не тільки з `promptTokenCount` і `candidatesTokenCount`, а й з `thoughtsTokenCount`.
+- `completion_tokens` для Gemini рахується як `candidates + thoughts`, а `total_tokens` береться з `totalTokenCount` або обчислюється як сума частин.
+
+Оновлений `billing/gateway.py`
+
+- `_extract_usage(...)` тепер правильно читає Gemini usage як з object-style, так і з dict-style payload.
+- Якщо явного `completion_tokens` немає, gateway складає `candidates` і `thoughts`, тому reasoning-виклики Gemini більше не логуються як `0 / 0`.
+
+Оновлений `tests/conftest.py`
+
+- Session-level DB bootstrap у тестовому середовищі тепер теж викликає `seed_pricing_defaults()`, щоб повний pytest жив не на порожній `pricing`, а на тому самому базовому економічному контракті, що й runtime.
+
+Додано `tests/test_096_pricing_seed.py`
+
+- `test_seed_pricing_defaults_inserts_only_missing`
+- `test_seed_pricing_defaults_force_upserts_existing`
+- `test_bootstrap_db_seeds_pricing_after_migrations`
+- `test_seed_pricing_script_reports_actual_insert_count`
+
+Також оновлено:
+
+- `tests/test_036_gemini_adapter.py`
+- `tests/test_082_billing_gateway.py`
+
+щоб вони явно покривали `thoughtsTokenCount` і Gemini completion accounting.
+
+### Тести
+
+Локально прогнано без `conftest`-DB fixture, бо на dev-машині нема MariaDB:
+
+- `tests/test_036_gemini_adapter.py`
+- `tests/test_082_billing_gateway.py`
+- `tests/test_095_runtime_sizing.py`
+- `tests/test_096_pricing_seed.py`
+
+Результат: цільовий пакет зелений (`22 passed`).
+
+### Верифікація і деплой
+
+- На staging `/opt/smartest-staging` синхронізовано:
+  - `billing/pricing_seed.py`
+  - `db/bootstrap.py`
+  - `agent/llm.py`
+  - `billing/gateway.py`
+  - `scripts/seed_pricing.py`
+  - `tests/test_036_gemini_adapter.py`
+  - `tests/test_082_billing_gateway.py`
+  - `tests/test_096_pricing_seed.py`
+  - `tests/conftest.py`
+- Після sync staging прогнано **повний** `.venv/bin/python -m pytest -q --color=no` -> зелений.
+- У live `/opt/smartest/app` задеплоєно runtime slice:
+  - `billing/pricing_seed.py`
+  - `db/bootstrap.py`
+  - `agent/llm.py`
+  - `billing/gateway.py`
+  - `scripts/seed_pricing.py`
+- Для rollback оновлено backup тих самих файлів у `/opt/smartest/app.prev`.
+- Перезапущено `smartest-bot.service`.
+- Live verification:
+  - `smartest-bot.service` -> `active`
+  - `/opt/smartest/.env` містить валідні DB credentials для live-контуру
+  - прямий probe через `bootstrap_db()` + `SELECT COUNT(*) FROM pricing` повернув `pricing_rows=27`
+
+### Результат
+
+Порожня `pricing` таблиця перестала бути системним багом. Missing rows тепер автоматично з’являються під час bootstrap, а Gemini reasoning-виклики більше не знецінюються через те, що wrapper губив thought tokens. Тобто multitenant-білінг після цієї сесії вже не “існує на папері”, а має базову правильну економіку.
+
+### Що далі
+
+Після цього пріоритет зміщується з billing correctness на policy-level доведення runtime:
+
+1. Keypool-first policy замість великого `.env` fallback.
+2. `/balance` з реальним sub-transaction breakdown.
+3. Потім уже voice/persona хвости в Telegram `/settings` і Stage 4.5B portal/login.
+
+## 2026-04-19 — Multitenant keypool-first policy for billed turns
+
+### Контекст
+
+Після того як `pricing` і Gemini usage вже були виправлені, залишався ще один критичний policy-ризик: runtime у billed turn усе ще міг тихо взяти ключ із `.env`, хоча keypool уже існував. Це робило multitenant-контур формально робочим, але ламало attribution: транзакція могла бути коректно порахована, але без `key_id`, а отже `/admin/keys` і вся статистика по пулу бачила не реальний execution path, а тіньовий env-сценарій.
+
+Тут важливо було не "заборонити `.env` будь-якою ціною", а перевести систему в правильний пріоритет. Для повноцінного billing-turn keypool має бути primary, а env — лише контрольованим аварійним fallback, який видно в логах і в binding metadata.
+
+### Що зроблено
+
+Оновлений `core/provider_registry.py`
+
+- Додано явне розрізнення між звичайним runtime path і billed turn path.
+- Якщо `billing_context.is_complete()`, `resolve_provider_binding(...)` тепер:
+  - спочатку пробує keypool;
+  - лише якщо keypool не дав ключ, переходить до env;
+  - якщо довелося взяти env-ключ, маркує binding як `key_source='env_fallback'`, а не просто `env`.
+- Додано warning `provider_registry.env_fallback_used ...`, щоб billed env-fallback був видимий операційно.
+- Warning дедуплікується в межах turn-а через `BillingContext.meta`, щоб один і той самий fallback не заспамив лог на кожному capability call.
+
+При цьому небілінговий path не зламаний:
+
+- поза billing-turn explicit `CAPABILITY_*_API_KEY` як і раніше може перемагати keypool;
+- dev/staging сценарії без повного `BillingContext` не втратили робочий `.env` fallback.
+
+Оновлений `tests/test_033_provider_registry.py`
+
+- Додано регресію на billed turn, де keypool тепер перемагає навіть capability env key.
+- Додано регресію на env-fallback у billed turn з перевіркою:
+  - `key_source == 'env_fallback'`
+  - warning логиться один раз, а не на кожен повторний bind у межах того самого turn-а.
+
+### Тести
+
+Локально прогнано без DB fixture:
+
+- `tests/test_033_provider_registry.py`
+- `tests/test_084_chat_once_billing_hook.py`
+- `tests/test_087_user_model_binding.py`
+
+Результат: цільовий пакет зелений (`16 passed`).
+
+### Верифікація і деплой
+
+- На staging `/opt/smartest-staging` синхронізовано:
+  - `core/provider_registry.py`
+  - `tests/test_033_provider_registry.py`
+- Після sync staging прогнано **повний** `.venv/bin/python -m pytest -q --color=no` -> зелений.
+- У live `/opt/smartest/app` задеплоєно:
+  - `core/provider_registry.py`
+- Для rollback оновлено backup цього файлу в `/opt/smartest/app.prev`.
+- Перезапущено `smartest-bot.service`.
+- Live verification:
+  - `smartest-bot.service` -> `active`
+  - прямий probe на live-коді показує, що billed binding більше не маскує env як звичайний path: якщо keypool порожній, binding маркується як `env_fallback`
+
+### Результат
+
+Keypool-first policy для billed turns більше не лишається планом. Runtime тепер віддає пріоритет `provider_keys` там, де це реально важливо для multitenant-білінгу, а env став не тіньовим основним шляхом, а явним fallback-сценарієм.
+
+### Що далі
+
+Після цього найправильніший наступний крок уже не в provider policy, а в user-facing transparency:
+
+1. `/balance` з реальним sub-transaction breakdown.
+2. Потім voice/persona хвости в Telegram `/settings`.
+3. Далі вже Stage 4.5B portal/login.
+
+## 2026-04-19 — Multitenant `/balance` sub-transaction breakdown
+
+### Контекст
+
+Після того як runtime вже перестав блокувати event loop, `pricing` перестала бути порожньою, Gemini usage почав рахуватись коректно, а billed turns отримали keypool-first policy, лишався ще один user-facing борг із аудиту `Session 091`: `/balance` досі показував лише агреговані суми та останні turn-и без реального breakdown по sub-транзакціях. Це ламало головну обіцянку multitenant-білінгу — прозорість витрат.
+
+### Що зроблено
+
+Оновлений `db/transactions_repository.py`
+
+- Додано `get_latest_turn_for_account(account_id)`.
+- Додано `find_turns_for_account(account_id, turn_ref, limit)` для безпечного пошуку turn-а тільки в межах акаунта за повним id або префіксом.
+
+Оновлений `billing/commands.py`
+
+- `/balance` більше не віддає заглушку про "допиляємо у Stage 4".
+- Додано два режими:
+  - `/balance last` — розгортає останній turn;
+  - `/balance turn <id>` — розгортає конкретний turn за id або унікальним префіксом.
+- Breakdown рендерить:
+  - turn id;
+  - сумарну вартість;
+  - статус, route, capability;
+  - user message excerpt;
+  - список sub-транзакцій із `capability`, `provider`, `model`, `kind`, usage counters, `cost_uah`.
+- У базовому `/balance` overview тепер показуються короткі turn id і підказки:
+  - `/balance last`
+  - `/balance turn <id>`
+- Додано захист від неоднозначного префікса turn id: бот просить уточнити id замість того, щоб показати не той breakdown.
+
+Оновлений `tests/test_086_billing_commands.py`
+
+- Додано регресії на:
+  - `/balance last`;
+  - `/balance turn <id>`;
+  - неоднозначний turn prefix;
+  - нові підказки у стандартному `/balance`.
+
+### Тести
+
+Локально прогнано:
+
+- `pytest -q --noconftest tests/test_086_billing_commands.py`
+
+Результат: зелений (`35 passed`).
+
+### Верифікація і деплой
+
+- Після docs/code sync на staging прогнано **повний** `.venv/bin/python -m pytest -q --color=no` -> зелений.
+- У live `/opt/smartest/app` задеплоєно:
+  - `db/transactions_repository.py`
+  - `billing/commands.py`
+  - `tests/test_086_billing_commands.py`
+  - multitenant docs
+- Для rollback оновлено backup змінених runtime-файлів у `/opt/smartest/app.prev`.
+- Перезапущено `smartest-bot.service`.
+
+### Результат
+
+`/balance` перестав бути просто summary-командою. Після цієї сесії юзер уже бачить не тільки загальну суму, а й реальний breakdown конкретного turn-а по sub-транзакціях, заради якого весь multitenant-білінг і будувався.
+
+### Що далі
+
+Після закриття `/balance` breakdown у Stage 4 лишаються вже не billing-core борги, а user-facing хвости:
+
+1. Voice і persona в Telegram `/settings`.
+2. TTS як частина media-group.
+3. Потім уже Stage 4.5B portal/login.
+
+## 2026-04-19 — Multitenant voice/persona в Telegram `/settings`
+
+### Контекст
+
+Після runtime і billing-фіксів у Stage 4 лишався вже не економічний, а user-facing хвіст: у Telegram `/settings` були моделі для трьох груп і chat policy, але не було двох речей, які прямо згадані в multitenant-спеці — персонального голосу озвучки і персонального persona override. Через це `user_settings` уже впливали на `provider/model`, але не доводилися до природного кінця: TTS і prompt-layer усе ще жили на server defaults.
+
+### Що зроблено
+
+Додано новий runtime helper:
+
+- `core/runtime_user_settings.py`
+
+Він дає єдину точку доступу до `BillingContext.meta["user_settings"]`, щоб prompt-layer, provider registry і TTS не дублювали одну й ту саму логіку читання поточного користувацького профілю.
+
+Додано catalog для user-facing voice/persona:
+
+- `core/user_preferences.py`
+
+У ньому зафіксовано:
+
+- whitelist голосів озвучки (`VOICE_OPTIONS`);
+- whitelist persona presets (`PERSONA_PRESETS`);
+- helpers для валідації `voice_id` і `persona_slug`.
+
+Оновлено prompt-layer:
+
+- `core/prompts.py`
+
+Що змінилось:
+
+- з'явився `resolve_persona_for_user()`;
+- persona тепер складається з двох шарів:
+  - глобальний server persona з `SYSTEM_MESSAGES_GPT_PROMPT`;
+  - user-specific override з `user_settings["persona_slug"]`;
+- це застосовується не лише до `chat_final`, а й до search synthesis, тобто персональний стиль не губиться на explicit-search flow.
+
+Оновлено TTS runtime:
+
+- `media/voice.py`
+
+Що змінилось:
+
+- TTS більше не бере голос тільки з `OPENAI_VOCALIZER_VOICE`;
+- тепер спочатку читається `user_settings["voice_id"]`;
+- якщо override невалідний або відсутній, використовується server default.
+
+Оновлено Telegram settings UI:
+
+- `billing/commands.py`
+
+Що змінилось:
+
+- root menu `/model` і `/settings` тепер показує не лише модельні групи, а й:
+  - `🎙 Голос`
+  - `🎭 Persona`
+- додані окремі inline menus для голосу і persona;
+- callback-и зберігають значення в `user_settings` під ключами:
+  - `voice_id`
+  - `persona_slug`
+- після вибору юзер одразу повертається в root settings menu із зафіксованим новим станом.
+
+Дочищено shared runtime helper:
+
+- `core/provider_registry.py`
+
+Локальний приватний reader `BillingContext.meta["user_settings"]` прибрано, замість нього використовується новий спільний helper.
+
+### Тести
+
+Додані нові регресії:
+
+- `tests/test_098_prompt_persona_override.py`
+- `tests/test_099_voice_persona_settings.py`
+
+Що вони перевіряють:
+
+- persona override реально домішується в `capability_system_prompt()` і `search_synthesis_system_prompt()`;
+- TTS synth path реально бере `voice_id` з runtime user settings;
+- Telegram callback flow реально зберігає `voice_id` і `persona_slug` у `user_settings`.
+
+Додатково прогнано ширший уже існуючий пакет:
+
+- `tests/test_037_prompts.py`
+- `tests/test_062_voice_commands.py`
+- `tests/test_086_billing_commands.py`
+- `tests/test_087_user_model_binding.py`
+
+### Верифікація і деплой
+
+- Локально:
+  - `py_compile` для змінених runtime/test файлів — зелений
+  - цільовий pytest пакет — зелений
+- На staging після sync прогнано **повний** `.venv/bin/python -m pytest -q --color=no` -> зелений
+- У live `/opt/smartest/app` задеплоєно:
+  - `core/runtime_user_settings.py`
+  - `core/user_preferences.py`
+  - `core/prompts.py`
+  - `core/provider_registry.py`
+  - `media/voice.py`
+  - `billing/commands.py`
+  - multitenant docs
+- Для rollback оновлено backup змінених runtime-файлів у `/opt/smartest/app.prev`
+- Перезапущено:
+  - `smartest-bot.service`
+
+### Результат
+
+Stage 4 більше не зупиняється на виборі моделей. Після цього фіксу Telegram `/settings` реально став персональним control surface: юзер може окремо вибрати не лише `provider/model`, а й голос озвучки та persona, і runtime це справді читає на фінальній відповіді.
+
+### Що далі
+
+User-facing хвости Stage 4 після цього фактично закриті. Далі вже лишаються або більші architectural задачі:
+
+1. `chat_once_async` і прибирання `_run_async_sync`
+2. Stage 4.5B — portal/login
+3. подальше звуження `.env` fallback після реального засіву `provider_keys`

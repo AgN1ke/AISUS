@@ -23,6 +23,7 @@ from agent.search_task import (
     suggest_retry_query,
     trim_terminal_user_duplicate,
 )
+from agent.tools.fetch_page import fetch_page
 from agent.tools.web_search import extract_search_pages, search_web
 from core.env import capability_model, env_bool, env_int
 from core.prompts import (
@@ -30,6 +31,7 @@ from core.prompts import (
     capability_system_prompt,
     search_synthesis_system_prompt,
 )
+from core.reasoning import explicit_reasoning_requested
 from memory import memory_manager
 
 logger = logging.getLogger(__name__)
@@ -110,9 +112,10 @@ def _normalize_query(user_text: str) -> str:
     return normalize_search_query(user_text)
 
 
-def _format_sources(sources: list[NormalizedResult]) -> str:
-    del sources
-    return ""
+def _needs_reasoning(user_text: str) -> bool:
+    return explicit_reasoning_requested(user_text)
+
+
 
 
 def _strip_sources_block(answer: str) -> str:
@@ -224,15 +227,55 @@ def _format_page_evidence(pages: list[NormalizedResult]) -> str:
     return "\n\n".join(blocks).strip()
 
 
+_TRUSTED_SEARCH_PROVIDERS = {
+    "brave_search",
+    "serper",
+    "openai_search",
+    "gemini_search",
+    "exa_search",
+    "tavily",
+    "bing_html",
+}
+
+
+def _search_reason_looks_junk(reason: str | None) -> bool:
+    text = (reason or "").strip().lower()
+    if not text:
+        return False
+    return any(
+        marker in text
+        for marker in (
+            "junk",
+            "нерелев",
+            "не стосу",
+            "off-topic",
+            "unrelated",
+            "forum",
+            "random",
+        )
+    )
+
+
 def _search_evidence_is_actionable(
-    results: list[NormalizedResult], pages: list[NormalizedResult]
+    results: list[NormalizedResult],
+    pages: list[NormalizedResult],
+    *,
+    evaluation_reason: str | None = None,
 ) -> bool:
     if pages:
         return True
-    if len(results) < 3:
+    if not results or _search_reason_looks_junk(evaluation_reason):
         return False
     domains = {result.domain for result in results if result.domain}
-    return len(domains) >= 2
+    if len(results) >= 2 and len(domains) >= 2:
+        return True
+    top = results[0]
+    if top.relevance_score >= 0.55:
+        return True
+    return (
+        top.relevance_score >= 0.3
+        and (top.source_provider or "") in _TRUSTED_SEARCH_PROVIDERS
+    )
 
 
 def _item_value(item: dict | object, field: str) -> str:
@@ -274,6 +317,7 @@ class SynthesisInput:
     evidence: EvidencePack
     style_policy: str
     dialogue_context: list[dict]
+    evidence_status: str = ""
 
 
 _INLINE_CITATION_RE = re.compile(r"(?<!\[)\[(\d{1,2})\](?!\()")
@@ -418,6 +462,8 @@ def _build_synthesis_input(
     user_text: str,
     evidence: EvidencePack,
     context_msgs: list[dict],
+    *,
+    evidence_status: str = "",
 ) -> SynthesisInput:
     return SynthesisInput(
         user_intent=(user_text or "").strip(),
@@ -426,6 +472,7 @@ def _build_synthesis_input(
             "Keep the same bot persona and Telegram tone, but do not mention internal search steps."
         ),
         dialogue_context=_build_synthesis_dialogue_context(context_msgs),
+        evidence_status=(evidence_status or "").strip(),
     )
 
 
@@ -439,6 +486,8 @@ def _build_synthesis_user_message(
         parts.append(f"Recent dialogue context for tone only:\n{dialogue_text}")
     if synthesis_input.style_policy:
         parts.append(f"Style policy:\n{synthesis_input.style_policy}")
+    if synthesis_input.evidence_status:
+        parts.append(f"Evidence status:\n{synthesis_input.evidence_status}")
     parts.append(f"Evidence:\n{evidence_text}")
     return "\n\n".join(part for part in parts if part.strip()), citation_map
 
@@ -510,7 +559,8 @@ async def _collect_search_evidence(
             profile=profile,
             need_primary_source=getattr(task, "need_primary_source", False),
         )
-    task_evaluation = evaluate_search_step(
+    task_evaluation = await asyncio.to_thread(
+        evaluate_search_step,
         task.original_request,
         query,
         results,
@@ -831,10 +881,11 @@ async def _run_direct_search(
             len(aggregated_pages),
             aggregated_coverage,
         )
-        evaluation = evaluate_evidence(
+        evaluation = await asyncio.to_thread(
+            evaluate_evidence,
             plan,
             aggregated_evidence,
-            attempt=attempt,
+            attempt,
         )
         logger.info(
             "search.parallel_evaluate chat_id=%s attempt=%s sufficient=%s retry=%s reason=%s coverage=%s",
@@ -954,6 +1005,7 @@ async def _run_direct_search(
     if not final_sufficient and _search_evidence_is_actionable(
         aggregated_results,
         aggregated_pages,
+        evaluation_reason=(evaluation.reason if evaluation else ""),
     ):
         final_sufficient = True
 
@@ -981,6 +1033,22 @@ async def _run_direct_search(
         )
         return failure_text
 
+    evidence_status = ""
+    if evaluation and not evaluation.sufficient:
+        evidence_status = (
+            "Evidence is partial. Give a best-effort answer based only on the retrieved "
+            "results, state uncertainty directly, and do not pretend the picture is complete."
+        )
+        logger.info(
+            "search.best_effort_synthesis chat_id=%s queries=%s attempts=%s results=%s pages=%s reason=%s",
+            chat_id,
+            [query[:120] for query in executed_queries],
+            total_attempts,
+            len(aggregated_results),
+            len(aggregated_pages),
+            evaluation.reason,
+        )
+
     evidence_parts = [
         f"Початковий запит користувача:\n{user_text}",
         "Заплановані пошукові підзапити:\n"
@@ -1003,6 +1071,7 @@ async def _run_direct_search(
             retry_queries=aggregated_retry_queries,
         ),
         context,
+        evidence_status=evidence_status,
     )
     synthesis_user_message, citation_map = _build_synthesis_user_message(
         synthesis_input
@@ -1012,7 +1081,8 @@ async def _run_direct_search(
         synthesis_input.dialogue_context,
         synthesis_user_message,
     )
-    response = chat_once(
+    response = await asyncio.to_thread(
+        chat_once,
         messages,
         tools=None,
         use_reasoning=use_reasoning,
@@ -1023,9 +1093,6 @@ async def _run_direct_search(
     answer = (response.choices[0].message.content or "").strip()
     if not answer:
         answer = "Не вдалося зібрати нормальну відповідь із результатів пошуку."
-    sources_block = _format_sources(aggregated_results)
-    if sources_block:
-        answer = f"{answer}\n\nДжерела:\n{sources_block}".strip()
     answer = _strip_sources_block(answer)
     answer = _apply_inline_citation_links(answer, citation_map)
     answer = _ensure_answer_has_citations(answer, citation_map)
@@ -1035,7 +1102,7 @@ async def _run_direct_search(
         planned_queries,
         aggregated_results,
         answer,
-        status="success",
+        status="best_effort" if evidence_status else "success",
     )
     logger.info(
         "search.finish chat_id=%s answer_len=%s sources=%s model=%s attempts=%s sufficient=%s tasks=%s coverage=%s",
@@ -1089,7 +1156,8 @@ async def run_capability(
     system_prompt = _system_prompt_for_capability(capability)
     model = capability_model(capability)
     messages = make_messages(system_prompt, context, user_text)
-    response = chat_once(
+    response = await asyncio.to_thread(
+        chat_once,
         messages,
         tools=None,
         use_reasoning=use_reasoning,
@@ -1182,7 +1250,8 @@ async def run_agent(chat_id: int, user_text: str) -> str:
     tools = tool_spec()
     used_sources: list[dict] = []
 
-    response = chat_once(
+    response = await asyncio.to_thread(
+        chat_once,
         messages,
         tools=tools,
         use_reasoning=use_reasoning,
@@ -1196,9 +1265,6 @@ async def run_agent(chat_id: int, user_text: str) -> str:
         tool_calls = getattr(message, "tool_calls", None) or []
         if not tool_calls:
             answer = (message.content or "").strip()
-            sources_block = _format_sources(used_sources)
-            if sources_block:
-                answer = f"{answer}\n\nДжерела:\n{sources_block}".strip()
             if used_sources:
                 await _append_search_memory_event(
                     chat_id,
@@ -1274,9 +1340,10 @@ async def run_agent(chat_id: int, user_text: str) -> str:
                     )
                 )
 
-        response = chat_once(
+        response = await asyncio.to_thread(
+            chat_once,
             messages,
-            tools=None,
+            tools=tools,
             use_reasoning=use_reasoning,
             capability="agent_reasoning",
         )
@@ -1285,9 +1352,6 @@ async def run_agent(chat_id: int, user_text: str) -> str:
         response.choices[0].message.content
         or "Не вдалося завершити міркування. Дай мені ще підказку."
     )
-    sources_block = _format_sources(used_sources)
-    if sources_block:
-        final = f"{final.strip()}\n\nДжерела:\n{sources_block}"
     if used_sources:
         await _append_search_memory_event(
             chat_id,

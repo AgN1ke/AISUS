@@ -237,7 +237,7 @@ async def test_build_search_tasks_falls_back_when_planner_invalid(monkeypatch):
 
     # Fallback: single task with the direct normalized query
     assert len(tasks) == 1
-    assert tasks[0].source == "direct_normalized"
+    assert tasks[0].source == "heuristic_context"
 
 
 def test_trim_terminal_user_duplicate():
@@ -251,6 +251,22 @@ def test_trim_terminal_user_duplicate():
     )
 
     assert trimmed == [{"role": "assistant", "content": "старий хід"}]
+
+
+def test_context_excerpt_keeps_chat_turn_metadata():
+    excerpt = search_task._context_excerpt(
+        [
+            {
+                "role": "system",
+                "content": "[CHAT-TURN]\nsender: Микита @mikita\nreply_target_author: Олег @oleh",
+            },
+            {"role": "user", "content": "ну загугли"},
+        ]
+    )
+
+    assert "[CHAT-TURN]" in excerpt
+    assert "sender: Микита @mikita" in excerpt
+    assert "user: ну загугли" in excerpt
 
 
 def test_normalize_search_query_strips_command_prefix():
@@ -333,5 +349,10 @@ def test_is_explicit_search_request():
     assert search_task.is_explicit_search_request("пошукай новини про AI") is True
     assert search_task.is_explicit_search_request("погугли щось") is True
     assert search_task.is_explicit_search_request("загугли це") is True
+    assert search_task.is_explicit_search_request("шукай!") is True
+    assert search_task.is_explicit_search_request("ні, на воді як пальне, шукай!") is True
+    assert search_task.is_explicit_search_request("гугли") is True
+    assert search_task.is_explicit_search_request("search for this") is True
+    assert search_task.is_explicit_search_request("google it") is True
     assert search_task.is_explicit_search_request("що таке Python") is False
     assert search_task.is_explicit_search_request("") is False

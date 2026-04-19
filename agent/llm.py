@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import asyncio
+import logging
 import re
+import time
 from functools import lru_cache
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
@@ -10,10 +13,11 @@ from openai import OpenAI
 
 from core.env import (
     GEMINI_DEFAULT_BASE_URL,
+    can_reason,
+    capability_reasoning_effort,
+    capability_reasoning_enabled,
+    gemini_thinking_level,
     gemini_thinking_budget,
-    provider_supports_reasoning,
-    reasoning_effort,
-    reasoning_model,
 )
 from core.provider_registry import (
     ProviderBinding,
@@ -21,6 +25,66 @@ from core.provider_registry import (
     is_openai_compatible,
     resolve_provider_binding,
 )
+
+logger = logging.getLogger(__name__)
+
+
+def _maybe_emit_billing(
+    *,
+    response: Any,
+    capability: str,
+    binding: ProviderBinding,
+    model_name: str,
+    started_at: float,
+    status: str = "success",
+    error_text: str | None = None,
+) -> None:
+    """Schedule a transactions row write if a BillingContext is active.
+
+    Fire-and-forget — the transaction may land slightly after the caller
+    moves on. Errors inside the logger are swallowed and logged.
+    """
+    try:
+        from billing.runtime import current_billing_context
+        from billing.gateway import log_llm_transaction
+    except Exception:
+        return
+
+    ctx = current_billing_context()
+    if ctx is None or not ctx.is_complete():
+        return
+
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+
+    latency_ms = int((time.monotonic() - started_at) * 1000)
+    coro = log_llm_transaction(
+        response,
+        billing_context=ctx,
+        capability=capability,
+        provider=binding.provider,
+        model=model_name,
+        key_id=binding.key_id,
+        latency_ms=latency_ms,
+        status=status,
+        error_text=error_text,
+    )
+    try:
+        task = loop.create_task(coro)
+        task.add_done_callback(_billing_task_done)
+    except Exception as exc:
+        logger.debug("llm.billing_schedule_failed: %s", exc)
+
+
+def _billing_task_done(task: "asyncio.Task[Any]") -> None:
+    try:
+        exc = task.exception()
+    except (asyncio.CancelledError, asyncio.InvalidStateError):
+        return
+    if exc is not None:
+        logger.warning("llm.billing_log_error: %s", exc)
 
 _DATA_URL_RE = re.compile(
     r"^data:(?P<mime>[^;]+);base64,(?P<data>.+)$",
@@ -63,17 +127,57 @@ def _get_client(binding: ProviderBinding) -> OpenAI:
     return get_llm_client(binding.provider, binding.api_key or "", binding.base_url)
 
 
-def _maybe_reasoning_args(capability: str, use_reasoning: bool) -> dict:
-    current_reasoning_model = reasoning_model()
-    if not use_reasoning or not current_reasoning_model:
+def _normalize_reasoning_effort(provider: str, model: str, effort: str) -> str:
+    raw = (effort or "").strip().lower()
+    if raw not in {"none", "low", "medium", "high", "xhigh"}:
+        raw = "medium"
+    provider_name = (provider or "").strip().lower()
+    model_name = (model or "").strip().lower()
+    if provider_name in {"openai", "openrouter"} and any(
+        tag in model_name for tag in ("o1", "o3", "o4")
+    ):
+        if raw == "none":
+            return "low"
+        if raw == "xhigh":
+            return "high"
+    return raw
+
+
+def _reasoning_active(
+    binding: ProviderBinding,
+    model_name: str,
+    use_reasoning: bool,
+) -> bool:
+    if not use_reasoning:
+        return False
+    if not capability_reasoning_enabled(binding.capability):
+        return False
+    provider_name = (binding.provider or "").strip().lower()
+    if provider_name == "deepseek":
+        return "reasoner" in (model_name or "").strip().lower()
+    return can_reason(provider_name, model_name)
+
+
+def _maybe_reasoning_args(
+    binding: ProviderBinding,
+    model_name: str,
+    use_reasoning: bool,
+) -> dict:
+    if not _reasoning_active(binding, model_name, use_reasoning):
         return {}
-    binding = _resolve_binding(capability)
-    if not is_openai_compatible(binding):
+    effort = _normalize_reasoning_effort(
+        binding.provider,
+        model_name,
+        capability_reasoning_effort(binding.capability),
+    )
+    provider_name = (binding.provider or "").strip().lower()
+    if provider_name == "openrouter":
+        if "reasoner" in (model_name or "").strip().lower():
+            return {}
+        return {"extra_body": {"reasoning": {"effort": effort}}}
+    if provider_name != "openai":
         return {}
-    provider = binding.provider
-    if not provider_supports_reasoning(provider):
-        return {}
-    return {"reasoning": {"effort": reasoning_effort()}}
+    return {"reasoning": {"effort": effort}}
 
 
 def _pick_model(
@@ -81,23 +185,46 @@ def _pick_model(
     reasoning: bool,
     model_override: Optional[str] = None,
 ) -> str:
-    if model_override:
-        return binding.model
-    current_reasoning_model = reasoning_model()
+    del model_override
+    model_name = binding.model
+    if not reasoning or not capability_reasoning_enabled(binding.capability):
+        return model_name
     if (
-        reasoning
-        and current_reasoning_model
-        and is_openai_compatible(binding)
-        and provider_supports_reasoning(binding.provider)
+        (binding.provider or "").strip().lower() == "deepseek"
+        and "reasoner" not in (model_name or "").strip().lower()
     ):
-        return current_reasoning_model
-    return binding.model
+        return "deepseek-reasoner"
+    return model_name
 
 
-def _response_with_content(text: str):
+def _response_with_content(text: str, usage: SimpleNamespace | None = None):
     message = SimpleNamespace(content=text, tool_calls=None)
     choice = SimpleNamespace(message=message)
-    return SimpleNamespace(choices=[choice])
+    response = SimpleNamespace(choices=[choice])
+    if usage is not None:
+        response.usage = usage
+    return response
+
+
+def _gemini_usage(data: dict[str, Any]) -> SimpleNamespace | None:
+    meta = data.get("usageMetadata") or data.get("usage_metadata")
+    if not isinstance(meta, dict):
+        return None
+    prompt = int(meta.get("promptTokenCount") or meta.get("prompt_token_count") or 0)
+    candidate_tokens = int(
+        meta.get("candidatesTokenCount") or meta.get("candidates_token_count") or 0
+    )
+    thought_tokens = int(
+        meta.get("thoughtsTokenCount") or meta.get("thoughts_token_count") or 0
+    )
+    total = int(meta.get("totalTokenCount") or meta.get("total_token_count") or 0)
+    return SimpleNamespace(
+        prompt_tokens=prompt,
+        completion_tokens=candidate_tokens + thought_tokens,
+        candidates_tokens=candidate_tokens,
+        thoughts_tokens=thought_tokens,
+        total_tokens=total or (prompt + candidate_tokens + thought_tokens),
+    )
 
 
 def _text_from_content(content: Any) -> str:
@@ -191,6 +318,8 @@ def _messages_to_gemini_payload(
     temperature: float,
     max_tokens: int | None,
     model: str,
+    reasoning_active: bool,
+    capability: str,
 ) -> dict[str, Any]:
     system_texts: list[str] = []
     contents: list[dict[str, Any]] = []
@@ -234,7 +363,20 @@ def _messages_to_gemini_payload(
         }
     if max_tokens is not None:
         payload["generationConfig"]["maxOutputTokens"] = max_tokens
-    thinking_budget = gemini_thinking_budget(model)
+    thinking_level = gemini_thinking_level(
+        model,
+        reasoning_active=reasoning_active,
+        capability=capability,
+    )
+    if thinking_level is not None:
+        payload["generationConfig"]["thinkingConfig"] = {
+            "thinkingLevel": thinking_level
+        }
+    thinking_budget = gemini_thinking_budget(
+        model,
+        reasoning_active=reasoning_active,
+        capability=capability,
+    )
     if thinking_budget is not None:
         payload["generationConfig"]["thinkingConfig"] = {
             "thinkingBudget": thinking_budget
@@ -276,6 +418,7 @@ def _chat_once_gemini(
     temperature: float,
     model: str,
     tools: Optional[List[Dict[str, Any]]],
+    reasoning_active: bool,
     **extra_kwargs: Any,
 ):
     if tools:
@@ -292,6 +435,8 @@ def _chat_once_gemini(
         temperature=temperature,
         max_tokens=extra_kwargs.get("max_tokens"),
         model=model,
+        reasoning_active=reasoning_active,
+        capability=binding.capability,
     )
     response = requests.post(
         _gemini_endpoint(binding, model),
@@ -315,7 +460,7 @@ def _chat_once_gemini(
         ) from exc
 
     data = response.json()
-    return _response_with_content(_gemini_extract_text(data))
+    return _response_with_content(_gemini_extract_text(data), usage=_gemini_usage(data))
 
 
 def tool_spec() -> List[Dict[str, Any]]:
@@ -376,6 +521,49 @@ def chat_once(
 ):
     binding = _resolve_binding(capability, model_override=model)
     model_name = _pick_model(binding, use_reasoning, model_override=model)
+    reasoning_active = _reasoning_active(binding, model_name, use_reasoning)
+    started_at = time.monotonic()
+    try:
+        response = _dispatch_chat_once(
+            binding=binding,
+            model_name=model_name,
+            messages=messages,
+            tools=tools,
+            reasoning_active=reasoning_active,
+            temperature=temperature,
+            extra_kwargs=extra_kwargs,
+        )
+    except Exception as exc:
+        _maybe_emit_billing(
+            response=None,
+            capability=capability,
+            binding=binding,
+            model_name=model_name,
+            started_at=started_at,
+            status="failed",
+            error_text=str(exc)[:500],
+        )
+        raise
+    _maybe_emit_billing(
+        response=response,
+        capability=capability,
+        binding=binding,
+        model_name=model_name,
+        started_at=started_at,
+    )
+    return response
+
+
+def _dispatch_chat_once(
+    *,
+    binding: ProviderBinding,
+    model_name: str,
+    messages: List[Dict[str, Any]],
+    tools: Optional[List[Dict[str, Any]]],
+    reasoning_active: bool,
+    temperature: float,
+    extra_kwargs: Dict[str, Any],
+):
     if is_gemini_native(binding):
         return _chat_once_gemini(
             binding,
@@ -383,18 +571,51 @@ def chat_once(
             temperature=temperature,
             model=model_name,
             tools=tools,
+            reasoning_active=reasoning_active,
             **extra_kwargs,
         )
+
+    reasoning_args = _maybe_reasoning_args(binding, model_name, reasoning_active)
+    provider_name = (binding.provider or "").strip().lower()
+    lowered_model = (model_name or "").strip().lower()
+    is_openai_reasoning_model = provider_name in {"openai", "openrouter"} and (
+        "gpt-5" in lowered_model or any(tag in lowered_model for tag in ("o1", "o3", "o4"))
+    )
+    is_deepseek_reasoner = "reasoner" in lowered_model
 
     kwargs = {
         "model": model_name,
         "messages": messages,
-        "temperature": temperature,
     }
     if tools:
         kwargs["tools"] = tools
         kwargs["tool_choice"] = "auto"
-    if use_reasoning:
-        kwargs.update(_maybe_reasoning_args(capability, use_reasoning))
+
+    max_tokens = extra_kwargs.pop("max_tokens", None)
+    extra_body = extra_kwargs.pop("extra_body", None)
+    if reasoning_args or is_deepseek_reasoner:
+        if extra_body and "extra_body" in reasoning_args:
+            merged_extra_body = dict(extra_body)
+            merged_extra_body.update(reasoning_args["extra_body"])
+            kwargs["extra_body"] = merged_extra_body
+        elif extra_body:
+            kwargs["extra_body"] = extra_body
+        kwargs.update({k: v for k, v in reasoning_args.items() if k != "extra_body"})
+        if is_openai_reasoning_model and max_tokens is not None:
+            kwargs["max_completion_tokens"] = max_tokens
+        elif max_tokens is not None:
+            kwargs["max_tokens"] = max_tokens
+    else:
+        kwargs["temperature"] = temperature
+        if max_tokens is not None:
+            kwargs["max_tokens"] = max_tokens
+        if extra_body:
+            kwargs["extra_body"] = extra_body
+
+    if not reasoning_args and not is_deepseek_reasoner:
+        kwargs.setdefault("temperature", temperature)
+    elif not is_openai_reasoning_model and not is_deepseek_reasoner and "temperature" not in kwargs:
+        kwargs["temperature"] = temperature
+
     kwargs.update(extra_kwargs)
     return _get_client(binding).chat.completions.create(**kwargs)

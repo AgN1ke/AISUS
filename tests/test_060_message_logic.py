@@ -4,6 +4,7 @@ from types import SimpleNamespace
 import pytest
 
 import app.message_logic as message_logic
+from media import album_registry
 from adapters.base import UnifiedMessage
 from agent.planner import PlanDecision
 
@@ -198,7 +199,10 @@ async def test_authed_group_reply_to_bot_is_allowed(monkeypatch):
     assert msg._sent == ["OK: відповідь без @mention"]
     assert msg._sent_kwargs[-1]["parse_mode"] == "HTML"
     assert msg._sent_kwargs[-1]["disable_web_page_preview"] is True
-    assert appended[0] == (99909, "user", "відповідь без @mention")
+    assert appended[0][1] == "system"
+    assert appended[0][2].startswith("[CHAT-TURN]")
+    assert "reply_to_bot: true" in appended[0][2]
+    assert appended[1] == (99909, "user", "відповідь без @mention")
     assert appended[-1] == (99909, "assistant", "OK: відповідь без @mention")
 
 
@@ -262,8 +266,147 @@ async def test_authed_group_explicit_search_uses_agent_route(monkeypatch):
     assert called["use_reasoning"] is False
     assert msg._sent == ["SEARCH: OK"]
     assert msg._sent_kwargs[-1]["parse_mode"] == "HTML"
-    assert appended[0][1] == "user"
+    assert appended[0][1] == "system"
+    assert appended[1][1] == "user"
     assert appended[-1] == (99910, "assistant", "SEARCH: OK")
+
+
+@pytest.mark.asyncio
+async def test_group_message_persists_sender_identity_in_chat_turn(monkeypatch):
+    async def fake_get_settings(_chat_id):
+        return {"auth_ok": True}
+
+    appended = []
+
+    async def fake_run_simple(_chat_id, user_text, **_kwargs):
+        return f"OK: {user_text}"
+
+    async def fake_append(chat_id, role, content):
+        appended.append((chat_id, role, content))
+
+    async def fake_budget(_chat_id):
+        return None
+
+    monkeypatch.setattr(message_logic, "get_settings", fake_get_settings)
+    monkeypatch.setattr(message_logic, "run_simple", fake_run_simple)
+    monkeypatch.setattr(message_logic.memory_manager, "append_message", fake_append)
+    monkeypatch.setattr(message_logic.memory_manager, "ensure_budget", fake_budget)
+
+    msg = DummyPTBMessage(text="@botx як тобі новина?")
+    msg.entities = [SimpleNamespace(type="mention")]
+    msg.from_user = SimpleNamespace(
+        id=7,
+        username="oleh",
+        first_name="Олег",
+        last_name="Тестовий",
+    )
+    upd = make_update(99912, msg)
+    um = make_unified_message(99912, 7, upd, "@botx як тобі новина?")
+
+    await message_logic.process_message(um)
+
+    assert appended[0][1] == "system"
+    assert appended[0][2].startswith("[CHAT-TURN]")
+    assert "sender: Олег Тестовий @oleh" in appended[0][2]
+    assert "current_user_text: як тобі новина?" in appended[0][2]
+    assert appended[1] == (99912, "user", "як тобі новина?")
+
+
+@pytest.mark.asyncio
+async def test_clear_context_command_clears_chat_memory(monkeypatch):
+    async def fake_get_settings(_chat_id):
+        return {"auth_ok": True}
+
+    cleared = {}
+    podcast_state = {"pending_cleared": False, "dossier_cleared": False}
+    appended = []
+
+    async def fake_clear_all(chat_id):
+        cleared["chat_id"] = chat_id
+
+    async def fake_clear_podcast_pending(chat_id):
+        podcast_state["pending_cleared"] = (chat_id == 99913)
+
+    async def fake_clear_podcast_dossier(chat_id):
+        podcast_state["dossier_cleared"] = (chat_id == 99913)
+
+    async def fail_run_simple(*_args, **_kwargs):
+        raise AssertionError("run_simple should not be called for /c@botx")
+
+    async def fail_run_search(*_args, **_kwargs):
+        raise AssertionError("run_search should not be called for /c@botx")
+
+    async def fake_append(chat_id, role, content):
+        appended.append((chat_id, role, content))
+
+    async def fake_budget(_chat_id):
+        return None
+
+    monkeypatch.setattr(message_logic, "get_settings", fake_get_settings)
+    monkeypatch.setattr(message_logic, "run_simple", fail_run_simple)
+    monkeypatch.setattr(message_logic, "run_search", fail_run_search)
+    monkeypatch.setattr(message_logic.memory_manager, "clear_all", fake_clear_all)
+    monkeypatch.setattr(message_logic, "clear_podcast_pending", fake_clear_podcast_pending)
+    monkeypatch.setattr(message_logic, "clear_podcast_dossier", fake_clear_podcast_dossier)
+    monkeypatch.setattr(message_logic.memory_manager, "append_message", fake_append)
+    monkeypatch.setattr(message_logic.memory_manager, "ensure_budget", fake_budget)
+
+    msg = DummyPTBMessage(text="/c@botx")
+    msg.entities = [SimpleNamespace(type="mention")]
+    upd = make_update(99913, msg)
+    um = make_unified_message(99913, 8, upd, "/c@botx")
+
+    await message_logic.process_message(um)
+
+    assert cleared["chat_id"] == 99913
+    assert podcast_state["pending_cleared"] is True
+    assert podcast_state["dossier_cleared"] is True
+    assert msg._sent == ["Контекст цього чату повністю очищено. Починаємо з нуля."]
+    assert appended == []
+
+
+@pytest.mark.asyncio
+async def test_non_targeted_clear_like_message_does_not_clear_memory(monkeypatch):
+    async def fake_get_settings(_chat_id):
+        return {"auth_ok": True}
+
+    cleared = {"called": False}
+    appended = []
+
+    async def fake_clear_all(_chat_id):
+        cleared["called"] = True
+
+    async def fake_run_simple(_chat_id, user_text, **_kwargs):
+        return f"OK: {user_text}"
+
+    async def fail_run_search(*_args, **_kwargs):
+        raise AssertionError("run_search should not be called for @botx /c")
+
+    async def fake_append(chat_id, role, content):
+        appended.append((chat_id, role, content))
+
+    async def fake_budget(_chat_id):
+        return None
+
+    monkeypatch.setattr(message_logic, "get_settings", fake_get_settings)
+    monkeypatch.setattr(message_logic, "run_simple", fake_run_simple)
+    monkeypatch.setattr(message_logic, "run_search", fail_run_search)
+    monkeypatch.setattr(message_logic.memory_manager, "clear_all", fake_clear_all)
+    monkeypatch.setattr(message_logic.memory_manager, "append_message", fake_append)
+    monkeypatch.setattr(message_logic.memory_manager, "ensure_budget", fake_budget)
+
+    msg = DummyPTBMessage(text="@botx /c")
+    msg.entities = [SimpleNamespace(type="mention")]
+    upd = make_update(99914, msg)
+    um = make_unified_message(99914, 9, upd, "@botx /c")
+
+    await message_logic.process_message(um)
+
+    assert cleared["called"] is False
+    assert msg._sent == ["OK: /c"]
+    assert appended[0][1] == "system"
+    assert appended[1] == (99914, "user", "/c")
+    assert appended[-1] == (99914, "assistant", "OK: /c")
 
 
 @pytest.mark.asyncio
@@ -279,7 +422,10 @@ async def test_reply_geometry_is_passed_to_runtime(monkeypatch):
         return "OK: geometry"
 
     async def fake_handle_ptb_mention(_update, _context, _bot_username):
-        return "Проаналізуй наведене медіа і відповідай по суті завдання."
+        return (
+            "Проаналізуй наведене медіа і відповідай по суті завдання.",
+            "image",
+        )
 
     async def fake_append(*_args, **_kwargs):
         return None

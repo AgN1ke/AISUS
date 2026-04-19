@@ -1,4 +1,4 @@
-# Routing Contract
+﻿# Routing Contract
 
 Оновлено: 2026-04-04.
 

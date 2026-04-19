@@ -4,6 +4,7 @@ import shutil
 import pytest
 import pytest_asyncio
 
+from billing.pricing_seed import seed_pricing_defaults
 from db.connection import close_db, init_db
 from db.migrate import apply_migrations
 
@@ -33,6 +34,7 @@ async def _db_migrated(_load_env):
     # on its own event loop without cross-loop aiomysql failures.
     await init_db()
     await apply_migrations()
+    await seed_pricing_defaults()
     await close_db()
     yield
     await close_db()

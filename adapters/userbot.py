@@ -35,9 +35,22 @@ class TelethonUserbotAdapter(AbstractAdapter):
                 reply_to_message_id=(m.reply_to.reply_to_msg_id if m.reply_to else None),
                 has_photo=bool(m.photo),
                 has_voice=bool(getattr(m, "voice", None)) or False,
-                has_video=bool(m.video),
-                has_document=bool(m.document) and not m.photo and not m.video,
+                has_video=bool(
+                    getattr(m, "video", None)
+                    or getattr(m, "video_note", None)
+                    or getattr(m, "round", None)
+                ),
+                has_document=bool(m.document)
+                and not m.photo
+                and not getattr(m, "video", None)
+                and not getattr(m, "video_note", None)
+                and not getattr(m, "round", None)
+                and not getattr(m, "voice", None),
                 raw_update=event,
+                has_video_note=bool(
+                    getattr(m, "video_note", None) or getattr(m, "round", None)
+                ),
+                media_group_id=(str(getattr(m, "grouped_id", "") or "").strip() or None),
                 bot_username=bot_username,
             )
             await handler(um)

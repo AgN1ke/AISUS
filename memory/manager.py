@@ -9,9 +9,13 @@ from typing import Dict, List, Tuple
 from core.tokens import budget_trim_messages, count_tokens_messages, count_tokens_text
 from db.memory_repository import (
     bump_long_usage,
+    delete_core_all,
     core_total_tokens,
     delete_core_facts,
+    delete_long_all,
     delete_long_by_ids,
+    delete_recent_all,
+    delete_recent_chat,
     delete_recent_upto_pos,
     fetch_core_all,
     fetch_core_fact,
@@ -32,6 +36,13 @@ from .importance import evaluate_importance
 from .summarizer import compress_entry, extract_profile_facts, summarize_block
 
 logger = logging.getLogger(__name__)
+
+_EMPTY_CHAT_CONTEXT_NOTICE = (
+    "[CONTEXT-STATE]\n"
+    "Історія цього чату зараз порожня або щойно очищена.\n"
+    "Якщо користувач питає, про що ви говорили раніше, чесно скажи, що в поточному "
+    "контексті попередньої розмови немає. Не вигадуй минулі повідомлення, події чи теми."
+)
 
 # Min confidence delta to overwrite an existing core fact (8% of max 320 = 25.6)
 _CONFIDENCE_DELTA = 25.6
@@ -242,7 +253,7 @@ class MemoryManager:
         await self._ensure_chat(chat_id)
 
         # Cooldown check
-        now_ts = asyncio.get_event_loop().time()
+        now_ts = asyncio.get_running_loop().time()
         last = self._last_consolidation.get(chat_id, 0)
         if now_ts - last < _CONSOLIDATION_COOLDOWN_SEC:
             # Still trim recent if needed (without LLM calls)
@@ -340,7 +351,7 @@ class MemoryManager:
 
         selected: List[Dict[str, str]] = []
         selected_ids: List[int] = []
-        budget_left = _long_budget()
+        budget_left = int(os.getenv("MEMORY_LONG_RETRIEVAL_BUDGET", "8000"))
         for _, row in scored:
             text = row["summary"] or ""
             tokens = int(row["tokens"] or 0)
@@ -363,6 +374,7 @@ class MemoryManager:
         self, chat_id: int, user_query: str, system_prompt: str | None = None
     ) -> List[Dict[str, str]]:
         messages: List[Dict[str, str]] = []
+        has_memory = False
         if system_prompt:
             messages.append({"role": "system", "content": system_prompt.strip()})
 
@@ -372,6 +384,7 @@ class MemoryManager:
             # CORE layer — always included fully
             core_text = await self._core_context_text(chat_id)
             if core_text:
+                has_memory = True
                 messages.append({
                     "role": "system",
                     "content": f"[CORE]\n{core_text}",
@@ -381,6 +394,8 @@ class MemoryManager:
             long_msgs, long_ids = await self._select_long_relevant(
                 chat_id, user_query
             )
+            if long_msgs:
+                has_memory = True
             messages.extend(long_msgs)
         else:
             long_ids = []
@@ -397,7 +412,15 @@ class MemoryManager:
         recent_budget = _recent_budget()
         if count_tokens_messages(recent_msgs) > recent_budget:
             recent_msgs = budget_trim_messages(recent_msgs, recent_budget)
+        if recent_msgs:
+            has_memory = True
         messages.extend(recent_msgs)
+
+        if not has_memory:
+            messages.append({
+                "role": "system",
+                "content": _EMPTY_CHAT_CONTEXT_NOTICE,
+            })
 
         if long_ids:
             await bump_long_usage(long_ids)
@@ -408,8 +431,17 @@ class MemoryManager:
     # ------------------------------------------------------------------
 
     async def clear_all(self, chat_id: int):
-        """Clear CORE and LONG-TERM memory for a chat. Working stays for session."""
+        """Clear all memory layers for a chat, including working/recent context."""
+        await delete_recent_chat(chat_id)
         await delete_core_facts(chat_id)
         all_long = await fetch_long_all(chat_id)
         if all_long:
             await delete_long_by_ids([int(r["id"]) for r in all_long])
+        self._last_consolidation.pop(chat_id, None)
+
+    async def clear_global(self):
+        """Clear all memory layers for all chats."""
+        await delete_recent_all()
+        await delete_long_all()
+        await delete_core_all()
+        self._last_consolidation.clear()

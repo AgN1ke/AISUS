@@ -5,6 +5,7 @@ import pytest
 import app.message_logic as message_logic
 from adapters.base import MessageGeometry, ReplyTarget, UnifiedMessage
 from agent.planner import PlanDecision
+from app.chat_geometry import render_turn_context_messages
 
 
 class DummyPTBMessage:
@@ -118,6 +119,34 @@ async def test_build_user_task_marks_instruction_on_target():
 
 
 @pytest.mark.asyncio
+async def test_build_user_task_uses_media_type_override_for_album_route():
+    msg = make_unified_message("@botx хто в альбомі?")
+    geometry = MessageGeometry(
+        chat_type="group",
+        clean_text="хто в альбомі?",
+        addressed_via_mention=True,
+        addressed=True,
+        target_media_kind="image",
+        reply_target=ReplyTarget(
+            message_id=223,
+            text="album caption",
+            media_kind="image",
+        ),
+    )
+
+    task = await message_logic.build_user_task(
+        msg,
+        geometry,
+        "хто в альбомі?",
+        media_type_override="video",
+    )
+
+    assert task is not None
+    assert task.media_type == "video"
+    assert task.has_media_target is True
+
+
+@pytest.mark.asyncio
 async def test_build_user_task_does_not_store_synthetic_media_default_prompt():
     msg = make_unified_message("")
     geometry = MessageGeometry(
@@ -170,6 +199,79 @@ async def test_plan_execution_wraps_planner_decision(monkeypatch):
     assert plan.capability == "search_web"
     assert plan.use_reasoning is True
     assert plan.planner_source == "test_planner"
+
+
+@pytest.mark.asyncio
+async def test_plan_execution_passes_thread_context_to_planner(monkeypatch):
+    captured = {}
+
+    async def fake_fetch_recent(_chat_id, limit=None):
+        del limit
+        return [
+            {"role": "user", "content": "старий контекст"},
+            {"role": "assistant", "content": "стара відповідь"},
+        ]
+
+    def fake_plan_message(task):
+        captured["dialogue_context"] = task.dialogue_context
+        return PlanDecision(
+            route="chat",
+            capability="chat_final",
+            use_reasoning=False,
+            planner_source="test_planner",
+            notes="thread_context_seen",
+        )
+
+    monkeypatch.setattr(message_logic, "fetch_recent", fake_fetch_recent)
+    monkeypatch.setattr(message_logic, "plan_message", fake_plan_message)
+
+    task = message_logic.UserTask(
+        instruction="а що було перед цим?",
+        has_media_target=False,
+        turn_context_msgs=[
+            {"role": "system", "content": "[CHAT-GEOMETRY]\nreply_target_message_id: 200"},
+            {
+                "role": "system",
+                "content": (
+                    "[THREAD-HISTORY]\n"
+                    "thread_anchor_message_ids: 180, 200\n"
+                    "recent_thread_turns:\n"
+                    "- 2026-04-09 00:18:00 EEST | sender: Микита"
+                ),
+            },
+        ],
+    )
+    geometry = MessageGeometry(chat_type="group", addressed=True)
+    session = message_logic.SessionState(chat_id=99950, authed=True)
+
+    plan = await message_logic.plan_execution(99950, task, geometry, session)
+
+    assert plan.route == "chat"
+    assert captured["dialogue_context"][0]["content"].startswith("[CHAT-GEOMETRY]")
+    assert captured["dialogue_context"][1]["content"].startswith("[THREAD-HISTORY]")
+    assert captured["dialogue_context"][-1]["content"] == "стара відповідь"
+
+
+@pytest.mark.asyncio
+async def test_plan_execution_uses_chat_capability_for_voice_turn():
+    task = message_logic.UserTask(
+        instruction="РЇ РІР¶Рµ РїРѕРјРёРІСЃСЏ С– Р·Р°СЂР°Р· РїС–РґСѓ СЃРїР°С‚Рё",
+        has_media_target=True,
+        media_type="voice",
+    )
+    geometry = MessageGeometry(
+        chat_type="group",
+        addressed=True,
+        reply_to_bot=True,
+        target_media_kind="voice",
+    )
+    session = message_logic.SessionState(chat_id=99950, authed=True)
+
+    plan = await message_logic.plan_execution(99950, task, geometry, session)
+
+    assert plan.route == "chat"
+    assert plan.capability == "chat_final"
+    assert plan.planner_source == "heuristic"
 
 
 @pytest.mark.asyncio

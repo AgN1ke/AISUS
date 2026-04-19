@@ -5,7 +5,6 @@ import logging
 import math
 import mimetypes
 import os
-import shlex
 import shutil
 import subprocess
 from pathlib import Path
@@ -67,16 +66,15 @@ VIDEO_MAX_FRAMES = int(os.getenv("VIDEO_MAX_FRAMES", "40"))
 FFMPEG_DIR = os.getenv("FFMPEG_DIR") or ""
 FFMPEG_BIN = os.path.join(FFMPEG_DIR, "ffmpeg") if FFMPEG_DIR else "ffmpeg"
 FFPROBE_BIN = os.path.join(FFMPEG_DIR, "ffprobe") if FFMPEG_DIR else "ffprobe"
-CLEANUP_KEEP_WHISPER_TXT = bool(int(os.getenv("CLEANUP_KEEP_WHISPER_TXT", "1")))
 
 
 def _ffprobe_duration_sec(path: str) -> float:
-    cmd = (
-        f"{FFPROBE_BIN} -v error -show_entries format=duration "
-        f"-of default=noprint_wrappers=1:nokey=1 {shlex.quote(path)}"
-    )
     try:
-        out = subprocess.check_output(cmd, shell=True, text=True).strip()
+        out = subprocess.check_output(
+            [FFPROBE_BIN, "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=noprint_wrappers=1:nokey=1", path],
+            text=True,
+        ).strip()
         return float(out)
     except Exception as exc:
         logger.error("ffprobe failed for %s: %s", path, exc, exc_info=True)
@@ -84,11 +82,10 @@ def _ffprobe_duration_sec(path: str) -> float:
 
 
 def _extract_audio_mp3(video_path: str, out_mp3: str, kbps: int = 96) -> None:
-    cmd = (
-        f"{FFMPEG_BIN} -y -i {shlex.quote(video_path)} -vn "
-        f"-acodec libmp3lame -b:a {kbps}k {shlex.quote(out_mp3)}"
+    subprocess.check_call(
+        [FFMPEG_BIN, "-y", "-i", video_path, "-vn",
+         "-acodec", "libmp3lame", "-b:a", f"{kbps}k", out_mp3],
     )
-    subprocess.check_call(cmd, shell=True)
 
 
 def _sample_frames(
@@ -99,11 +96,10 @@ def _sample_frames(
     frame_dir = out_dir / "frames"
     frame_dir.mkdir(exist_ok=True)
 
-    cmd = (
-        f"{FFMPEG_BIN} -y -i {shlex.quote(video_path)} "
-        f"-vf 'fps={fps}' {shlex.quote(str(frame_dir / 'frame_%05d.jpg'))}"
+    subprocess.check_call(
+        [FFMPEG_BIN, "-y", "-i", video_path,
+         "-vf", f"fps={fps}", str(frame_dir / "frame_%05d.jpg")],
     )
-    subprocess.check_call(cmd, shell=True)
 
     frames = sorted(str(path) for path in frame_dir.glob("frame_*.jpg"))
     if len(frames) > max_frames:
@@ -113,11 +109,9 @@ def _sample_frames(
 
 
 def transcribe_audio_mp3(mp3_path: str) -> str:
-    from whisper_tool import transcribe as wt_transcribe
+    from media.voice import transcribe_audio_sync
 
-    wt_transcribe(mp3_path)
-    txt_path = Path(mp3_path).with_suffix(".txt")
-    return txt_path.read_text(encoding="utf-8") if txt_path.exists() else ""
+    return transcribe_audio_sync(mp3_path)
 
 
 def analyze_video(video_path: str, task_hint: str | None = None) -> dict:
@@ -145,12 +139,10 @@ def analyze_video(video_path: str, task_hint: str | None = None) -> dict:
             logger.warning("video audio extraction failed: %s", audio_exc)
             transcript = ""
 
+        # Clean up any stray transcript file from audio extraction
         transcript_file = mp3_path.with_suffix(".txt")
         if transcript_file.exists():
-            if CLEANUP_KEEP_WHISPER_TXT:
-                shutil.move(str(transcript_file), str(source_path.with_suffix(".txt")))
-            else:
-                transcript_file.unlink(missing_ok=True)
+            transcript_file.unlink(missing_ok=True)
 
         if use_native_gemini:
             # Send whole video directly to Gemini — much better quality
@@ -184,7 +176,6 @@ def analyze_video(video_path: str, task_hint: str | None = None) -> dict:
 
     return {
         "transcript": transcript,
-        "frames": frames,
         "vision_summary": vision_summary,
         "summary": summary,
     }

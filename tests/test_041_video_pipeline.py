@@ -42,3 +42,20 @@ def test_analyze_video_too_long(monkeypatch, tmp_path):
     monkeypatch.setattr(mv, "_ffprobe_duration_sec", lambda p: 1000)
     with pytest.raises(RuntimeError):
         mv.analyze_video(str(video))
+
+
+def test_transcribe_audio_mp3_uses_voice_stt(monkeypatch, tmp_path):
+    mp3 = tmp_path / "clip.mp3"
+    mp3.write_text("mp3", encoding="utf-8")
+    captured = {}
+
+    def fake_sync(path: str) -> str:
+        captured["path"] = path
+        return "spoken words"
+
+    monkeypatch.setattr("media.voice.transcribe_audio_sync", fake_sync)
+
+    result = mv.transcribe_audio_mp3(str(mp3))
+
+    assert result == "spoken words"
+    assert captured["path"] == str(mp3)

@@ -22,3 +22,9 @@ tmp/
 *_analysis/
 logs/
 .env
+deploy/.env
+deploy/node_modules/
+deploy/*.tar.gz
+.secrets/
+.claude/
+.zed/

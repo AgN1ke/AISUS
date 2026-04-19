@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -31,8 +32,9 @@ def _format_block(messages: List[Dict[str, str]]) -> str:
     return "\n".join(lines)
 
 
-def _run_summary_model(prompt_user: str):
-    return chat_once(
+async def _run_summary_model(prompt_user: str):
+    return await asyncio.to_thread(
+        chat_once,
         [
             {"role": "system", "content": MEMORY_SUMMARY_SYSTEM_PROMPT},
             {"role": "user", "content": prompt_user},
@@ -53,7 +55,7 @@ async def summarize_block(messages: List[Dict[str, str]]) -> dict:
     block = _format_block(messages)
     prompt_user = MEMORY_SUMMARY_USER_TEMPLATE.format(block=block)
     try:
-        resp = _run_summary_model(prompt_user)
+        resp = await _run_summary_model(prompt_user)
     except RuntimeError:
         resp = None
 
@@ -96,7 +98,8 @@ async def extract_profile_facts(
         block=block_text[:4000],
     )
     try:
-        resp = chat_once(
+        resp = await asyncio.to_thread(
+            chat_once,
             [
                 {"role": "system", "content": FACT_EXTRACTION_SYSTEM_PROMPT},
                 {"role": "user", "content": prompt_user},
@@ -127,7 +130,8 @@ async def compress_entry(text: str, core_context: str) -> str:
         "Поверни тільки стиснений текст, без пояснень."
     )
     try:
-        resp = chat_once(
+        resp = await asyncio.to_thread(
+            chat_once,
             [{"role": "user", "content": prompt}],
             tools=None,
             use_reasoning=False,

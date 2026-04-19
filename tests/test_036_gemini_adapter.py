@@ -47,11 +47,17 @@ def test_chat_once_gemini_text_request(monkeypatch):
                 "candidates": [
                     {
                         "content": {
-                            "parts": [{"text": "Все добре."}],
+                            "parts": [{"text": "All good."}],
                             "role": "model",
                         }
                     }
-                ]
+                ],
+                "usageMetadata": {
+                    "promptTokenCount": 21,
+                    "candidatesTokenCount": 8,
+                    "thoughtsTokenCount": 13,
+                    "totalTokenCount": 42,
+                },
             }
         )
 
@@ -59,10 +65,10 @@ def test_chat_once_gemini_text_request(monkeypatch):
 
     response = llm.chat_once(
         [
-            {"role": "system", "content": "Ти котик."},
-            {"role": "user", "content": "Привіт"},
-            {"role": "assistant", "content": "Няв."},
-            {"role": "user", "content": "Як справи?"},
+            {"role": "system", "content": "You are a cat."},
+            {"role": "user", "content": "Hi"},
+            {"role": "assistant", "content": "Meow."},
+            {"role": "user", "content": "How are you?"},
         ],
         capability="chat_final",
         temperature=0.1,
@@ -74,11 +80,11 @@ def test_chat_once_gemini_text_request(monkeypatch):
         == "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
     )
     assert captured["headers"]["x-goog-api-key"] == "gemini-key"
-    assert captured["json"]["systemInstruction"]["parts"][0]["text"] == "Ти котик."
+    assert captured["json"]["systemInstruction"]["parts"][0]["text"] == "You are a cat."
     assert captured["json"]["contents"] == [
-        {"role": "user", "parts": [{"text": "Привіт"}]},
-        {"role": "model", "parts": [{"text": "Няв."}]},
-        {"role": "user", "parts": [{"text": "Як справи?"}]},
+        {"role": "user", "parts": [{"text": "Hi"}]},
+        {"role": "model", "parts": [{"text": "Meow."}]},
+        {"role": "user", "parts": [{"text": "How are you?"}]},
     ]
     assert captured["json"]["generationConfig"] == {
         "temperature": 0.1,
@@ -86,7 +92,12 @@ def test_chat_once_gemini_text_request(monkeypatch):
         "thinkingConfig": {"thinkingBudget": 0},
     }
     assert captured["timeout"] == 45
-    assert response.choices[0].message.content == "Все добре."
+    assert response.choices[0].message.content == "All good."
+    assert response.usage.prompt_tokens == 21
+    assert response.usage.completion_tokens == 21
+    assert response.usage.candidates_tokens == 8
+    assert response.usage.thoughts_tokens == 13
+    assert response.usage.total_tokens == 42
 
 
 def test_chat_once_gemini_image_request(monkeypatch):
@@ -104,7 +115,7 @@ def test_chat_once_gemini_image_request(monkeypatch):
                 "candidates": [
                     {
                         "content": {
-                            "parts": [{"text": "На зображенні кіт."}],
+                            "parts": [{"text": "There is a cat in the image."}],
                             "role": "model",
                         }
                     }
@@ -119,7 +130,7 @@ def test_chat_once_gemini_image_request(monkeypatch):
             {
                 "role": "user",
                 "content": [
-                    {"type": "text", "text": "Що тут?"},
+                    {"type": "text", "text": "What is here?"},
                     {
                         "type": "image_url",
                         "image_url": {
@@ -134,14 +145,14 @@ def test_chat_once_gemini_image_request(monkeypatch):
     )
 
     parts = captured["json"]["contents"][0]["parts"]
-    assert parts[0] == {"text": "Що тут?"}
+    assert parts[0] == {"text": "What is here?"}
     assert parts[1] == {
         "inline_data": {
             "mime_type": "image/png",
             "data": "ZmFrZQ==",
         }
     }
-    assert response.choices[0].message.content == "На зображенні кіт."
+    assert response.choices[0].message.content == "There is a cat in the image."
 
 
 def test_chat_once_gemini_rejects_tools(monkeypatch):
@@ -182,18 +193,18 @@ def test_describe_images_uses_capability_binding_without_model_override(
         captured["temperature"] = temperature
         captured["capability"] = capability
         captured["kwargs"] = kwargs
-        return _dummy_llm_response("Опис")
+        return _dummy_llm_response("Description")
 
     monkeypatch.setattr(vision, "chat_once", fake_chat_once)
 
-    result = vision.describe_images([str(image)], task_hint="Поясни мем")
+    result = vision.describe_images([str(image)], task_hint="Explain the meme")
 
-    assert result == "Опис"
+    assert result == "Description"
     assert captured["model"] is None
     assert captured["capability"] == "vision_image"
     assert captured["temperature"] == 0.2
-    assert captured["kwargs"]["max_tokens"] == 400
-    assert captured["messages"][0] == {"role": "system", "content": "Поясни мем"}
+    assert captured["kwargs"]["max_tokens"] == 1000
+    assert captured["messages"][0] == {"role": "system", "content": "Explain the meme"}
     user_parts = captured["messages"][1]["content"]
     assert user_parts[0]["type"] == "text"
     assert user_parts[1]["type"] == "image_url"

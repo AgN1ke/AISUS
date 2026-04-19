@@ -5,6 +5,7 @@ from pathlib import Path
 
 import aiomysql
 from dotenv import load_dotenv
+from core.env import db_pool_size
 
 load_dotenv()
 
@@ -58,7 +59,7 @@ def get_db_config():
         "db": _env("DB_NAME", "aisus"),
         "charset": "utf8mb4",
         "autocommit": True,
-        "maxsize": int(_env("DB_POOL_SIZE", "10")),
+        "maxsize": db_pool_size(),
     }
 
 

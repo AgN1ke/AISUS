@@ -1,4 +1,4 @@
-# Search Flow
+﻿# Search Flow
 
 Оновлено: 2026-04-04.
 

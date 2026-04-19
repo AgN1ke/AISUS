@@ -1,15 +1,17 @@
 import os
 
+import pytest
+
+from billing.context import BillingContext
+from billing.runtime import use_billing_context
+
 from core.prompts import (
-    LEGACY_DEFAULT_IMAGE_CAPTION_AFFIX,
-    LEGACY_DEFAULT_IMAGE_MESSAGE_AFFIX,
-    LEGACY_DEFAULT_IMAGE_SCENE_AFFIX,
     capability_system_prompt,
     configured_chat_persona_prompt,
     format_env_prompt,
+    resolve_persona_for_user,
     search_synthesis_system_prompt,
 )
-from src.heroku_config_parser import ConfigReader
 
 
 def test_format_env_prompt_handles_none_and_pipe_separator():
@@ -43,19 +45,3 @@ def test_search_synthesis_prompt_mentions_inline_citations(monkeypatch):
     assert "Не додавай окремий блок джерел" in prompt
 
 
-def test_legacy_config_reader_uses_centralized_defaults(monkeypatch):
-    for key in (
-        "SYSTEM_MESSAGES_WELCOME_MESSAGE",
-        "SYSTEM_MESSAGES_VOICE_MESSAGE_AFFIX",
-        "SYSTEM_MESSAGES_IMAGE_MESSAGE_AFFIX",
-        "SYSTEM_MESSAGES_IMAGE_CAPTION_AFFIX",
-        "SYSTEM_MESSAGES_IMAGE_SENCE_AFFIX",
-        "PASSWORD",
-    ):
-        monkeypatch.delenv(key, raising=False)
-
-    cfg = ConfigReader()
-
-    assert cfg.image_message_affix == LEGACY_DEFAULT_IMAGE_MESSAGE_AFFIX
-    assert cfg.image_caption_affix == LEGACY_DEFAULT_IMAGE_CAPTION_AFFIX
-    assert cfg.image_sence_affix == LEGACY_DEFAULT_IMAGE_SCENE_AFFIX

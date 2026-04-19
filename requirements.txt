@@ -4,6 +4,7 @@ python-telegram-bot==21.5
 python-dateutil
 heroku3
 requests>=2.32.2
+google-auth>=2.39.0
 aiomysql
 python-dotenv
 tiktoken>=0.7.0

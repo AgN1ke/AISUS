@@ -365,6 +365,74 @@ async def test_explicit_search_runs_sub_queries_in_parallel(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_explicit_search_partial_evidence_uses_best_effort_synthesis(monkeypatch):
+    async def fake_build_search_tasks(_chat_id, user_text, **_kwargs):
+        return [
+            SearchTask(
+                original_request=user_text,
+                query="latest Hezbollah strikes Lebanon news",
+                source="query_planner",
+                used_context=True,
+                reason="planned_subquery:news",
+                mode="news",
+                profile="news",
+            )
+        ]
+
+    async def fake_select_context(*_args, **_kwargs):
+        return [{"role": "assistant", "content": "попередній контекст"}]
+
+    async def fake_search(_query, max_results=None, recency_days=None, **kwargs):
+        del max_results, recency_days, kwargs
+        return [
+            _result(
+                "AP Hezbollah strike report",
+                "https://apnews.com/article/hezbollah-lebanon-strike",
+                "AP reports on fresh strikes and says details are still emerging.",
+                provider="serper",
+            )
+        ]
+
+    def fake_chat_once(messages, **_kwargs):
+        assert "Evidence status:\nEvidence is partial." in messages[-1]["content"]
+        return _DummyResponse(
+            "З того, що вже видно в джерелах, це схоже на свіжі удари по Лівану.[1]"
+        )
+
+    monkeypatch.setattr(runner, "build_search_tasks", fake_build_search_tasks)
+    monkeypatch.setattr(runner.memory_manager, "select_context", fake_select_context)
+    monkeypatch.setattr(runner, "search_web", fake_search)
+    monkeypatch.setattr(
+        runner,
+        "evaluate_search_step",
+        lambda *_args, **_kwargs: SearchEvaluation(
+            sufficient=False,
+            should_retry=False,
+            retry_query="",
+            reason="partial_but_relevant",
+        ),
+    )
+    monkeypatch.setattr(
+        runner,
+        "evaluate_evidence",
+        lambda *_args, **_kwargs: SearchEvaluation(
+            sufficient=False,
+            should_retry=False,
+            retry_query="",
+            reason="partial_but_relevant",
+            coverage={"latest Hezbollah strikes Lebanon news": False},
+        ),
+    )
+    monkeypatch.setattr(runner, "chat_once", fake_chat_once)
+
+    out = await run_agent(CHAT, "Загугли цю новину")
+
+    assert "схоже на свіжі удари по Лівану" in out
+    assert "[[1]](" in out
+    assert "Не зміг зібрати достатньо надійних джерел" not in out
+
+
+@pytest.mark.asyncio
 async def test_explicit_search_returns_clean_failure_on_junk_evidence(monkeypatch):
     async def fake_build_search_tasks(_chat_id, user_text, **_kwargs):
         return [

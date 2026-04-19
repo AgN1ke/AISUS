@@ -45,8 +45,34 @@ def env_int(*names: str, default: int) -> int:
         return default
 
 
+def db_pool_size() -> int:
+    return max(1, env_int("DB_POOL_SIZE", default=50))
+
+
+def llm_thread_pool_size() -> int:
+    return max(1, env_int("LLM_THREAD_POOL_SIZE", default=128))
+
+
 def openai_api_key() -> str:
     return env_first("OPENAI_API_KEY", "OPENAI_APIKEY", "OPENAI_API_KEY_V1", default="")
+
+
+def openai_stt_api_key() -> str:
+    return env_first(
+        "OPENAI_STT_API_KEY",
+        "OPENAI_AUDIO_API_KEY",
+        "OPENAI_API_KEY",
+        default="",
+    )
+
+
+def openai_tts_api_key() -> str:
+    return env_first(
+        "OPENAI_TTS_API_KEY",
+        "OPENAI_AUDIO_API_KEY",
+        "OPENAI_API_KEY",
+        default="",
+    )
 
 
 def default_llm_provider() -> str:
@@ -120,18 +146,85 @@ def capability_adapter(capability_name: str, default: str = "openai_chat") -> st
     return default
 
 
-def reasoning_model() -> str:
-    return env_first("OPENAI_REASONING_MODEL", default="")
+def can_reason(provider: str, model: str) -> bool:
+    """Return True when this provider/model pair supports configurable reasoning."""
+    p = (provider or "").strip().lower()
+    m = (model or "").strip().lower()
+    if not p or not m:
+        return False
+    if p == "openai":
+        return "gpt-5" in m or any(tag in m for tag in ("o1", "o3", "o4"))
+    if p == "gemini":
+        return "gemini-2.5" in m or "gemini-3" in m
+    if p == "deepseek":
+        return "reasoner" in m
+    if p == "openrouter":
+        return (
+            "gpt-5" in m
+            or any(tag in m for tag in ("o1", "o3", "o4"))
+            or "gemini-2.5" in m
+            or "gemini-3" in m
+            or "reasoner" in m
+            or "claude-opus-4" in m
+            or "claude-sonnet-4" in m
+        )
+    return False
 
 
-def reasoning_effort() -> str:
-    return env_first("REASONING_EFFORT", "OPENAI_REASONING_EFFORT", default="medium")
+def capability_reasoning_enabled(capability: str) -> bool:
+    cap = env_slot(capability)
+    if not cap:
+        return False
+    return env_bool(f"CAPABILITY_{cap}_REASONING_ENABLED", default=False)
+
+
+def capability_reasoning_effort(capability: str) -> str:
+    cap = env_slot(capability)
+    if not cap:
+        return "medium"
+    raw = str(
+        env_first(
+            f"CAPABILITY_{cap}_REASONING_EFFORT",
+            default="medium",
+        )
+    ).strip().lower()
+    if raw in {"none", "low", "medium", "high", "xhigh"}:
+        return raw
+    return "medium"
+
+
+def whisper_model() -> str:
+    return env_first("OPENAI_WHISPER_MODEL", default="whisper-1")
+
+
+def tts_model() -> str:
+    return env_first("OPENAI_TTS_MODEL", default="gpt-4o-mini-tts")
+
+
+def vocalizer_voice() -> str:
+    return env_first("OPENAI_VOCALIZER_VOICE", default="alloy")
 
 
 def chat_base_url() -> str | None:
     return env_url(
         "OPENAI_CHAT_BASE_URL",
         "OPENAI_BASE_URL",
+        default=OPENAI_DEFAULT_BASE_URL,
+    )
+
+
+def stt_base_url() -> str | None:
+    return env_url(
+        "OPENAI_STT_BASE_URL",
+        "OPENAI_AUDIO_BASE_URL",
+        default=OPENAI_DEFAULT_BASE_URL,
+    )
+
+
+def tts_base_url() -> str | None:
+    return env_url(
+        "OPENAI_TTS_BASE_URL",
+        "OPENAI_AUDIO_BASE_URL",
         default=OPENAI_DEFAULT_BASE_URL,
     )
 
@@ -165,30 +258,92 @@ def provider_base_url(provider_name: str) -> str | None:
     return env_url(*names, default=None)
 
 
-def provider_supports_reasoning(provider_name: str) -> bool:
-    normalized = env_slot(provider_name)
-    return env_bool(
-        f"PROVIDER_{normalized}_SUPPORTS_REASONING",
-        default=True,
+def gemini_thinking_level(
+    model_name: str | None = None,
+    *,
+    reasoning_active: bool = False,
+    capability: str | None = None,
+) -> str | None:
+    model = (model_name or "").strip().lower()
+    if "gemini-3" not in model:
+        return None
+
+    if not reasoning_active:
+        return None
+
+    raw = env_first(
+        "PROVIDER_GEMINI_THINKING_LEVEL",
+        "GEMINI_THINKING_LEVEL",
+        default=None,
     )
+    if raw not in (None, ""):
+        value = str(raw).strip().lower()
+        if value in {"minimal", "low", "medium", "high"}:
+            return value
+
+    effort = capability_reasoning_effort(capability or "")
+    mapping = {
+        "none": "low",
+        "low": "low",
+        "medium": "medium",
+        "high": "high",
+        "xhigh": "high",
+    }
+    return mapping.get(effort, "medium")
 
 
-def gemini_thinking_budget(model_name: str | None = None) -> int | None:
+def gemini_thinking_budget(
+    model_name: str | None = None,
+    *,
+    reasoning_active: bool = False,
+    capability: str | None = None,
+) -> int | None:
     raw = env_first(
         "PROVIDER_GEMINI_THINKING_BUDGET",
         "GEMINI_THINKING_BUDGET",
         default=None,
     )
+    model = (model_name or "").strip().lower()
+    if "gemini-2.5" not in model:
+        return None
+
+    if not reasoning_active:
+        if "flash" in model:
+            return 0
+        return 128
+
     if raw not in (None, ""):
         try:
-            return int(str(raw).strip())
+            parsed = int(str(raw).strip())
+            if "flash" in model:
+                if parsed <= 0:
+                    return 0
+                return max(128, min(parsed, 24576))
+            return max(128, min(parsed, 32768))
         except Exception:
-            return 0
+            if "flash" in model:
+                return 0
+            return 128
 
-    model = (model_name or "").strip().lower()
-    if "gemini-2.5-flash" in model:
-        return 0
-    return None
+    effort = capability_reasoning_effort(capability or "")
+    if "flash" in model:
+        mapping = {
+            "none": 0,
+            "low": 1024,
+            "medium": 8192,
+            "high": 24576,
+            "xhigh": 24576,
+        }
+        return mapping.get(effort, 8192)
+
+    mapping = {
+        "none": 128,
+        "low": 1024,
+        "medium": 8192,
+        "high": 24576,
+        "xhigh": 32768,
+    }
+    return mapping.get(effort, 8192)
 
 
 def telegram_bot_token() -> str:

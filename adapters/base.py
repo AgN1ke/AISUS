@@ -1,6 +1,7 @@
 from __future__ import annotations
+
 from dataclasses import dataclass, field
-from typing import Optional, Any, Awaitable, Callable
+from typing import Any, Awaitable, Callable, Optional
 
 MessageHandler = Callable[["UnifiedMessage"], Awaitable[None]]
 
@@ -19,25 +20,31 @@ class ReplyTarget:
     text: str = ""
     media_kind: Optional[str] = None
     is_bot: bool = False
+    sent_at_utc: Optional[str] = None
+    sent_at_local: Optional[str] = None
 
 
 @dataclass
 class MessageGeometry:
     chat_type: Optional[str] = None
+    current_message_id: Optional[int] = None
     sender: MessageParticipant = field(default_factory=MessageParticipant)
     reply_target: ReplyTarget = field(default_factory=ReplyTarget)
+    reply_chain: tuple["ReplyTarget", ...] = field(default_factory=tuple)
     current_media_kind: Optional[str] = None
     target_media_kind: Optional[str] = None
     clean_text: str = ""
     addressed_via_mention: bool = False
     reply_to_bot: bool = False
     addressed: bool = False
+    message_sent_at_utc: Optional[str] = None
+    message_sent_at_local: Optional[str] = None
 
 
 @dataclass
 class UnifiedMessage:
-    # Мінімальний зріз даних, спільний для Bot API та Telethon
-    platform: str              # "ptb" або "telethon"
+    # Minimal common slice for Bot API and Telethon.
+    platform: str
     chat_id: int
     message_id: int
     text: str
@@ -47,11 +54,14 @@ class UnifiedMessage:
     has_voice: bool
     has_video: bool
     has_document: bool
-    raw_update: Any            # сирий Update (PTB) або Event (Telethon)
+    raw_update: Any
+    has_video_note: bool = False
+    media_group_id: Optional[str] = None
 
-    # Допоміжне
+    # Auxiliary routing data.
     bot_username: Optional[str] = None
     geometry: MessageGeometry = field(default_factory=MessageGeometry)
+
 
 class AbstractAdapter:
     name: str

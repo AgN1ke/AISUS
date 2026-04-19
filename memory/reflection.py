@@ -1,6 +1,7 @@
 """Reflection: synthesize core beliefs from repeated long-term memory patterns."""
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -80,7 +81,8 @@ async def reflect(chat_id: int):
 
         try:
             prompt_user = REFLECTION_USER_TEMPLATE.format(memories_text=memories_text)
-            resp = chat_once(
+            resp = await asyncio.to_thread(
+                chat_once,
                 [
                     {"role": "system", "content": REFLECTION_SYSTEM_PROMPT},
                     {"role": "user", "content": prompt_user},
@@ -91,7 +93,7 @@ async def reflect(chat_id: int):
                 capability="memory_summary",
                 max_tokens=200,
             )
-            raw = resp.choices[0].message.content.strip()
+            raw = (resp.choices[0].message.content or "").strip()
             json_match = re.search(r"\{[\s\S]*\}", raw)
             if not json_match:
                 continue
@@ -105,11 +107,10 @@ async def reflect(chat_id: int):
             from os import getenv
             core_budget = int(getenv("MEMORY_CORE_BUDGET", "1000"))
             current = await core_total_tokens(chat_id)
-            if current + tokens > core_budget:
-                # Check if this key already exists (replacement)
-                existing = await fetch_core_fact(chat_id, key)
-                if not existing:
-                    continue  # No room
+            existing = await fetch_core_fact(chat_id, key)
+            existing_tokens = int(existing["tokens"] or 0) if existing else 0
+            if current - existing_tokens + tokens > core_budget:
+                continue  # No room even after replacing
 
             await upsert_core_fact(
                 chat_id, key, value,
@@ -133,8 +134,8 @@ async def maybe_reflect_all(chat_ids: List[int]):
 
             last = await get_last_reflection(chat_id)
             if last:
-                if hasattr(last, "replace"):
-                    last_aware = last.replace(tzinfo=timezone.utc)
+                if isinstance(last, datetime):
+                    last_aware = last if last.tzinfo else last.replace(tzinfo=timezone.utc)
                 else:
                     continue
                 if now - last_aware < timedelta(days=_REFLECTION_INTERVAL_DAYS):

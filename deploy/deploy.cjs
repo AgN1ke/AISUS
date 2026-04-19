@@ -1,9 +1,27 @@
 // Deploy Smartest bot to VPS
 // Usage: node deploy/deploy.cjs
+// Requires env vars: DEPLOY_HOST, DEPLOY_USER, DEPLOY_PASS (or set in deploy/.env)
 const { Client } = require('ssh2');
 const { execSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
+
+// Load deploy/.env if exists
+const dotenvPath = path.join(__dirname, '.env');
+if (fs.existsSync(dotenvPath)) {
+  for (const line of fs.readFileSync(dotenvPath, 'utf8').split('\n')) {
+    const m = line.match(/^\s*([A-Z_]+)\s*=\s*(.+?)\s*$/);
+    if (m && !process.env[m[1]]) process.env[m[1]] = m[2];
+  }
+}
+
+const DEPLOY_HOST = process.env.DEPLOY_HOST;
+const DEPLOY_USER = process.env.DEPLOY_USER || 'root';
+const DEPLOY_PASS = process.env.DEPLOY_PASS;
+if (!DEPLOY_HOST || !DEPLOY_PASS) {
+  console.error('[deploy] Missing DEPLOY_HOST or DEPLOY_PASS. Set env vars or create deploy/.env');
+  process.exit(1);
+}
 
 // Always deploy from Smartest project, regardless of where this script runs
 const PROJECT_DIR = 'C:/Python_projects/Smartest';
@@ -85,4 +103,4 @@ conn.on('ready', () => {
     ws.end(tarData);
   });
 }).on('error', e => { console.error('SSH ERROR:', e.message); process.exit(1); })
-  .connect({ host: '87.106.11.84', port: 22, username: 'root', password: '8Vib2YTN', readyTimeout: 30000 });
+  .connect({ host: DEPLOY_HOST, port: 22, username: DEPLOY_USER, password: DEPLOY_PASS, readyTimeout: 30000 });

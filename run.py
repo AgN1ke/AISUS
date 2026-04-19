@@ -5,6 +5,7 @@ import logging
 import os
 import signal
 import sys
+from concurrent.futures import ThreadPoolExecutor
 
 import yaml
 
@@ -12,24 +13,36 @@ from adapters.base import AbstractAdapter
 from adapters.telegram_bot import TelegramBotAdapter
 from adapters.userbot import TelethonUserbotAdapter
 from app.message_logic import process_message
-from core.env import telegram_bot_token
+from core.env import db_pool_size, llm_thread_pool_size, telegram_bot_token
+from core.logging_setup import setup_logging
+from media.downloader import purge_stale_media_tmp
 
 CONFIG_PATH = os.getenv("INSTANCES_CONFIG", "config/instances.yaml")
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 
 
 def _setup_logging() -> None:
-    logging.basicConfig(
-        level=getattr(logging, LOG_LEVEL, logging.INFO),
-        format="%(asctime)s %(levelname)s %(name)s | %(message)s",
-        stream=sys.stdout,
-        force=True,
-    )
+    setup_logging("smartest-bot", LOG_LEVEL, stream=sys.stdout, force=True)
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 
 logger = logging.getLogger(__name__)
+
+
+def configure_runtime_executor(loop: asyncio.AbstractEventLoop) -> ThreadPoolExecutor:
+    max_workers = llm_thread_pool_size()
+    executor = ThreadPoolExecutor(
+        max_workers=max_workers,
+        thread_name_prefix="smartest-llm",
+    )
+    loop.set_default_executor(executor)
+    logger.info(
+        "runtime.executors_configured llm_thread_pool_size=%s db_pool_size=%s",
+        max_workers,
+        db_pool_size(),
+    )
+    return executor
 
 
 def _is_placeholder(value: str | None) -> bool:
@@ -120,49 +133,67 @@ async def _start_instance(defn) -> AbstractAdapter:
 
 async def main():
     from db.bootstrap import bootstrap_db
+    from memory.scheduler import start_scheduler, stop_scheduler
 
     _setup_logging()
     logger.info("runtime.boot config_path=%s log_level=%s", CONFIG_PATH, LOG_LEVEL)
-    await bootstrap_db()
-    logger.info("runtime.db_bootstrap_ok")
-
-    from memory.scheduler import start_scheduler
-    start_scheduler()
-
-    inst = _load_instances_from_file(CONFIG_PATH)
-    if not inst:
-        inst = _load_instances_from_env()
-    if not inst:
-        raise RuntimeError(
-            "No valid runtime instances found. Set TG_BOT_TOKEN/MYAPI_BOT_TOKEN or provide a valid config/instances.yaml"
-        )
-
-    logger.info("runtime.instances_loaded count=%s", len(inst))
+    loop = asyncio.get_running_loop()
+    executor = configure_runtime_executor(loop)
     adapters = []
-    for d in inst:
-        adapters.append(await _start_instance(d))
+    scheduler_started = False
+    try:
+        removed = await purge_stale_media_tmp()
+        logger.info("runtime.media_tmp_purged removed=%s", removed)
+    except Exception:
+        logger.exception("runtime.media_tmp_purge_failed")
+    try:
+        await bootstrap_db()
+        logger.info("runtime.db_bootstrap_ok")
 
-    stop_ev = asyncio.Event()
+        start_scheduler()
+        scheduler_started = True
 
-    def _stop(*_):
-        logger.info("runtime.stop_signal_received")
-        stop_ev.set()
+        inst = _load_instances_from_file(CONFIG_PATH)
+        if not inst:
+            inst = _load_instances_from_env()
+        if not inst:
+            raise RuntimeError(
+                "No valid runtime instances found. Set TG_BOT_TOKEN/MYAPI_BOT_TOKEN or provide a valid config/instances.yaml"
+            )
 
-    for s in (signal.SIGINT, signal.SIGTERM):
+        logger.info("runtime.instances_loaded count=%s", len(inst))
+        for d in inst:
+            adapters.append(await _start_instance(d))
+
+        stop_ev = asyncio.Event()
+
+        def _stop(*_):
+            logger.info("runtime.stop_signal_received")
+            stop_ev.set()
+
+        for s in (signal.SIGINT, signal.SIGTERM):
+            try:
+                loop.add_signal_handler(s, _stop)
+            except NotImplementedError:
+                pass
+
+        await stop_ev.wait()
+    finally:
+        if scheduler_started:
+            try:
+                stop_scheduler()
+            except Exception:
+                logger.exception("runtime.scheduler_stop_failed")
+        for a in adapters:
+            try:
+                await a.stop()
+            except Exception:
+                logger.exception("runtime.adapter_stop_failed name=%s", getattr(a, "name", None))
         try:
-            asyncio.get_running_loop().add_signal_handler(s, _stop)
-        except NotImplementedError:
-            pass
-
-    await stop_ev.wait()
-    from memory.scheduler import stop_scheduler
-    stop_scheduler()
-    for a in adapters:
-        try:
-            await a.stop()
+            await loop.shutdown_default_executor()
         except Exception:
-            pass
-    logger.info("runtime.stopped")
+            logger.exception("runtime.executor_shutdown_failed")
+        logger.info("runtime.stopped")
 
 
 if __name__ == "__main__":

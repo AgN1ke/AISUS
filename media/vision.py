@@ -44,8 +44,8 @@ def describe_images(paths: List[str], task_hint: str | None = None) -> str:
             model=None,
             temperature=0.2,
             capability="vision_image",
-            max_tokens=1200,
+            max_tokens=1000,
         )
-    except RuntimeError:
+    except Exception:
         return ""
     return (resp.choices[0].message.content or "").strip()

@@ -1,14 +1,20 @@
 # agent/tools/fetch_page.py
 from __future__ import annotations
 
+import ipaddress
+import logging
 import os
 import re
+import socket
 import time
+import urllib.parse
 from typing import Optional
 
 import requests
 
 from db.search_repository import get_page_cache, put_page_cache
+
+logger = logging.getLogger(__name__)
 
 TTL_MIN = int(os.getenv("FETCH_TTL_MIN", "1440"))
 TIMEOUT_SEC = int(os.getenv("FETCH_TIMEOUT_SEC", "10"))
@@ -35,7 +41,28 @@ def _clean_text(html: str) -> str:
     return txt[:20000]
 
 
+def _is_safe_url(url: str) -> bool:
+    """Block requests to private/internal networks."""
+    try:
+        parsed = urllib.parse.urlparse(url)
+        if parsed.scheme not in ("http", "https"):
+            return False
+        hostname = parsed.hostname or ""
+        if not hostname:
+            return False
+        try:
+            ip = ipaddress.ip_address(hostname)
+        except ValueError:
+            ip = ipaddress.ip_address(socket.gethostbyname(hostname))
+        return ip.is_global
+    except Exception:
+        return True  # DNS failure — let requests handle it
+
+
 async def fetch_page(url: str) -> str:
+    if not _is_safe_url(url):
+        logger.warning("fetch_page.blocked_url url=%s", url[:200])
+        return ""
     cached = await get_page_cache(url, TTL_MIN)
     if cached:
         return cached
