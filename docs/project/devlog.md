@@ -5958,3 +5958,107 @@ User-facing хвости Stage 4 після цього фактично закр
 1. `chat_once_async` і прибирання `_run_async_sync`
 2. Stage 4.5B — portal/login
 3. подальше звуження `.env` fallback після реального засіву `provider_keys`
+
+## 2026-04-19 — Multitenant billing: thread-safe transaction logging + revolver E2E
+
+### Контекст
+
+Попередні сесії 2026-04-19 закрили policy-рівневі речі (keypool-first, `/balance` breakdown, voice/persona). Але runtime ще не був перевірений end-to-end на свіжому multitenant-стенді: ні засіяний пул ключів, ні підтверджена ротація під реальним 429, ні підтверджений факт, що billed turn із sync-потоку реально пише транзакції. Цю сесію присвячено саме тому — підняти @chibigochibot як другий бот, засіяти 15 ключів на $1 тестового бюджету і прогнати реальний користувацький turn під multitenant-білінгом.
+
+Під час цього прогону знайдено критичний прихований баг: `_maybe_emit_billing` у `agent/llm.py` структурно мовчав для всіх sync `chat_once`, що крутяться в `asyncio.to_thread` (planner, search_task, runner). У worker thread `asyncio.get_running_loop()` піднімає `RuntimeError`, гілка mute-ила запис, і `transactions` залишалися порожніми навіть коли live бот реально відповідав. На бойовому трафіку це проявлялось як `provider_keys.total_requests=0` при ненульових `accounts.total_spent_uah`.
+
+### Що зроблено
+
+Додано revolver-сід і AES-GCM round-trip для пулу:
+
+- `scripts/seed_provider_keys.py`
+
+Скрипт читає JSON по stdin, зашифровує через `BILLING_MASTER_KEY` і вставляє у `provider_keys`. Засіяно 15 ключів (5 OpenAI + 5 Gemini + 5 Anthropic, IDs 1-15) на $1 тестового бюджету. Round-trip перевірений на реальному decrypt під час `acquire()`.
+
+Виправлено thread-safe scheduling логування транзакцій:
+
+- `agent/llm.py`
+
+Що змінилось:
+
+- додано модульний `_MAIN_LOOP` і `set_main_event_loop(loop)`;
+- `_maybe_emit_billing` тепер не падає в `RuntimeError`, якщо викликаний з worker thread:
+  - спочатку пробує `asyncio.get_running_loop()` (як раніше — для loop-thread callsites);
+  - якщо loop у поточному потоці немає, але `_MAIN_LOOP` захоплений — планує через `asyncio.run_coroutine_threadsafe(coro, _MAIN_LOOP)`;
+  - якщо немає ні того, ні іншого — coro закривається без падіння і логується `llm.billing_no_loop_available`;
+- доданий `_billing_future_done` callback для логування помилок із threadsafe future.
+
+Це закриває принципову діру: будь-який sync `chat_once`, що йде через `asyncio.to_thread` (planner, search_task, agent runner у тих місцях, де ще не на bridge), тепер реально пише транзакцію без необхідності переписувати hot-path.
+
+Проброшено loop у runtime boot:
+
+- `run.py`
+
+Після `configure_runtime_executor(loop)` додано `set_main_event_loop(loop)`. Без цього виклику threadsafe гілка `_maybe_emit_billing` не має куди писати з worker threads.
+
+Додано E2E тест револьвера під 429:
+
+- `scripts/test_revolver_rate_limit.py`
+
+Скрипт мімікує реальний бойовий шлях:
+
+- піднімає billing turn для тестового акаунта;
+- monkey-patch'ить `agent.llm._dispatch_chat_once` так, щоб він кидав `RateLimitError`-сурогат;
+- запускає sync `chat_once` усередині `asyncio.to_thread` під активним `BillingContext`;
+- після 1.5s sleep перевіряє, що:
+  - hit key реально позначений `status='rate_limited'` у `provider_keys`;
+  - failed-транзакція з помилкою реально залогована в `transactions`;
+  - наступний `acquire()` повертає інший `key_id`.
+
+Результат прогону: PASS. Ключ 6 → 429 → marked `rate_limited` → next `acquire()` повернув ключ 7.
+
+Додано programmatic тест planner billing:
+
+- `scripts/test_planner_billing.py`
+
+Скрипт перевіряє threadsafe-шлях саме для `planner_reasoning` capability через реальний `_validate_search()` planner-а під `asyncio.to_thread`. Результат: PASS, `planner_reasoning` транзакція на 0.0345 UAH реально залогована з коректним `provider/model/key_id`.
+
+Виправлено stale тест 010:
+
+- `tests/test_010_memory.py::test_append_and_compress`
+
+Тест писав 80 повідомлень × ~16 токенів = ~1280 токенів, але `MEMORY_RECENT_BUDGET=10000` ніколи не пробивався, тому консолідація реально не запускалась і assertion `len(longs) >= 1` тримався випадково. Додано `monkeypatch.setattr("memory.manager._recent_budget", lambda: 200)`, щоб бюджет реально пробивався.
+
+Засіяно pricing рядки для реальних моделей у використанні:
+
+- runtime тепер не пише `cost_uah=0` для `gpt-5-chat-latest`, `gpt-5`, `gpt-5-reasoning`, `gpt-4o-mini`, `gemini-2.5-flash`, `gemini-2.5-pro`, `claude-sonnet-4-5`, `claude-opus-4-5`;
+- це валідовано по реальному live-турну: на 2333-token запиті баланс впав на 0.181 UAH.
+
+### Тести
+
+Локально прогнано:
+
+- `pytest -q` (повний пакет): `308 passed`;
+- `scripts/test_revolver_rate_limit.py` -> PASS;
+- `scripts/test_planner_billing.py` -> PASS.
+
+### Верифікація і деплой
+
+Це сесія розробницького верифікаційного контуру, без production deploy:
+
+- піднятий другий бот @chibigochibot як ізольований multitenant стенд;
+- засіяні 15 тестових ключів через `scripts/seed_provider_keys.py`;
+- live-перевірка: реальне повідомлення в Telegram → транзакція в `transactions` із ненульовим `cost_uah`, ненульовим `tokens_in/tokens_out`, коректним `key_id` (не NULL);
+- повний `pytest -q` зелений локально;
+- закоміччено `b6fa3d0 Multitenant billing: thread-safe transaction logging` у гілку `multitenant`. У коміт навмисно НЕ потрапили `.env` (містить тестовий `BILLING_MASTER_KEY`, DB pass і токен @chibigochibot) і `mariadb-12.2.2-winx64.zip` (локальний інсталятор).
+- staging/prod sync на `/opt/smartest{,-staging}` цією сесією **не виконувався** — це окремий крок Stage 7 з ротацією ключів і генерацією окремого prod `BILLING_MASTER_KEY`.
+
+### Результат
+
+Multitenant runtime пройшов повний end-to-end smoke на свіжому стенді. Ключ-пул реально ротується під 429, billed turn із sync-потоку реально пише транзакцію, і `_maybe_emit_billing` більше не мовчить у worker threads. Це знімає останній прихований runtime-блокер до бети.
+
+### Що далі
+
+Після цього на гілці `multitenant` лишаються вже не runtime-діри, а організаційні і product-level кроки:
+
+1. Stage 4.5B — portal/login (окрема сесія, велика робота).
+2. Stage 5 — Monobank acquiring (треба ФОП у юзера).
+3. Stage 6 — текст ToS/Privacy (юзер).
+4. Stage 7 — реальний deploy: ротувати тестові ключі, згенерити prod `BILLING_MASTER_KEY`, задеплоїти через `deploy.cjs`.
+5. P1 з §12.3 — `chat_once_async` і прибирання `_run_async_sync` (perf-only, відкладено).
+6. P5 — refactor хардкоду `core/model_preferences.py` на БД-driven catalog (UX-only, відкладено).
