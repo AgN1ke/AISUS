@@ -139,6 +139,8 @@ async def main():
     logger.info("runtime.boot config_path=%s log_level=%s", CONFIG_PATH, LOG_LEVEL)
     loop = asyncio.get_running_loop()
     executor = configure_runtime_executor(loop)
+    from agent.llm import set_main_event_loop
+    set_main_event_loop(loop)
     adapters = []
     scheduler_started = False
     try:

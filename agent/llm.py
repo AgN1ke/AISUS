@@ -29,6 +29,15 @@ from core.provider_registry import (
 logger = logging.getLogger(__name__)
 
 
+_MAIN_LOOP: "asyncio.AbstractEventLoop | None" = None
+
+
+def set_main_event_loop(loop: "asyncio.AbstractEventLoop | None") -> None:
+    """Capture the runtime event loop so sync callsites can schedule logging."""
+    global _MAIN_LOOP
+    _MAIN_LOOP = loop
+
+
 def _maybe_emit_billing(
     *,
     response: Any,
@@ -41,8 +50,9 @@ def _maybe_emit_billing(
 ) -> None:
     """Schedule a transactions row write if a BillingContext is active.
 
-    Fire-and-forget — the transaction may land slightly after the caller
-    moves on. Errors inside the logger are swallowed and logged.
+    Fire-and-forget. Works from both the event loop thread and worker threads
+    (planner/search_task are dispatched via asyncio.to_thread). The latter rely
+    on the main loop captured at runtime boot via set_main_event_loop().
     """
     try:
         from billing.runtime import current_billing_context
@@ -52,11 +62,6 @@ def _maybe_emit_billing(
 
     ctx = current_billing_context()
     if ctx is None or not ctx.is_complete():
-        return
-
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
         return
 
     latency_ms = int((time.monotonic() - started_at) * 1000)
@@ -71,11 +76,33 @@ def _maybe_emit_billing(
         status=status,
         error_text=error_text,
     )
+
     try:
-        task = loop.create_task(coro)
-        task.add_done_callback(_billing_task_done)
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+
+    try:
+        if loop is not None:
+            task = loop.create_task(coro)
+            task.add_done_callback(_billing_task_done)
+        elif _MAIN_LOOP is not None and not _MAIN_LOOP.is_closed():
+            fut = asyncio.run_coroutine_threadsafe(coro, _MAIN_LOOP)
+            fut.add_done_callback(_billing_future_done)
+        else:
+            coro.close()
+            logger.debug("llm.billing_no_loop_available")
     except Exception as exc:
         logger.debug("llm.billing_schedule_failed: %s", exc)
+
+
+def _billing_future_done(fut: "asyncio.futures.Future[Any]") -> None:
+    try:
+        exc = fut.exception()
+    except Exception:
+        return
+    if exc is not None:
+        logger.warning("llm.billing_log_error: %s", exc)
 
 
 def _billing_task_done(task: "asyncio.Task[Any]") -> None:

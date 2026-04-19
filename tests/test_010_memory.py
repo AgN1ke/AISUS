@@ -6,7 +6,8 @@ from db.memory_repository import fetch_long_all, fetch_recent, recent_total_toke
 CHAT=99901
 
 @pytest.mark.asyncio
-async def test_append_and_compress():
+async def test_append_and_compress(monkeypatch):
+    monkeypatch.setattr("memory.manager._recent_budget", lambda: 200)
     for i in range(80):
         await memory_manager.append_message(CHAT, "user", f"msg {i} " + "x"*50)
     toks_before = await recent_total_tokens(CHAT)
