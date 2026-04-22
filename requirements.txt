@@ -4,6 +4,7 @@ python-telegram-bot==21.5
 python-dateutil
 heroku3
 requests>=2.32.2
+httpx>=0.27
 google-auth>=2.39.0
 aiomysql
 python-dotenv
@@ -13,3 +14,4 @@ pydub>=0.25.1
 telethon>=1.36.0
 pyyaml>=6.0.2
 apscheduler>=3.10
+python-jose[cryptography]>=3.3

@@ -7,7 +7,18 @@ import aiomysql
 from dotenv import load_dotenv
 from core.env import db_pool_size
 
-load_dotenv()
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_SERVER_ENV_PATH = Path("/opt/smartest/.env")
+ENV_PATH = Path(
+    os.getenv("SMARTEST_ENV_PATH")
+    or (
+        DEFAULT_SERVER_ENV_PATH
+        if DEFAULT_SERVER_ENV_PATH.exists()
+        else PROJECT_ROOT / ".env"
+    )
+)
+
+load_dotenv(ENV_PATH)
 
 _DB_POOL = None
 

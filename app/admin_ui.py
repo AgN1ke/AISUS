@@ -22,8 +22,9 @@ from pathlib import Path
 from typing import Iterable
 from urllib.parse import parse_qs, urlencode, urlparse
 
-from core.env import can_reason
+from core.env import can_reason, telegram_bot_token
 from core.logging_setup import log_file_for, setup_logging
+from core.model_preferences import MODEL_GROUPS
 from core.podcast import (
     podcast_healthcheck,
     podcast_runtime_config,
@@ -50,6 +51,16 @@ from db.admin_repository import (
     normalize_user_sort,
 )
 from db.keypool_repository import get_provider_key, set_key_status
+from db.portal_repository import (
+    create_portal_topup_request,
+    ensure_portal_identity,
+    get_portal_dashboard,
+    get_portal_history,
+    get_portal_settings,
+    get_portal_topups,
+    get_portal_turn_detail,
+    update_portal_settings,
+)
 from memory import memory_manager
 
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
@@ -66,13 +77,21 @@ ENV_PATH = Path(
     )
 )
 COOKIE_NAME = "smartest_admin_session"
+USER_COOKIE_NAME = "_smartest_user"
+USER_OAUTH_COOKIE_NAME = "_smartest_tg_oauth"
+ADMIN_PASSWORD_LOGIN_PATH = os.getenv("SMARTEST_ADMIN_PASSWORD_LOGIN_PATH", "/403").strip() or "/403"
+if not ADMIN_PASSWORD_LOGIN_PATH.startswith("/"):
+    ADMIN_PASSWORD_LOGIN_PATH = "/" + ADMIN_PASSWORD_LOGIN_PATH
 SESSION_MAX_AGE = 60 * 60 * 24 * 30
+USER_OAUTH_MAX_AGE = 60 * 10
+JWKS_CACHE_TTL = 60 * 60
 HOST = os.getenv("SMARTEST_ADMIN_HOST", "127.0.0.1")
 PORT = int(os.getenv("SMARTEST_ADMIN_PORT", "8787"))
 MANAGED_BOT_SERVICE = os.getenv("SMARTEST_MANAGED_SERVICE", "smartest-bot.service")
 SELF_SERVICE_NAME = os.getenv("SMARTEST_ADMIN_SERVICE_NAME", "smartest-admin.service")
 BOT_TRACE_LOG = log_file_for("smartest-bot")
 ADMIN_TRACE_LOG = log_file_for("smartest-admin")
+_JWKS_CACHE: dict[str, object] = {"fetched_at": 0.0, "keys": None}
 
 # ---------------------------------------------------------------------------
 # Provider definitions — base URLs are code constants, not user-facing
@@ -491,6 +510,12 @@ def _admin_username_key() -> str:
 def _session_secret_key() -> str:
     return "SMARTEST_ADMIN_SESSION_SECRET"
 
+def _user_session_secret_key() -> str:
+    return "SMARTEST_USER_SESSION_SECRET"
+
+def _admin_tg_user_ids_key() -> str:
+    return "ADMIN_TG_USER_IDS"
+
 def _safe_env_value(raw: str) -> str:
     value = str(raw)
     if value == "":
@@ -559,13 +584,26 @@ def write_env_updates(path: Path, updates: dict[str, str]) -> None:
 # Helpers: auth
 # ---------------------------------------------------------------------------
 
-def ensure_session_secret(values: dict[str, str]) -> str:
-    secret = values.get(_session_secret_key()) or ""
+def _ensure_secret(values: dict[str, str], env_key: str, *, fallback_key: str = "") -> str:
+    secret = values.get(env_key) or os.getenv(env_key) or ""
     if secret:
         return secret
+    if fallback_key:
+        fallback = values.get(fallback_key) or os.getenv(fallback_key) or ""
+        if fallback:
+            write_env_updates(ENV_PATH, {env_key: fallback})
+            return fallback
     secret = secrets.token_urlsafe(32)
-    write_env_updates(ENV_PATH, {_session_secret_key(): secret})
+    write_env_updates(ENV_PATH, {env_key: secret})
     return secret
+
+
+def ensure_session_secret(values: dict[str, str]) -> str:
+    return _ensure_secret(values, _session_secret_key())
+
+
+def ensure_user_session_secret(values: dict[str, str]) -> str:
+    return _ensure_secret(values, _user_session_secret_key(), fallback_key=_session_secret_key())
 
 def admin_username(values: dict[str, str]) -> str:
     return values.get(_admin_username_key()) or os.getenv(_admin_username_key()) or "admin"
@@ -573,12 +611,16 @@ def admin_username(values: dict[str, str]) -> str:
 def admin_password(values: dict[str, str]) -> str:
     return values.get(_admin_password_key()) or os.getenv(_admin_password_key()) or "admin"
 
-def session_token(username: str, secret: str) -> str:
-    payload = {"u": username, "exp": int(time.time()) + SESSION_MAX_AGE}
+
+def _sign_session_payload(payload: dict, secret: str) -> str:
     raw = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
     digest = hmac.new(secret.encode("utf-8"), raw, hashlib.sha256).hexdigest()
     encoded = base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
     return f"{encoded}.{digest}"
+
+
+def session_token(username: str, secret: str) -> str:
+    return _sign_session_payload({"u": username, "exp": int(time.time()) + SESSION_MAX_AGE}, secret)
 
 def parse_session_token(token: str, secret: str) -> dict | None:
     try:
@@ -600,6 +642,88 @@ def parse_session_token(token: str, secret: str) -> dict | None:
     if int(payload.get("exp", 0)) <= int(time.time()):
         return None
     return payload
+
+
+def user_session_token(
+    *,
+    user_id: int,
+    tg_username: str = "",
+    display_name: str = "",
+    is_admin: bool = False,
+    secret: str,
+) -> str:
+    return _sign_session_payload(
+        {
+            "user_id": int(user_id),
+            "username": tg_username,
+            "name": display_name,
+            "is_admin": bool(is_admin),
+            "exp": int(time.time()) + SESSION_MAX_AGE,
+        },
+        secret,
+    )
+
+
+def admin_tg_user_ids(values: dict[str, str]) -> set[int]:
+    raw = values.get(_admin_tg_user_ids_key()) or os.getenv(_admin_tg_user_ids_key()) or ""
+    result: set[int] = set()
+    for part in raw.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            result.add(int(part))
+        except ValueError:
+            continue
+    return result
+
+
+def telegram_login_client_id(values: dict[str, str]) -> str:
+    raw = (values.get("TELEGRAM_LOGIN_CLIENT_ID") or os.getenv("TELEGRAM_LOGIN_CLIENT_ID") or "").strip()
+    if raw:
+        return raw
+    token = values.get("TG_BOT_TOKEN") or values.get("MYAPI_BOT_TOKEN") or telegram_bot_token()
+    candidate = (token or "").split(":", 1)[0].strip()
+    return candidate if candidate.isdigit() else ""
+
+
+def _jwks_cache_get() -> object | None:
+    fetched_at = float(_JWKS_CACHE.get("fetched_at") or 0.0)
+    if fetched_at and (time.time() - fetched_at) < JWKS_CACHE_TTL:
+        return _JWKS_CACHE.get("keys")
+    return None
+
+
+def _jwks_cache_put(keys: object) -> None:
+    _JWKS_CACHE["fetched_at"] = time.time()
+    _JWKS_CACHE["keys"] = keys
+
+
+def verify_telegram_token(id_token: str, bot_id: str, *, expected_nonce: str | None = None) -> dict:
+    try:
+        import httpx
+        from jose import jwt
+    except Exception as exc:
+        raise RuntimeError("Telegram Login backend requires python-jose[cryptography].") from exc
+    jwks = _jwks_cache_get()
+    if jwks is None:
+        response = httpx.get("https://oauth.telegram.org/.well-known/jwks.json", timeout=10.0)
+        response.raise_for_status()
+        jwks = response.json()
+        _jwks_cache_put(jwks)
+    claims = jwt.decode(
+        id_token,
+        jwks,
+        algorithms=["RS256"],
+        audience=str(bot_id),
+        issuer="https://oauth.telegram.org",
+    )
+    if expected_nonce is not None:
+        token_nonce = str(claims.get("nonce") or "")
+        if token_nonce != expected_nonce:
+            raise RuntimeError("Telegram token nonce mismatch.")
+    return claims
+
 
 # ---------------------------------------------------------------------------
 # Helpers: systemctl
@@ -1131,11 +1255,12 @@ option.no-key{{ color:#bbb; }}
         <label class="chk"><input type="checkbox" name="restart_bot" value="1" checked> Перезапустити бота</label>
       </div>
       <div class="toolbar-right">
+        <a class="btn btn-sec" href="/settings">Портал</a>
         <a class="btn btn-sec" href="/admin/users">Користувачі</a>
         <a class="btn btn-sec" href="/prompts">Промпти</a>
         <a class="btn btn-sec" href="/logs">Логи</a>
         <button class="btn btn-sec" type="submit" formaction="/clear-memory" formmethod="post" onclick="return confirm('Очистити всю пам\\'ять бота? Це видалить recent, long-term і core пам\\'ять для всіх чатів.');">Очистити пам'ять</button>
-        <button class="btn btn-sec" type="submit" formaction="/logout" formmethod="post">Вийти</button>
+        <button class="btn btn-sec" type="submit" formaction="/admin/logout" formmethod="post">Вийти</button>
       </div>
     </div>
 
@@ -1425,14 +1550,14 @@ body{{ margin:0; min-height:100vh; font-family:"IBM Plex Sans","Segoe UI",sans-s
 <div class="sh">
   <div class="hero-card">
     <h1>Промпти</h1>
-    <p>Системні промпти для кожного етапу. Модель підтягується з <a class="nav-link" href="/">головної сторінки</a>.
+    <p>Системні промпти для кожного етапу. Модель підтягується з <a class="nav-link" href="/admin/config">головної сторінки</a>.
     Порожнє поле = використовується вбудований промпт за замовчуванням.</p>
   </div>
   {flash_html}
   <form method="post" action="/save-prompts">
     <div class="toolbar">
       <button class="btn btn-main" type="submit">Зберегти промпти</button>
-      <a class="nav-link" href="/">&larr; Назад до конфігурації</a>
+      <a class="nav-link" href="/admin/config">&larr; Назад до конфігурації</a>
     </div>
 
     <div class="prompt-grid">
@@ -1702,7 +1827,7 @@ button:hover{{ background:#333; }}
     </label>
     <button onclick="reload()">Оновити</button>
     <button onclick="scrollEnd()">&#8595; Кінець</button>
-    <a class="nav-link" href="/">&larr; Конфігурація</a>
+    <a class="nav-link" href="/admin/config">&larr; Конфігурація</a>
     <a class="nav-link" href="/prompts">Промпти</a>
   </div>
   <div class="filters">
@@ -1930,14 +2055,15 @@ body{{ margin:0; min-height:100vh; font-family:"IBM Plex Sans","Segoe UI",sans-s
       <p>Multitenant admin dashboard.</p>
     </div>
     <div class="nav">
-      <a href="/">Конфіг</a>
+      <a href="/settings">Портал</a>
+      <a href="/admin/config">Конфіг</a>
       <a href="/admin/users">Користувачі</a>
       <a href="/admin/transactions">Транзакції</a>
       <a href="/admin/chats">Чати</a>
       <a href="/admin/topups">Поповнення</a>
       <a href="/admin/keys">Ключі</a>
       <a href="/logs">Логи</a>
-      <form method="post" action="/logout" style="margin:0">
+      <form method="post" action="/admin/logout" style="margin:0">
         <button type="submit">Вийти</button>
       </form>
     </div>
@@ -2779,7 +2905,7 @@ def _parse_admin_key_toggle_path(path: str) -> int | None:
     return int(match.group(1)) if match else None
 
 
-def render_login(message: str = "") -> str:
+def render_login(message: str = "", *, action_path: str = ADMIN_PASSWORD_LOGIN_PATH) -> str:
     flash = f'<div class="login-flash">{html.escape(message)}</div>' if message else ""
     return f"""<!doctype html>
 <html lang="uk">
@@ -2803,7 +2929,7 @@ button{{ width:100%; margin-top:18px; border:0; border-radius:999px; padding:14p
 </style>
 </head>
 <body>
-<form class="card" method="post" action="/login">
+<form class="card" method="post" action="{html.escape(action_path)}">
   <h1>Smartest<br>Control</h1>
   <p>Увійди в панель керування.</p>
   {flash}
@@ -2813,6 +2939,578 @@ button{{ width:100%; margin-top:18px; border:0; border-radius:999px; padding:14p
 </form>
 </body>
 </html>"""
+
+
+def _portal_flash_html(flash: str, flash_kind: str) -> str:
+    if not flash:
+        return ""
+    kind = flash_kind if flash_kind in {"info", "ok", "warn"} else "info"
+    return f'<div class="flash flash-{html.escape(kind)}">{html.escape(flash)}</div>'
+
+
+def render_user_portal_landing(
+    values: dict[str, str],
+    *,
+    flash: str = "",
+    flash_kind: str = "info",
+    login_nonce: str = "",
+) -> str:
+    client_id = telegram_login_client_id(values)
+    flash_html = _portal_flash_html(flash, flash_kind)
+    login_ready = bool(client_id)
+    login_note = (
+        "Telegram Login library готова: браузер отримує `id_token`, а бекенд верифікує його через JWKS."
+        if login_ready
+        else "Telegram Login ще не готовий: потрібен валідний `TG_BOT_TOKEN` або `TELEGRAM_LOGIN_CLIENT_ID`."
+    )
+    login_cta = (
+        '<button class="btn btn-main" type="button" id="tg-login-btn" onclick="smartestTelegramLogin()">Увійти через Telegram</button>'
+        if login_ready
+        else '<button class="btn btn-main" type="button" disabled>Увійти через Telegram</button>'
+    )
+    client_id_js = json.dumps(client_id, ensure_ascii=False)
+    login_nonce_js = json.dumps(login_nonce, ensure_ascii=False)
+    return f"""<!doctype html>
+<html lang="uk">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Smartest Portal</title>
+<script src="https://oauth.telegram.org/js/telegram-login.js?3" async></script>
+<style>
+:root {{ --bg:#f6ecd7; --paper:rgba(255,249,240,.9); --ink:#1f1d19; --muted:#6a624f; --accent:#bf4b2c; --accent2:#204d46; --line:rgba(59,45,30,.14); --ok:#1c7b5d; --warn:#9f5e17; --shadow:0 28px 70px rgba(44,28,10,.16); }}
+*{{ box-sizing:border-box; }}
+body{{ margin:0; min-height:100vh; font-family:"IBM Plex Sans","Segoe UI",sans-serif; color:var(--ink);
+  background: radial-gradient(circle at top left,rgba(191,75,44,.18),transparent 30%),
+    radial-gradient(circle at bottom right,rgba(32,77,70,.14),transparent 26%),
+    linear-gradient(145deg,#f4e8cf 0%,#fbf6ec 55%,#eadfc9 100%); }}
+.wrap{{ max-width:1120px; margin:0 auto; padding:28px 18px 48px; }}
+.hero{{ display:grid; gap:22px; grid-template-columns:1.1fr .9fr; align-items:stretch; }}
+.card{{ background:var(--paper); border:1px solid var(--line); border-radius:28px; box-shadow:var(--shadow); padding:26px; }}
+.hero h1{{ margin:0 0 12px; font-size:clamp(2.1rem,5vw,3.2rem); line-height:.92; letter-spacing:-.05em; }}
+.hero p{{ margin:0; color:var(--muted); line-height:1.6; }}
+.flash{{ margin:0 0 18px; padding:12px 14px; border-radius:14px; border:1px solid var(--line); background:rgba(255,255,255,.82); }}
+.flash-info{{ color:var(--accent2); }}
+.flash-ok{{ color:var(--ok); }}
+.flash-warn{{ color:var(--warn); }}
+.cta{{ display:flex; gap:12px; flex-wrap:wrap; margin-top:18px; }}
+.btn{{ border:0; border-radius:999px; padding:14px 18px; font:inherit; font-weight:700; cursor:pointer; }}
+.btn-main{{ background:linear-gradient(135deg,var(--accent),#d96c44); color:#fff7ef; }}
+.btn-main:disabled{{ opacity:.45; cursor:not-allowed; }}
+.btn-sec{{ background:rgba(255,255,255,.84); color:var(--ink); border:1px solid var(--line); text-decoration:none; }}
+.meta{{ display:grid; gap:14px; }}
+.meta-item{{ padding:14px 16px; border-radius:18px; background:rgba(255,255,255,.72); border:1px solid rgba(59,45,30,.08); }}
+.meta-item span{{ display:block; color:var(--muted); font-size:.84rem; margin-bottom:6px; }}
+.mono{{ font-family:"IBM Plex Mono","Consolas",monospace; font-size:.88rem; }}
+.status{{ margin-top:14px; min-height:24px; color:var(--accent2); font-weight:600; }}
+.foot{{ margin-top:18px; display:flex; gap:12px; flex-wrap:wrap; align-items:center; }}
+.foot a{{ color:var(--accent2); font-weight:700; text-decoration:none; }}
+.foot a:hover{{ text-decoration:underline; }}
+@media (max-width:840px) {{ .hero{{ grid-template-columns:1fr; }} }}
+</style>
+<script>
+const smartestTelegramClientId = {client_id_js};
+const smartestTelegramNonce = {login_nonce_js};
+
+function smartestSetLoginStatus(text) {{
+  const node = document.getElementById("tg-login-status");
+  if (node) node.textContent = text;
+}}
+
+async function smartestSubmitTelegramIdToken(idToken) {{
+  const response = await fetch("/auth/telegram", {{
+    method: "POST",
+    credentials: "same-origin",
+    headers: {{"Content-Type": "application/json"}},
+    body: JSON.stringify({{ id_token: idToken }}),
+  }});
+  const payload = await response.json().catch(() => ({{ ok: false, message: "invalid_json" }}));
+  if (!response.ok || !payload.ok) {{
+    throw new Error(payload.message || "telegram_login_failed");
+  }}
+  window.location.href = payload.redirect || "/";
+}}
+
+function smartestTelegramLogin() {{
+  if (!smartestTelegramClientId) {{
+    smartestSetLoginStatus("Telegram Login не сконфігурований для цього portal.");
+    return;
+  }}
+  if (!window.Telegram || !window.Telegram.Login || typeof window.Telegram.Login.auth !== "function") {{
+    smartestSetLoginStatus("Telegram Login library ще не завантажилась. Перезавантаж сторінку і спробуй ще раз.");
+    return;
+  }}
+  smartestSetLoginStatus("Відкриваю Telegram Login...");
+  window.Telegram.Login.auth({{
+    client_id: Number(smartestTelegramClientId),
+    nonce: smartestTelegramNonce || undefined,
+    lang: "uk",
+  }}, async function(result) {{
+    if (!result) {{
+      smartestSetLoginStatus("Telegram Login не повернув відповідь. Закрий popup і спробуй ще раз.");
+      return;
+    }}
+    if (result.error) {{
+      smartestSetLoginStatus("Telegram Login не завершився: " + result.error);
+      return;
+    }}
+    if (!result.id_token) {{
+      smartestSetLoginStatus("Telegram Login не повернув id_token.");
+      return;
+    }}
+    smartestSetLoginStatus("Перевіряю Telegram token...");
+    try {{
+      await smartestSubmitTelegramIdToken(result.id_token);
+    }} catch (error) {{
+      smartestSetLoginStatus("Telegram Login не завершився: " + (error.message || error));
+    }}
+  }});
+}}
+</script>
+</head>
+<body>
+<div class="wrap">
+  {flash_html}
+  <section class="hero">
+    <div class="card">
+      <h1>Smartest<br>Portal</h1>
+      <p>Користувацький портал для multitenant-бота: баланс, історія turn-ів, деталізація витрат і персональні налаштування. Вхід іде через нову Telegram Login library: popup повертає <code>id_token</code>, а бекенд верифікує його через JWKS.</p>
+      <div class="cta">
+        {login_cta}
+      </div>
+      <div id="tg-login-status" class="status">{html.escape(login_note)}</div>
+      <div class="foot">
+        <span class="mono">client_id: {html.escape(client_id or '—')}</span>
+        <span class="mono">endpoint: /auth/telegram</span>
+      </div>
+    </div>
+    <div class="card meta">
+      <div class="meta-item"><span>Що вже є</span>Баланс, історія turn-ів, turn breakdown і user settings.</div>
+      <div class="meta-item"><span>Що ще далі</span>Telegram Login для `/admin`, topup flows і повний portal polish.</div>
+      <div class="meta-item"><span>Важливо</span>Для login потрібні Allowed URLs у `@BotFather → Web Login`: домен порталу. <code>client_secret</code> для library-flow не потрібний.</div>
+    </div>
+  </section>
+</div>
+</body>
+</html>"""
+
+
+def render_portal_shell(
+    *,
+    title: str,
+    user: dict,
+    body: str,
+    flash: str = "",
+    flash_kind: str = "info",
+) -> str:
+    flash_html = _portal_flash_html(flash, flash_kind)
+    display_name = (
+        user.get("first_name")
+        or user.get("tg_username")
+        or f"user {user.get('user_id')}"
+    )
+    safe_name = html.escape(str(display_name))
+    safe_username = html.escape("@" + user["tg_username"]) if user.get("tg_username") else "—"
+    admin_link = '<a href="/admin">Адмінка</a>' if user.get("is_admin") else ""
+    return f"""<!doctype html>
+<html lang="uk">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{html.escape(title)}</title>
+<style>
+:root {{ --bg:#f6ecd7; --paper:rgba(255,249,240,.9); --ink:#1f1d19; --muted:#6a624f; --accent:#bf4b2c; --accent2:#204d46; --line:rgba(59,45,30,.14); --ok:#1c7b5d; --warn:#9f5e17; --shadow:0 28px 70px rgba(44,28,10,.16); }}
+*{{ box-sizing:border-box; }}
+body{{ margin:0; min-height:100vh; font-family:"IBM Plex Sans","Segoe UI",sans-serif; color:var(--ink);
+  background: radial-gradient(circle at top left,rgba(191,75,44,.18),transparent 30%),
+    radial-gradient(circle at bottom right,rgba(32,77,70,.14),transparent 26%),
+    linear-gradient(145deg,#f4e8cf 0%,#fbf6ec 55%,#eadfc9 100%); }}
+.wrap{{ max-width:1200px; margin:0 auto; padding:24px 18px 40px; }}
+.topbar{{ display:flex; gap:12px; justify-content:space-between; align-items:center; flex-wrap:wrap; margin-bottom:18px; }}
+.topbar h1{{ margin:0; font-size:clamp(1.8rem,4vw,2.6rem); letter-spacing:-.04em; }}
+.topbar p{{ margin:4px 0 0; color:var(--muted); }}
+.nav{{ display:flex; gap:10px; flex-wrap:wrap; align-items:center; }}
+.nav a,.nav button{{ text-decoration:none; border:1px solid var(--line); background:rgba(255,255,255,.82); color:var(--ink); padding:10px 14px; border-radius:999px; font:inherit; cursor:pointer; }}
+.nav a:hover,.nav button:hover{{ border-color:rgba(32,77,70,.25); color:var(--accent2); }}
+.flash{{ margin:0 0 18px; padding:12px 14px; border-radius:14px; border:1px solid var(--line); background:rgba(255,255,255,.82); }}
+.flash-info{{ color:var(--accent2); }}
+.flash-ok{{ color:var(--ok); }}
+.flash-warn{{ color:var(--warn); }}
+.panel{{ background:var(--paper); border:1px solid var(--line); border-radius:24px; box-shadow:var(--shadow); padding:18px; margin-bottom:18px; }}
+.panel h2,.panel h3{{ margin:0 0 10px; }}
+.meta-grid{{ display:grid; gap:12px; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); }}
+.stat{{ padding:14px; border-radius:18px; background:rgba(255,255,255,.72); border:1px solid rgba(59,45,30,.08); }}
+.stat .lbl{{ display:block; color:var(--muted); font-size:.84rem; margin-bottom:6px; }}
+.stat .val{{ font-size:1.28rem; font-weight:700; letter-spacing:-.03em; }}
+.data-table{{ width:100%; border-collapse:collapse; font-size:.94rem; }}
+.data-table th,.data-table td{{ padding:10px 12px; border-bottom:1px solid rgba(59,45,30,.08); text-align:left; vertical-align:top; }}
+.data-table a{{ color:var(--accent2); text-decoration:none; }}
+.data-table a:hover{{ text-decoration:underline; }}
+.muted{{ color:var(--muted); }}
+.mono{{ font-family:"IBM Plex Mono","Consolas",monospace; font-size:.88rem; }}
+.tag{{ display:inline-block; padding:4px 9px; border-radius:999px; background:rgba(32,77,70,.1); color:var(--accent2); font-size:.82rem; font-weight:700; }}
+.empty{{ color:var(--muted); font-style:italic; }}
+.portal-copy{{ max-width:78ch; line-height:1.6; }}
+.portal-form{{ display:grid; gap:18px; }}
+.portal-form-grid{{ display:grid; gap:14px; grid-template-columns:repeat(auto-fit,minmax(260px,1fr)); }}
+.portal-form-grid--compact{{ grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); }}
+.portal-field{{ display:grid; gap:8px; align-content:start; padding:16px; border-radius:18px; background:rgba(255,255,255,.72); border:1px solid rgba(59,45,30,.08); }}
+.portal-field-title{{ font-size:1.04rem; font-weight:700; letter-spacing:-.02em; }}
+.portal-help{{ color:var(--muted); font-size:.92rem; line-height:1.45; }}
+.portal-field input,.portal-field select,.portal-field textarea{{ width:100%; border:1px solid rgba(59,45,30,.18); border-radius:12px; background:rgba(255,255,255,.95); padding:10px 12px; font:inherit; color:var(--ink); }}
+.portal-form-actions{{ display:flex; justify-content:flex-start; }}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="topbar">
+    <div>
+      <h1>{html.escape(title)}</h1>
+      <p>{safe_name} · {safe_username}</p>
+    </div>
+    <div class="nav">
+      <a href="/">Огляд</a>
+      <a href="/history">Історія</a>
+      <a href="/settings">Налаштування</a>
+      <a href="/topup">Поповнення</a>
+      {admin_link}
+      <form method="post" action="/logout" style="margin:0">
+        <button type="submit">Вийти</button>
+      </form>
+    </div>
+  </div>
+  {flash_html}
+  {body}
+</div>
+</body>
+</html>"""
+
+
+def render_portal_dashboard_page(
+    user: dict,
+    account: dict,
+    turns: list[dict],
+    settings: dict[str, str],
+    *,
+    flash: str = "",
+    flash_kind: str = "info",
+) -> str:
+    rows = ""
+    for turn in turns:
+        rows += f"""<tr>
+          <td class="mono"><a href="/history/{html.escape(turn['turn_id'])}">{html.escape(turn['turn_id'][:8])}</a></td>
+          <td>{html.escape(str(turn.get('capability') or '—'))}</td>
+          <td>{html.escape(str(turn.get('route') or '—'))}</td>
+          <td>{html.escape(str(turn.get('status') or '—'))}</td>
+          <td>{_fmt_money(turn.get('total_cost_uah'))} грн</td>
+          <td>{_fmt_dt(turn.get('created_at'))}</td>
+        </tr>"""
+    if not rows:
+        rows = '<tr><td colspan="6" class="empty">Ще немає жодного turn-а.</td></tr>'
+    settings_preview = "".join(
+        f'<span class="tag">{html.escape(key)}={html.escape(str(value))}</span> '
+        for key, value in sorted(settings.items())[:6]
+    ) or '<span class="empty">user_settings ще порожні.</span>'
+    body = f"""
+<section class="panel">
+  <h2>Огляд акаунта</h2>
+  <div class="meta-grid">
+    <div class="stat"><span class="lbl">Account ID</span><div class="val mono">{html.escape(str(account.get('account_id')))}</div></div>
+    <div class="stat"><span class="lbl">Баланс</span><div class="val">{_fmt_money(account.get('balance_uah'))} грн</div></div>
+    <div class="stat"><span class="lbl">Витрачено всього</span><div class="val">{_fmt_money(account.get('total_spent_uah'))} грн</div></div>
+    <div class="stat"><span class="lbl">Поповнено всього</span><div class="val">{_fmt_money(account.get('total_topup_uah'))} грн</div></div>
+  </div>
+</section>
+<section class="panel">
+  <h2>Персональні налаштування</h2>
+  <div>{settings_preview}</div>
+</section>
+<section class="panel">
+  <h2>Останні turn-и</h2>
+  <table class="data-table">
+    <thead><tr><th>Turn</th><th>Capability</th><th>Route</th><th>Status</th><th>Cost</th><th>Created</th></tr></thead>
+    <tbody>{rows}</tbody>
+  </table>
+</section>"""
+    return render_portal_shell(
+        title="Smartest Portal",
+        user=user,
+        body=body,
+        flash=flash,
+        flash_kind=flash_kind,
+    )
+
+
+def render_portal_history_page(
+    user: dict,
+    account: dict,
+    turns: list[dict],
+    *,
+    flash: str = "",
+    flash_kind: str = "info",
+) -> str:
+    rows = ""
+    for turn in turns:
+        preview = html.escape(str(turn.get("user_message_text") or "")[:120] or "—")
+        rows += f"""<tr>
+          <td class="mono"><a href="/history/{html.escape(turn['turn_id'])}">{html.escape(turn['turn_id'])}</a></td>
+          <td>{html.escape(str(turn.get('capability') or '—'))}</td>
+          <td>{html.escape(str(turn.get('status') or '—'))}</td>
+          <td>{_fmt_money(turn.get('total_cost_uah'))} грн</td>
+          <td>{preview}</td>
+          <td>{_fmt_dt(turn.get('created_at'))}</td>
+        </tr>"""
+    if not rows:
+        rows = '<tr><td colspan="6" class="empty">Історія ще порожня.</td></tr>'
+    body = f"""
+<section class="panel">
+  <h2>Історія turn-ів</h2>
+  <p class="muted">Account <span class="mono">{html.escape(str(account.get('account_id')))}</span></p>
+  <table class="data-table">
+    <thead><tr><th>Turn ID</th><th>Capability</th><th>Status</th><th>Cost</th><th>User text</th><th>Created</th></tr></thead>
+    <tbody>{rows}</tbody>
+  </table>
+</section>"""
+    return render_portal_shell(
+        title="Історія turn-ів",
+        user=user,
+        body=body,
+        flash=flash,
+        flash_kind=flash_kind,
+    )
+
+
+def render_portal_turn_page(
+    user: dict,
+    turn: dict | None,
+    transactions: list[dict],
+    ambiguous_matches: list[dict],
+    *,
+    flash: str = "",
+    flash_kind: str = "info",
+) -> str:
+    if ambiguous_matches:
+        items = "".join(
+            f'<li><a href="/history/{html.escape(match["turn_id"])}">{html.escape(match["turn_id"])}</a> · {_fmt_dt(match.get("created_at"))}</li>'
+            for match in ambiguous_matches
+        )
+        body = f"""<section class="panel"><h2>Неоднозначний turn id</h2><p class="muted">Префікс збігається з кількома turn-ами. Уточни повніший id.</p><ul>{items}</ul></section>"""
+    elif turn is None:
+        body = '<section class="panel"><h2>Turn не знайдено</h2><p class="muted">Для цього акаунта немає turn-а з таким id або префіксом.</p></section>'
+    else:
+        tx_rows = ""
+        for tx in transactions:
+            tx_rows += f"""<tr>
+              <td>{html.escape(str(tx.get('capability') or '—'))}</td>
+              <td>{html.escape(str(tx.get('provider') or '—'))}</td>
+              <td>{html.escape(str(tx.get('model') or '—'))}</td>
+              <td>{_fmt_int(tx.get('tokens_in'))}</td>
+              <td>{_fmt_int(tx.get('tokens_out'))}</td>
+              <td>{_fmt_money(tx.get('cost_uah'), places=4)} грн</td>
+              <td>{html.escape(str(tx.get('status') or '—'))}</td>
+            </tr>"""
+        if not tx_rows:
+            tx_rows = '<tr><td colspan="7" class="empty">У цього turn-а ще немає sub-транзакцій.</td></tr>'
+        user_text = html.escape(str(turn.get("user_message_text") or "—"))
+        body = f"""
+<section class="panel">
+  <h2>Turn {html.escape(turn['turn_id'])}</h2>
+  <div class="meta-grid">
+    <div class="stat"><span class="lbl">Status</span><div class="val">{html.escape(str(turn.get('status') or '—'))}</div></div>
+    <div class="stat"><span class="lbl">Route</span><div class="val">{html.escape(str(turn.get('route') or '—'))}</div></div>
+    <div class="stat"><span class="lbl">Capability</span><div class="val">{html.escape(str(turn.get('capability') or '—'))}</div></div>
+    <div class="stat"><span class="lbl">Total cost</span><div class="val">{_fmt_money(turn.get('total_cost_uah'))} грн</div></div>
+  </div>
+  <p class="muted" style="margin-top:14px;">{user_text}</p>
+</section>
+<section class="panel">
+  <h2>Sub-транзакції</h2>
+  <table class="data-table">
+    <thead><tr><th>Capability</th><th>Provider</th><th>Model</th><th>In</th><th>Out</th><th>Cost</th><th>Status</th></tr></thead>
+    <tbody>{tx_rows}</tbody>
+  </table>
+</section>"""
+    return render_portal_shell(
+        title="Turn breakdown",
+        user=user,
+        body=body,
+        flash=flash,
+        flash_kind=flash_kind,
+    )
+
+
+def render_portal_settings_page(
+    user: dict,
+    account: dict,
+    settings: dict[str, str],
+    catalog: dict,
+    *,
+    flash: str = "",
+    flash_kind: str = "info",
+) -> str:
+    rows = ""
+    for key, value in sorted(settings.items()):
+        rows += f"<tr><td class=\"mono\">{html.escape(key)}</td><td>{html.escape(str(value))}</td></tr>"
+    if not rows:
+        rows = '<tr><td colspan="2" class="empty">Ще немає персональних налаштувань.</td></tr>'
+    phone = settings.get("profile_phone_number") or "—"
+    group_sections = ""
+    for group in catalog.get("groups", []):
+        options_html = "".join(
+            (
+                f'<option value="{html.escape(str(choice.get("value") or ""))}"'
+                f'{" selected" if str(choice.get("value") or "") == str(group.get("current_value") or "") else ""}>'
+                f'{html.escape(str(choice.get("label") or ""))}</option>'
+            )
+            for choice in group.get("choices", [])
+        )
+        group_sections += f"""
+    <label class="portal-field">
+      <span class="portal-field-title">{html.escape(str(group.get('title') or 'Група'))}</span>
+      <small class="portal-help">{html.escape(str(group.get('description') or ''))}</small>
+      <select name="{html.escape(str(group.get('field_name') or ''))}">
+        {options_html}
+      </select>
+    </label>"""
+
+    voices = catalog.get("voices", {})
+    voice_options_html = "".join(
+        (
+            f'<option value="{html.escape(str(choice.get("value") or ""))}"'
+            f'{" selected" if str(choice.get("value") or "") == str(voices.get("current_value") or "") else ""}>'
+            f'{html.escape(str(choice.get("label") or ""))}</option>'
+        )
+        for choice in voices.get("choices", [])
+    )
+    personas = catalog.get("personas", {})
+    persona_options_html = "".join(
+        (
+            f'<option value="{html.escape(str(choice.get("value") or ""))}"'
+            f'{" selected" if str(choice.get("value") or "") == str(personas.get("current_value") or "") else ""}>'
+            f'{html.escape(str(choice.get("label") or ""))}</option>'
+        )
+        for choice in personas.get("choices", [])
+    )
+    body = f"""
+<section class="panel">
+  <h2>Профіль</h2>
+  <div class="meta-grid">
+    <div class="stat"><span class="lbl">Telegram ID</span><div class="val mono">{html.escape(str(user.get('user_id')))}</div></div>
+    <div class="stat"><span class="lbl">Username</span><div class="val">{html.escape('@' + user['tg_username']) if user.get('tg_username') else '—'}</div></div>
+    <div class="stat"><span class="lbl">Phone</span><div class="val">{html.escape(str(phone))}</div></div>
+    <div class="stat"><span class="lbl">Account</span><div class="val mono">{html.escape(str(account.get('account_id')))}</div></div>
+  </div>
+</section>
+<section class="panel">
+  <h2>Персональні налаштування</h2>
+  <p class="muted portal-copy">Тут редагуються тільки твої user-specific override-и. Якщо вибрано <b>Server default</b>, runtime бере глобальний server policy.</p>
+  <form class="portal-form" method="post" action="/settings">
+    <div class="portal-form-grid">
+    {group_sections}
+    <label class="portal-field">
+      <span class="portal-field-title">🎙 Голос</span>
+      <small class="portal-help">Окремий user-specific голос для TTS. Якщо лишити Server default, озвучка бере глобальний server policy.</small>
+      <select name="{html.escape(str(voices.get('field_name') or 'voice_id'))}">
+        {voice_options_html}
+      </select>
+    </label>
+    <label class="portal-field">
+      <span class="portal-field-title">🎭 Persona</span>
+      <small class="portal-help">Персона впливає на тон і те, як саме бот формулює фінальні відповіді.</small>
+      <select name="{html.escape(str(personas.get('field_name') or 'persona_slug'))}">
+        {persona_options_html}
+      </select>
+    </label>
+    </div>
+    <div class="portal-form-actions">
+      <button class="btn btn-main" type="submit">Зберегти</button>
+    </div>
+  </form>
+</section>
+<section class="panel">
+  <h2>Raw user settings</h2>
+  <table class="data-table">
+    <thead><tr><th>Key</th><th>Value</th></tr></thead>
+    <tbody>{rows}</tbody>
+  </table>
+</section>"""
+    return render_portal_shell(
+        title="Налаштування",
+        user=user,
+        body=body,
+        flash=flash,
+        flash_kind=flash_kind,
+    )
+
+
+def render_portal_topup_page(
+    user: dict,
+    account: dict,
+    topups: list[dict],
+    *,
+    flash: str = "",
+    flash_kind: str = "info",
+) -> str:
+    rows = ""
+    for topup in topups:
+        note = (topup.get("note") or "").strip()
+        note_cell = html.escape(note[:160] + ("…" if len(note) > 160 else "")) if note else "—"
+        rows += f"""<tr>
+      <td class="mono">{html.escape(str(topup.get('id') or '—'))}</td>
+      <td>{html.escape(str(topup.get('status') or '—'))}</td>
+      <td>{_fmt_money(topup.get('amount_uah'))} грн</td>
+      <td>{_fmt_dt(topup.get('created_at'))}</td>
+      <td>{_fmt_dt(topup.get('paid_at'))}</td>
+      <td title="{html.escape(note)}">{note_cell}</td>
+    </tr>"""
+    if not rows:
+        rows = '<tr><td colspan="6" class="empty">Ще немає жодного topup-запису.</td></tr>'
+    body = f"""
+<section class="panel">
+  <h2>Поповнення</h2>
+  <div class="meta-grid">
+    <div class="stat"><span class="lbl">Баланс</span><div class="val">{_fmt_money(account.get('balance_uah'))} грн</div></div>
+    <div class="stat"><span class="lbl">Поповнено всього</span><div class="val">{_fmt_money(account.get('total_topup_uah'))} грн</div></div>
+    <div class="stat"><span class="lbl">Витрачено</span><div class="val">{_fmt_money(account.get('total_spent_uah'))} грн</div></div>
+  </div>
+  <p class="muted portal-copy">Monobank acquiring ще не підключений. Зараз портал уміє створити лише запит на ручне поповнення, який адміністратор бачить у `/admin/topups`.</p>
+  <form class="portal-form" method="post" action="/topup">
+    <div class="portal-form-grid portal-form-grid--compact">
+    <label class="portal-field">
+      <span class="portal-field-title">Сума, грн</span>
+      <small class="portal-help">Сума запиту на ручне поповнення балансу.</small>
+      <input type="number" name="amount_uah" min="0.01" step="0.01" placeholder="100.00" required>
+    </label>
+    <label class="portal-field">
+      <span class="portal-field-title">Нотатка</span>
+      <small class="portal-help">Коротке пояснення для адміна: навіщо саме це поповнення.</small>
+      <input type="text" name="note" maxlength="180" placeholder="Напр. поповнення на тиждень">
+    </label>
+    </div>
+    <div class="portal-form-actions">
+      <button class="btn btn-main" type="submit">Створити запит</button>
+    </div>
+  </form>
+</section>
+<section class="panel">
+  <h2>Останні topup-и</h2>
+  <table class="data-table">
+    <thead><tr><th>ID</th><th>Status</th><th>Сума</th><th>Створено</th><th>Оплачено</th><th>Нотатка</th></tr></thead>
+    <tbody>{rows}</tbody>
+  </table>
+</section>"""
+    return render_portal_shell(
+        title="Поповнення",
+        user=user,
+        body=body,
+        flash=flash,
+        flash_kind=flash_kind,
+    )
+
+
+def _parse_portal_turn_path(path: str) -> str | None:
+    match = re.fullmatch(r"/history/([A-Za-z0-9\-]{4,64})", path or "")
+    return match.group(1) if match else None
 
 
 # ---------------------------------------------------------------------------
@@ -2829,62 +3527,122 @@ class SmartestAdminHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         if parsed.path == "/health":
             self._send_text("ok", head_only=True); return
-        if parsed.path == "/login":
+        if parsed.path == ADMIN_PASSWORD_LOGIN_PATH:
             self._send_html(render_login(self._query_param(parsed.query, "message")), head_only=True); return
-        if parsed.path in {"/admin", "/admin/users", "/admin/transactions", "/admin/chats", "/admin/topups", "/admin/keys"} or _parse_admin_user_detail_path(parsed.path):
-            if not self._current_session():
-                self._redirect("/login"); return
+        if parsed.path == "/login":
+            self._redirect(ADMIN_PASSWORD_LOGIN_PATH); return
+        if parsed.path in {
+            "/admin",
+            "/admin/config",
+            "/admin/users",
+            "/admin/transactions",
+            "/admin/chats",
+            "/admin/topups",
+            "/admin/keys",
+            "/prompts",
+            "/logs",
+            "/logs-text",
+        } or _parse_admin_user_detail_path(parsed.path):
+            if not self._current_admin_session():
+                self._redirect(ADMIN_PASSWORD_LOGIN_PATH); return
+            self._send_text("", head_only=True); return
+        if parsed.path in {"/", "/history", "/settings", "/topup"} or _parse_portal_turn_path(parsed.path):
             self._send_text("", head_only=True); return
         if parsed.path != "/":
             self.send_error(HTTPStatus.NOT_FOUND); return
-        if not self._current_session():
-            self._redirect("/login"); return
-        values = read_current_config()
-        self._send_html(render_dashboard(values, flash=self._query_param(parsed.query, "flash"), flash_kind=self._query_param(parsed.query, "kind") or "info"), head_only=True)
+        self._send_text("", head_only=True)
 
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
         if parsed.path == "/health":
             self._send_text("ok"); return
-        if parsed.path == "/login":
+        if parsed.path == ADMIN_PASSWORD_LOGIN_PATH:
             self._send_html(render_login(self._query_param(parsed.query, "message"))); return
+        if parsed.path == "/login":
+            self._redirect(ADMIN_PASSWORD_LOGIN_PATH); return
+        if parsed.path == "/auth/telegram/start":
+            self._handle_telegram_login_start(); return
+        if parsed.path == "/auth/telegram/callback":
+            self._handle_telegram_login_callback(parsed); return
+        if parsed.path == "/":
+            user_session = self._current_user_session()
+            flash = self._query_param(parsed.query, "flash")
+            flash_kind = self._query_param(parsed.query, "kind") or "info"
+            if not user_session:
+                values = read_current_config()
+                self._send_portal_landing(values, flash=flash, flash_kind=flash_kind); return
+            self._handle_portal_dashboard(user_session, flash=flash, flash_kind=flash_kind); return
+        if parsed.path == "/history":
+            user_session = self._current_user_session()
+            if not user_session:
+                self._redirect("/?" + urlencode({"flash": "Спочатку увійди через Telegram.", "kind": "warn"})); return
+            self._handle_portal_history(user_session); return
+        if parsed.path == "/settings":
+            user_session = self._current_user_session()
+            if not user_session:
+                self._redirect("/?" + urlencode({"flash": "Спочатку увійди через Telegram.", "kind": "warn"})); return
+            self._handle_portal_settings(
+                user_session,
+                flash=self._query_param(parsed.query, "flash"),
+                flash_kind=self._query_param(parsed.query, "kind") or "info",
+            ); return
+        if parsed.path == "/topup":
+            user_session = self._current_user_session()
+            if not user_session:
+                self._redirect("/?" + urlencode({"flash": "Спочатку увійди через Telegram.", "kind": "warn"})); return
+            self._handle_portal_topup(
+                user_session,
+                flash=self._query_param(parsed.query, "flash"),
+                flash_kind=self._query_param(parsed.query, "kind") or "info",
+            ); return
+        portal_turn_ref = _parse_portal_turn_path(parsed.path)
+        if portal_turn_ref is not None:
+            user_session = self._current_user_session()
+            if not user_session:
+                self._redirect("/?" + urlencode({"flash": "Спочатку увійди через Telegram.", "kind": "warn"})); return
+            self._handle_portal_turn_detail(user_session, portal_turn_ref); return
         if parsed.path == "/admin":
-            if not self._current_session():
-                self._redirect("/login"); return
+            if not self._current_admin_session():
+                self._redirect(ADMIN_PASSWORD_LOGIN_PATH); return
             self._redirect("/admin/users"); return
+        if parsed.path == "/admin/config":
+            if not self._current_admin_session():
+                self._redirect(ADMIN_PASSWORD_LOGIN_PATH); return
+            values = read_current_config()
+            self._send_html(render_dashboard(values, flash=self._query_param(parsed.query, "flash"), flash_kind=self._query_param(parsed.query, "kind") or "info")); return
         if parsed.path == "/admin/users":
-            if not self._current_session():
-                self._redirect("/login"); return
+            if not self._current_admin_session():
+                self._redirect(ADMIN_PASSWORD_LOGIN_PATH); return
             self._handle_admin_users_page(parsed); return
         if parsed.path == "/admin/transactions":
-            if not self._current_session():
-                self._redirect("/login"); return
+            if not self._current_admin_session():
+                self._redirect(ADMIN_PASSWORD_LOGIN_PATH); return
             self._handle_admin_transactions_page(parsed); return
         if parsed.path == "/admin/chats":
-            if not self._current_session():
-                self._redirect("/login"); return
+            if not self._current_admin_session():
+                self._redirect(ADMIN_PASSWORD_LOGIN_PATH); return
             self._handle_admin_chats_page(parsed); return
         if parsed.path == "/admin/topups":
-            if not self._current_session():
-                self._redirect("/login"); return
+            if not self._current_admin_session():
+                self._redirect(ADMIN_PASSWORD_LOGIN_PATH); return
             self._handle_admin_topups_page(parsed); return
         if parsed.path == "/admin/keys":
-            if not self._current_session():
-                self._redirect("/login"); return
+            if not self._current_admin_session():
+                self._redirect(ADMIN_PASSWORD_LOGIN_PATH); return
             self._handle_admin_keys_page(parsed); return
         user_detail_id = _parse_admin_user_detail_path(parsed.path)
         if user_detail_id is not None:
-            if not self._current_session():
-                self._redirect("/login"); return
+            if not self._current_admin_session():
+                self._redirect(ADMIN_PASSWORD_LOGIN_PATH); return
             self._handle_admin_user_detail_page(user_detail_id, parsed); return
         if parsed.path == "/prompts":
-            if not self._current_session():
-                self._redirect("/login"); return
+            if not self._current_admin_session():
+                self._redirect(ADMIN_PASSWORD_LOGIN_PATH); return
             values = read_current_config()
             self._send_html(render_prompts_page(values, flash=self._query_param(parsed.query, "flash"), flash_kind=self._query_param(parsed.query, "kind") or "info")); return
         if parsed.path == "/logs":
-            if not self._current_session():
-                self._redirect("/login"); return
+            if not self._current_admin_session():
+                self._redirect(ADMIN_PASSWORD_LOGIN_PATH); return
             values = read_current_config()
             svc = self._query_param(parsed.query, "service") or MANAGED_BOT_SERVICE
             lines = min(5000, max(50, int(self._query_param(parsed.query, "lines") or "500")))
@@ -2910,7 +3668,7 @@ class SmartestAdminHandler(BaseHTTPRequestHandler):
                 )
             ); return
         if parsed.path == "/logs-text":
-            if not self._current_session():
+            if not self._current_admin_session():
                 self._send_text("unauthorized", status=HTTPStatus.UNAUTHORIZED); return
             svc = self._query_param(parsed.query, "service") or MANAGED_BOT_SERVICE
             if svc not in (MANAGED_BOT_SERVICE, SELF_SERVICE_NAME):
@@ -2935,52 +3693,61 @@ class SmartestAdminHandler(BaseHTTPRequestHandler):
                 level=level,
             )
             self._send_text(log_text); return
-        if parsed.path != "/":
-            self.send_error(HTTPStatus.NOT_FOUND); return
-        if not self._current_session():
-            self._redirect("/login"); return
-        values = read_current_config()
-        self._send_html(render_dashboard(values, flash=self._query_param(parsed.query, "flash"), flash_kind=self._query_param(parsed.query, "kind") or "info"))
+        self.send_error(HTTPStatus.NOT_FOUND)
 
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
-        if parsed.path == "/login":
+        if parsed.path in {"/login", ADMIN_PASSWORD_LOGIN_PATH}:
             self._handle_login(); return
+        if parsed.path == "/auth/telegram":
+            self._handle_telegram_login(); return
+        if parsed.path == "/settings":
+            user_session = self._current_user_session()
+            if not user_session:
+                self._redirect("/?" + urlencode({"flash": "Спочатку увійди через Telegram.", "kind": "warn"})); return
+            self._handle_portal_settings_update(user_session); return
+        if parsed.path == "/topup":
+            user_session = self._current_user_session()
+            if not user_session:
+                self._redirect("/?" + urlencode({"flash": "Спочатку увійди через Telegram.", "kind": "warn"})); return
+            self._handle_portal_topup_request(user_session); return
         if parsed.path == "/logout":
-            self._clear_session(); return
+            self._clear_user_session(); return
+        if parsed.path == "/admin/logout":
+            self._clear_admin_session(); return
         if parsed.path == "/save":
-            if not self._current_session():
-                self._redirect("/login?" + urlencode({"message": "Потрібен повторний вхід."})); return
+            if not self._current_admin_session():
+                self._redirect(ADMIN_PASSWORD_LOGIN_PATH + "?" + urlencode({"message": "Потрібен повторний вхід."})); return
             self._handle_save(); return
         if parsed.path == "/save-prompts":
-            if not self._current_session():
-                self._redirect("/login?" + urlencode({"message": "Потрібен повторний вхід."})); return
+            if not self._current_admin_session():
+                self._redirect(ADMIN_PASSWORD_LOGIN_PATH + "?" + urlencode({"message": "Потрібен повторний вхід."})); return
             self._handle_save_prompts(); return
         if parsed.path == "/clear-memory":
-            if not self._current_session():
-                self._redirect("/login?" + urlencode({"message": "Потрібен повторний вхід."})); return
+            if not self._current_admin_session():
+                self._redirect(ADMIN_PASSWORD_LOGIN_PATH + "?" + urlencode({"message": "Потрібен повторний вхід."})); return
             self._handle_clear_memory(); return
         if parsed.path == "/upload-podcast-secret":
-            if not self._current_session():
-                self._redirect("/login?" + urlencode({"message": "РџРѕС‚СЂС–Р±РµРЅ РїРѕРІС‚РѕСЂРЅРёР№ РІС…С–Рґ."})); return
+            if not self._current_admin_session():
+                self._redirect(ADMIN_PASSWORD_LOGIN_PATH + "?" + urlencode({"message": "РџРѕС‚СЂС–Р±РµРЅ РїРѕРІС‚РѕСЂРЅРёР№ РІС…С–Рґ."})); return
             self._handle_upload_podcast_secret(); return
         if parsed.path == "/check-podcast":
-            if not self._current_session():
-                self._redirect("/login?" + urlencode({"message": "РџРѕС‚СЂС–Р±РµРЅ РїРѕРІС‚РѕСЂРЅРёР№ РІС…С–Рґ."})); return
+            if not self._current_admin_session():
+                self._redirect(ADMIN_PASSWORD_LOGIN_PATH + "?" + urlencode({"message": "РџРѕС‚СЂС–Р±РµРЅ РїРѕРІС‚РѕСЂРЅРёР№ РІС…С–Рґ."})); return
             self._handle_check_podcast(); return
         if parsed.path == "/admin/keys/add":
-            if not self._current_session():
-                self._redirect("/login?" + urlencode({"message": "Потрібен повторний вхід."})); return
+            if not self._current_admin_session():
+                self._redirect(ADMIN_PASSWORD_LOGIN_PATH + "?" + urlencode({"message": "Потрібен повторний вхід."})); return
             self._handle_admin_key_add(); return
         credit_user_id = _parse_admin_user_credit_path(parsed.path)
         if credit_user_id is not None:
-            if not self._current_session():
-                self._redirect("/login?" + urlencode({"message": "РџРѕС‚СЂС–Р±РµРЅ РїРѕРІС‚РѕСЂРЅРёР№ РІС…С–Рґ."})); return
+            if not self._current_admin_session():
+                self._redirect(ADMIN_PASSWORD_LOGIN_PATH + "?" + urlencode({"message": "РџРѕС‚СЂС–Р±РµРЅ РїРѕРІС‚РѕСЂРЅРёР№ РІС…С–Рґ."})); return
             self._handle_admin_user_credit(credit_user_id); return
         key_toggle_id = _parse_admin_key_toggle_path(parsed.path)
         if key_toggle_id is not None:
-            if not self._current_session():
-                self._redirect("/login?" + urlencode({"message": "Потрібен повторний вхід."})); return
+            if not self._current_admin_session():
+                self._redirect(ADMIN_PASSWORD_LOGIN_PATH + "?" + urlencode({"message": "Потрібен повторний вхід."})); return
             self._handle_admin_key_toggle(key_toggle_id); return
         self.send_error(HTTPStatus.NOT_FOUND)
 
@@ -2989,6 +3756,19 @@ class SmartestAdminHandler(BaseHTTPRequestHandler):
         raw = self.rfile.read(length).decode("utf-8", "replace")
         parsed = parse_qs(raw, keep_blank_values=True)
         return {key: vals[-1] if vals else "" for key, vals in parsed.items()}
+
+    def _json_body(self) -> dict:
+        length = int(self.headers.get("Content-Length", "0") or "0")
+        raw = self.rfile.read(length).decode("utf-8", "replace")
+        if not raw.strip():
+            return {}
+        try:
+            payload = json.loads(raw)
+        except Exception as exc:
+            raise ValueError("invalid json") from exc
+        if not isinstance(payload, dict):
+            raise ValueError("json body must be an object")
+        return payload
 
     def _multipart_form(self):
         env = {
@@ -3008,32 +3788,148 @@ class SmartestAdminHandler(BaseHTTPRequestHandler):
         values = parsed.get(key)
         return values[-1] if values else ""
 
-    def _current_session(self) -> dict | None:
+    def _cookie_morsel(self, cookie_name: str):
         cookie_header = self.headers.get("Cookie", "")
         if not cookie_header:
             return None
         cookie = SimpleCookie()
         cookie.load(cookie_header)
-        morsel = cookie.get(COOKIE_NAME)
+        return cookie.get(cookie_name)
+
+    def _cookie_session(self, cookie_name: str, secret_key: str) -> dict | None:
+        morsel = self._cookie_morsel(cookie_name)
         if not morsel:
             return None
         values = read_current_config()
-        secret = values.get(_session_secret_key()) or os.getenv(_session_secret_key()) or ""
+        secret = values.get(secret_key) or os.getenv(secret_key) or ""
         if not secret:
             return None
         return parse_session_token(morsel.value, secret)
 
-    def _set_session(self, username: str) -> None:
+    def _current_user_oauth_session(self) -> dict | None:
+        morsel = self._cookie_morsel(USER_OAUTH_COOKIE_NAME)
+        if not morsel:
+            return None
+        values = read_current_config()
+        secret = ensure_user_session_secret(values)
+        return parse_session_token(morsel.value, secret)
+
+    def _request_origin(self) -> str:
+        proto = (self.headers.get("X-Forwarded-Proto") or "").strip() or "http"
+        host = (self.headers.get("X-Forwarded-Host") or self.headers.get("Host") or "").strip()
+        if not host:
+            host = f"{HOST}:{PORT}"
+        return f"{proto}://{host}"
+
+    def _absolute_url(self, path: str) -> str:
+        suffix = path if path.startswith("/") else f"/{path}"
+        return f"{self._request_origin()}{suffix}"
+
+    def _current_admin_session(self) -> dict | None:
+        session = self._cookie_session(COOKIE_NAME, _session_secret_key())
+        if session:
+            return session
+        user_session = self._current_user_session()
+        if not user_session or not user_session.get("is_admin"):
+            return None
+        return {
+            "u": str(user_session.get("username") or f"tg:{user_session.get('user_id')}"),
+            "user_id": user_session.get("user_id"),
+            "is_portal_admin": True,
+        }
+
+    def _current_user_session(self) -> dict | None:
+        session = self._cookie_session(USER_COOKIE_NAME, _user_session_secret_key())
+        if not session:
+            return None
+        try:
+            user_id = int(session.get("user_id"))
+        except Exception:
+            return session
+        values = read_current_config()
+        session["is_admin"] = user_id in admin_tg_user_ids(values)
+        return session
+
+    def _current_session(self) -> dict | None:
+        return self._current_admin_session()
+
+    def _set_admin_session(self, username: str) -> None:
         values = read_current_config()
         secret = ensure_session_secret(values)
         token = session_token(username, secret)
         self.send_header("Set-Cookie", f"{COOKIE_NAME}={token}; Max-Age={SESSION_MAX_AGE}; Path=/; HttpOnly; SameSite=Lax")
 
-    def _clear_session(self) -> None:
+    def _set_user_session(self, payload: dict) -> None:
+        values = read_current_config()
+        secret = ensure_user_session_secret(values)
+        token = user_session_token(
+            user_id=int(payload["user_id"]),
+            tg_username=str(payload.get("username") or ""),
+            display_name=str(payload.get("name") or ""),
+            is_admin=bool(payload.get("is_admin")),
+            secret=secret,
+        )
+        self.send_header("Set-Cookie", f"{USER_COOKIE_NAME}={token}; Max-Age={SESSION_MAX_AGE}; Path=/; HttpOnly; SameSite=Lax")
+
+    def _set_user_oauth_session(self, payload: dict) -> None:
+        values = read_current_config()
+        secret = ensure_user_session_secret(values)
+        token = _sign_session_payload(payload, secret)
+        self.send_header(
+            "Set-Cookie",
+            f"{USER_OAUTH_COOKIE_NAME}={token}; Max-Age={USER_OAUTH_MAX_AGE}; Path=/auth/telegram; HttpOnly; SameSite=Lax",
+        )
+
+    def _expire_cookie_header(self, cookie_name: str, *, path: str = "/") -> None:
+        self.send_header("Set-Cookie", f"{cookie_name}=; Max-Age=0; Path={path}; HttpOnly; SameSite=Lax")
+
+    def _finish_telegram_login_redirect(self, location: str) -> None:
         self.send_response(HTTPStatus.SEE_OTHER)
-        self.send_header("Set-Cookie", f"{COOKIE_NAME}=; Max-Age=0; Path=/; HttpOnly; SameSite=Lax")
-        self.send_header("Location", "/login?" + urlencode({"message": "Сесію завершено."}))
+        self._expire_cookie_header(USER_OAUTH_COOKIE_NAME, path="/auth/telegram")
+        self.send_header("Location", location)
         self.end_headers()
+
+    def _clear_admin_session(self) -> None:
+        self.send_response(HTTPStatus.SEE_OTHER)
+        self._expire_cookie_header(COOKIE_NAME)
+        target = (
+            "/settings?" + urlencode({"flash": "Адмінський режим завершено.", "kind": "info"})
+            if self._current_user_session()
+            else ADMIN_PASSWORD_LOGIN_PATH + "?" + urlencode({"message": "Сесію завершено."})
+        )
+        self.send_header("Location", target)
+        self.end_headers()
+
+    def _clear_user_session(self) -> None:
+        self.send_response(HTTPStatus.SEE_OTHER)
+        self._expire_cookie_header(USER_COOKIE_NAME)
+        self._expire_cookie_header(USER_OAUTH_COOKIE_NAME, path="/auth/telegram")
+        self.send_header("Location", "/?" + urlencode({"flash": "Сесію завершено.", "kind": "info"}))
+        self.end_headers()
+
+    def _send_portal_landing(self, values: dict[str, str], *, flash: str = "", flash_kind: str = "info") -> None:
+        login_nonce = secrets.token_urlsafe(24) if telegram_login_client_id(values) else ""
+        content = render_user_portal_landing(
+            values,
+            flash=flash,
+            flash_kind=flash_kind,
+            login_nonce=login_nonce,
+        )
+        encoded = content.encode("utf-8")
+        self.send_response(HTTPStatus.OK)
+        if login_nonce:
+            self._set_user_oauth_session(
+                {
+                    "nonce": login_nonce,
+                    "exp": int(time.time()) + USER_OAUTH_MAX_AGE,
+                }
+            )
+        else:
+            self._expire_cookie_header(USER_OAUTH_COOKIE_NAME, path="/auth/telegram")
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(encoded)))
+        self.end_headers()
+        self.wfile.write(encoded)
 
     _login_fails: dict[str, list[float]] = {}
     _LOGIN_MAX_ATTEMPTS = 5
@@ -3058,9 +3954,248 @@ class SmartestAdminHandler(BaseHTTPRequestHandler):
             return
         self._login_fails.pop(ip, None)
         self.send_response(HTTPStatus.SEE_OTHER)
-        self._set_session(username)
-        self.send_header("Location", "/?" + urlencode({"flash": "Вхід успішний.", "kind": "info"}))
+        self._set_admin_session(username)
+        self.send_header("Location", "/admin/config?" + urlencode({"flash": "Вхід успішний.", "kind": "info"}))
         self.end_headers()
+
+    def _handle_telegram_login_start(self) -> None:
+        self._redirect(
+            "/?" + urlencode(
+                {
+                    "flash": "Портал більше не використовує redirect flow. Натисни кнопку Telegram Login на головній сторінці.",
+                    "kind": "info",
+                }
+            )
+        )
+
+    def _handle_telegram_login_callback(self, parsed) -> None:
+        values = read_current_config()
+        if not telegram_login_client_id(values):
+            self._redirect(
+                "/?" + urlencode(
+                    {
+                        "flash": "Telegram Login ще не сконфігурований. Додай валідний TG_BOT_TOKEN або TELEGRAM_LOGIN_CLIENT_ID.",
+                        "kind": "warn",
+                    }
+                )
+            )
+            return
+        self._redirect(
+            "/?" + urlencode(
+                {
+                    "flash": "Portal більше не використовує callback redirect. Натисни кнопку Telegram Login на головній сторінці.",
+                    "kind": "info",
+                }
+            )
+        )
+
+    def _handle_telegram_login(self) -> None:
+        values = read_current_config()
+        client_id = telegram_login_client_id(values)
+        if not client_id:
+            self._send_json({"ok": False, "message": "Telegram Login ще не сконфігурований."}, status=HTTPStatus.SERVICE_UNAVAILABLE)
+            return
+        ip = self.client_address[0]
+        now = time.time()
+        attempts = self._login_fails.get(ip, [])
+        attempts = [t for t in attempts if now - t < self._LOGIN_BLOCK_SEC]
+        if len(attempts) >= self._LOGIN_MAX_ATTEMPTS:
+            self._send_json({"ok": False, "message": "Забагато невдалих спроб входу. Зачекай кілька хвилин."}, status=HTTPStatus.TOO_MANY_REQUESTS)
+            return
+        try:
+            body = self._json_body()
+        except ValueError:
+            self._send_json({"ok": False, "message": "Некоректне тіло запиту."}, status=HTTPStatus.BAD_REQUEST)
+            return
+        id_token = str(body.get("id_token") or "").strip()
+        oauth_state = self._current_user_oauth_session()
+        login_nonce = str((oauth_state or {}).get("nonce") or "").strip()
+        if not id_token:
+            self._send_json({"ok": False, "message": "Telegram Login не повернув id_token."}, status=HTTPStatus.BAD_REQUEST)
+            return
+        if not login_nonce:
+            self._send_json({"ok": False, "message": "Login nonce втрачений або прострочений. Перезавантаж сторінку і спробуй ще раз."}, status=HTTPStatus.BAD_REQUEST)
+            return
+        try:
+            claims = verify_telegram_token(id_token, client_id, expected_nonce=login_nonce)
+        except Exception as exc:
+            attempts.append(now)
+            self._login_fails[ip] = attempts
+            logger.warning("portal.telegram_login_failed error=%s", exc)
+            self._send_json({"ok": False, "message": f"Telegram login не завершився: {exc}"}, status=HTTPStatus.UNAUTHORIZED)
+            return
+        self._login_fails.pop(ip, None)
+        telegram_user_id = claims.get("id") or claims.get("sub")
+        try:
+            user_id = int(telegram_user_id)
+        except Exception:
+            self._send_json({"ok": False, "message": "Telegram token не містить валідного user id."}, status=HTTPStatus.UNAUTHORIZED)
+            return
+        username = str(claims.get("preferred_username") or "").lstrip("@")
+        display_name = str(claims.get("name") or username or f"user {user_id}")
+        identity = asyncio.run(
+            ensure_portal_identity(
+                user_id=user_id,
+                tg_username=username or None,
+                first_name=display_name or None,
+                lang_code=None,
+                phone_number=(str(claims.get("phone_number") or "").strip() or None),
+            )
+        )
+        session_payload = {
+            "user_id": user_id,
+            "username": username,
+            "name": display_name,
+            "is_admin": user_id in admin_tg_user_ids(values),
+        }
+        self.send_response(HTTPStatus.OK)
+        self._set_user_session(session_payload)
+        self._expire_cookie_header(USER_OAUTH_COOKIE_NAME, path="/auth/telegram")
+        payload = {
+            "ok": True,
+            "redirect": "/?" + urlencode(
+                {
+                    "flash": (
+                        f"Вхід успішний. Акаунт #{identity['account']['account_id']}"
+                        if identity.get("account")
+                        else "Вхід успішний."
+                    ),
+                    "kind": "ok",
+                }
+            ),
+        }
+        encoded = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(encoded)))
+        self.end_headers()
+        self.wfile.write(encoded)
+
+    def _handle_portal_dashboard(self, user_session: dict, *, flash: str = "", flash_kind: str = "info") -> None:
+        dashboard = asyncio.run(get_portal_dashboard(int(user_session["user_id"])))
+        if not dashboard:
+            self._send_html(render_user_portal_landing(read_current_config(), flash="Портал ще не готовий для цього користувача.", flash_kind="warn")); return
+        dashboard["user"]["is_admin"] = bool(user_session.get("is_admin"))
+        self._send_html(
+            render_portal_dashboard_page(
+                dashboard["user"],
+                dashboard["account"],
+                dashboard["turns"],
+                dashboard["settings"],
+                flash=flash,
+                flash_kind=flash_kind,
+            )
+        )
+
+    def _handle_portal_history(self, user_session: dict) -> None:
+        payload = asyncio.run(get_portal_history(int(user_session["user_id"])))
+        if not payload:
+            self._redirect("/?" + urlencode({"flash": "Портал ще не готовий для цього користувача.", "kind": "warn"})); return
+        payload["user"]["is_admin"] = bool(user_session.get("is_admin"))
+        self._send_html(render_portal_history_page(payload["user"], payload["account"], payload["turns"]))
+
+    def _handle_portal_turn_detail(self, user_session: dict, turn_ref: str) -> None:
+        payload = asyncio.run(get_portal_turn_detail(int(user_session["user_id"]), turn_ref))
+        if not payload:
+            self._redirect("/history?" + urlencode({"flash": "Turn не знайдено.", "kind": "warn"})); return
+        payload["user"]["is_admin"] = bool(user_session.get("is_admin"))
+        self._send_html(
+            render_portal_turn_page(
+                payload["user"],
+                payload["turn"],
+                payload["transactions"],
+                payload["ambiguous_matches"],
+            )
+        )
+
+    def _handle_portal_settings(self, user_session: dict, *, flash: str = "", flash_kind: str = "info") -> None:
+        payload = asyncio.run(get_portal_settings(int(user_session["user_id"])))
+        if not payload:
+            self._redirect("/?" + urlencode({"flash": "Портал ще не готовий для цього користувача.", "kind": "warn"})); return
+        payload["user"]["is_admin"] = bool(user_session.get("is_admin"))
+        self._send_html(
+            render_portal_settings_page(
+                payload["user"],
+                payload["account"],
+                payload["settings"],
+                payload["catalog"],
+                flash=flash,
+                flash_kind=flash_kind,
+            )
+        )
+
+    def _handle_portal_settings_update(self, user_session: dict) -> None:
+        params = self._body_params()
+        model_choices = {
+            group.slug: params.get(f"model_group_{group.slug}", "").strip()
+            for group in MODEL_GROUPS
+        }
+        voice_id = params.get("voice_id", "").strip()
+        persona_slug = params.get("persona_slug", "").strip()
+        try:
+            asyncio.run(
+                update_portal_settings(
+                    int(user_session["user_id"]),
+                    model_choices=model_choices,
+                    voice_id=voice_id,
+                    persona_slug=persona_slug,
+                )
+            )
+        except ValueError as exc:
+            self._handle_portal_settings(user_session, flash=str(exc), flash_kind="warn")
+            return
+        self._redirect(
+            "/settings?"
+            + urlencode(
+                {
+                    "flash": "Персональні налаштування збережено.",
+                    "kind": "ok",
+                }
+            )
+        )
+
+    def _handle_portal_topup(self, user_session: dict, *, flash: str = "", flash_kind: str = "info") -> None:
+        payload = asyncio.run(get_portal_topups(int(user_session["user_id"])))
+        if not payload:
+            self._redirect("/?" + urlencode({"flash": "Портал ще не готовий для цього користувача.", "kind": "warn"})); return
+        payload["user"]["is_admin"] = bool(user_session.get("is_admin"))
+        self._send_html(
+            render_portal_topup_page(
+                payload["user"],
+                payload["account"],
+                payload["topups"],
+                flash=flash,
+                flash_kind=flash_kind,
+            )
+        )
+
+    def _handle_portal_topup_request(self, user_session: dict) -> None:
+        params = self._body_params()
+        amount_uah = params.get("amount_uah", "").strip()
+        note = params.get("note", "").strip()
+        try:
+            payload = asyncio.run(
+                create_portal_topup_request(
+                    int(user_session["user_id"]),
+                    amount_uah=amount_uah,
+                    note=note,
+                )
+            )
+        except ValueError as exc:
+            self._handle_portal_topup(user_session, flash=str(exc), flash_kind="warn")
+            return
+        created = payload.get("topup") or {}
+        self._redirect(
+            "/topup?"
+            + urlencode(
+                {
+                    "flash": (
+                        f"Запит на поповнення #{created.get('id')} створено. "
+                        "Поки що це manual queue для адміністратора, не автоматична оплата."
+                    ),
+                    "kind": "ok",
+                }
+            )
+        )
 
     def _handle_save(self) -> None:
         params = self._body_params()
@@ -3131,6 +4266,8 @@ class SmartestAdminHandler(BaseHTTPRequestHandler):
             updates[_admin_password_key()] = values_before.get(_admin_password_key()) or "admin"
         if _session_secret_key() not in values_before:
             updates[_session_secret_key()] = ensure_session_secret(values_before)
+        if _user_session_secret_key() not in values_before:
+            updates[_user_session_secret_key()] = ensure_user_session_secret(values_before)
 
         write_env_updates(ENV_PATH, updates)
 
@@ -3143,7 +4280,7 @@ class SmartestAdminHandler(BaseHTTPRequestHandler):
         if params.get("restart_bot") == "1":
             flash += " Бот перезапущено." if restarted else " Рестарт не підтверджено."
 
-        self._redirect("/?" + urlencode({
+        self._redirect("/admin/config?" + urlencode({
             "flash": flash,
             "kind": "info" if restarted or params.get("restart_bot") != "1" else "error",
         }))
@@ -3165,7 +4302,7 @@ class SmartestAdminHandler(BaseHTTPRequestHandler):
 
     def _handle_clear_memory(self) -> None:
         ok, _ = clear_bot_memory()
-        self._redirect("/?" + urlencode({
+        self._redirect("/admin/config?" + urlencode({
             "flash": (
                 "Пам'ять бота очищено для всіх чатів."
                 if ok
@@ -3196,7 +4333,7 @@ class SmartestAdminHandler(BaseHTTPRequestHandler):
             else None
         )
         if upload is None or not getattr(upload, "file", None):
-            self._redirect("/?" + urlencode({
+            self._redirect("/admin/config?" + urlencode({
                 "flash": "JSON service account не завантажено.",
                 "kind": "error",
             }))
@@ -3204,7 +4341,7 @@ class SmartestAdminHandler(BaseHTTPRequestHandler):
 
         file_bytes = upload.file.read() or b""
         if not file_bytes:
-            self._redirect("/?" + urlencode({
+            self._redirect("/admin/config?" + urlencode({
                 "flash": "JSON service account порожній або не прочитався.",
                 "kind": "error",
             }))
@@ -3216,7 +4353,7 @@ class SmartestAdminHandler(BaseHTTPRequestHandler):
             health = podcast_healthcheck(secret_path, resolved_project_id, location)
         except Exception as exc:
             logger.error("admin.podcast_sa_upload_failed: %s", exc, exc_info=True)
-            self._redirect("/?" + urlencode({
+            self._redirect("/admin/config?" + urlencode({
                 "flash": "Не вдалося зберегти або перевірити service account JSON. Перевірте файл і спробуйте ще.",
                 "kind": "error",
             }))
@@ -3230,7 +4367,7 @@ class SmartestAdminHandler(BaseHTTPRequestHandler):
             secret_path=str(secret_path),
         )
         write_env_updates(ENV_PATH, updates)
-        self._redirect("/?" + urlencode({
+        self._redirect("/admin/config?" + urlencode({
             "flash": "JSON завантажено. " + health.message,
             "kind": "info" if health.ready else "error",
         }))
@@ -3253,7 +4390,7 @@ class SmartestAdminHandler(BaseHTTPRequestHandler):
         )
         secret_path = values_before.get("PODCAST_NOTEBOOKLM_SECRET_PATH", "").strip()
         if not secret_path:
-            self._redirect("/?" + urlencode({
+            self._redirect("/admin/config?" + urlencode({
                 "flash": "Спочатку завантаж service account JSON для NotebookLM.",
                 "kind": "error",
             }))
@@ -3268,7 +4405,7 @@ class SmartestAdminHandler(BaseHTTPRequestHandler):
             secret_path=secret_path,
         )
         write_env_updates(ENV_PATH, updates)
-        self._redirect("/?" + urlencode({
+        self._redirect("/admin/config?" + urlencode({
             "flash": health.message,
             "kind": "info" if health.ready else "error",
         }))
@@ -3610,6 +4747,14 @@ class SmartestAdminHandler(BaseHTTPRequestHandler):
         if not head_only:
             self.wfile.write(encoded)
 
+    def _send_json(self, payload: dict, status: HTTPStatus = HTTPStatus.OK) -> None:
+        encoded = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(encoded)))
+        self.end_headers()
+        self.wfile.write(encoded)
+
 
 def main() -> None:
     setup_logging("smartest-admin", LOG_LEVEL, force=True)
@@ -3620,7 +4765,9 @@ def main() -> None:
             _admin_username_key(): values.get(_admin_username_key()) or "admin",
             _admin_password_key(): values.get(_admin_password_key()) or "admin",
         })
-    ensure_session_secret(read_current_config())
+    current = read_current_config()
+    ensure_session_secret(current)
+    ensure_user_session_secret(read_current_config())
     server = ThreadingHTTPServer((HOST, PORT), SmartestAdminHandler)
     logger.info("admin.ready host=%s port=%s", HOST, PORT)
     try:

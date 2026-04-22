@@ -26,6 +26,7 @@ if (!DEPLOY_HOST || !DEPLOY_PASS) {
 // Always deploy from Smartest project, regardless of where this script runs
 const PROJECT_DIR = 'C:/Python_projects/Smartest';
 const REMOTE_APP = '/opt/smartest/app';
+const REMOTE_APP_PREV = '/opt/smartest/app.prev';
 const REMOTE_VENV = '/opt/smartest/venv';
 
 const excludes = [
@@ -74,6 +75,10 @@ conn.on('ready', () => {
       const cmd = [
         // Preserve .env
         `cp ${REMOTE_APP}/.env /tmp/smartest-env.bak 2>/dev/null || true`,
+        // Backup previous app payload for rollback
+        `rm -rf ${REMOTE_APP_PREV}`,
+        `mkdir -p ${REMOTE_APP_PREV}`,
+        `cp -a ${REMOTE_APP}/. ${REMOTE_APP_PREV}/`,
         // Extract new code
         `tar xzf ${remoteTar} -C ${REMOTE_APP}`,
         `rm -f ${remoteTar}`,

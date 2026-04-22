@@ -30,6 +30,40 @@ def test_db_pool_size_default_and_override(monkeypatch):
     assert connection.get_db_config()["maxsize"] == 64
 
 
+def test_connection_loads_env_from_smartest_env_path(monkeypatch, tmp_path):
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "DB_HOST=10.1.2.3",
+                "DB_PORT=4407",
+                "DB_USER=portal_user",
+                "DB_PASS=portal_pass",
+                "DB_NAME=portal_db",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    for key in ["DB_HOST", "DB_PORT", "DB_USER", "DB_PASS", "DB_NAME"]:
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("SMARTEST_ENV_PATH", str(env_file))
+
+    import db.connection as connection_module
+
+    reloaded = importlib.reload(connection_module)
+    try:
+        config = reloaded.get_db_config()
+        assert config["host"] == "10.1.2.3"
+        assert config["port"] == 4407
+        assert config["user"] == "portal_user"
+        assert config["password"] == "portal_pass"
+        assert config["db"] == "portal_db"
+    finally:
+        importlib.reload(connection_module)
+
+
 def test_llm_thread_pool_size_default_and_override(monkeypatch):
     monkeypatch.delenv("LLM_THREAD_POOL_SIZE", raising=False)
     assert env.llm_thread_pool_size() == 128

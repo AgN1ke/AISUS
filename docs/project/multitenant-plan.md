@@ -1,6 +1,6 @@
 # План переходу Smartest у мультикористувацький режим
 
-**Статус:** частково реалізовано (Stages 1-4 done, Stage 4.5A done; §12.3 Частини А-Б виконані, pricing seed + Gemini usage fix закриті, keypool-first policy для billed turns виконана, `/balance` breakdown закритий, voice/persona в Telegram `/settings` закриті, thread-safe `_maybe_emit_billing` + revolver E2E пройдені на свіжому стенді 2026-04-19; активний спринт — portal/login і Stage 7 deploy)
+**Статус:** частково реалізовано (Stages 1-4 done, Stage 4.5A done; §12.3 Частини А-Б виконані, pricing seed + Gemini usage fix закриті, keypool-first policy для billed turns виконана, `/balance` breakdown закритий, voice/persona в Telegram `/settings` закриті, thread-safe `_maybe_emit_billing` + revolver E2E пройдені на свіжому стенді 2026-04-19; Stage 4.5B уже має staging login PASS на `test.klawa.top`, web `/settings` переведено з readonly у реальний POST flow, `/topup` став manual-request queue з історією; Stage 7 deploy-slice виконано 2026-04-22: staging і prod оновлені, `BILLING_MASTER_KEY` згенерований на сервері, prod `provider_keys` засіяні з існуючих env-ключів; активний хвіст — password-fallback subdomain, Stage 4.5C, Stage 5 і Stage 6)
 **Дата створення:** 2026-04-17
 **Аудит:** 2026-04-18
 
@@ -9,11 +9,11 @@
 | Етап | Статус | Критичні gaps |
 |------|--------|---------------|
 | 1 — DB schema | ✅ | — |
-| 2 — Key pool + Gateway | ⚠️ | runtime вже бере ключі з keypool пріоритетно для billed turns, `pricing` автосіється під час bootstrap, Gemini usage extraction виправлений, `_maybe_emit_billing` тепер працює і з worker threads (sync `chat_once` через `asyncio.to_thread`), revolver під 429 пройдений E2E; незакритий хвіст тут уже не policy, а операційне засівання `provider_keys` у проді, щоб env-fallback майже не використовувався |
+| 2 — Key pool + Gateway | ✅ | runtime бере ключі з keypool пріоритетно для billed turns, `pricing` автосіється під час bootstrap, Gemini usage extraction виправлений, `_maybe_emit_billing` працює і з worker threads, revolver під 429 пройдений E2E; 2026-04-22 prod `provider_keys` засіяні з існуючих env-ключів, `BILLING_MASTER_KEY` на сервері заданий |
 | 3 — Policy + debit | ✅ | — |
 | 4 — Telegram UI | ✅ | `/settings` уміє вибір моделі/провайдера для 3 груп, окремі `voice` і `persona`, а `/balance` уже показує breakdown через `/balance last` і `/balance turn <id>` |
 | 4.5A — Admin dashboard | ✅ | базовий multitenant admin dashboard закрито: `/admin/users`, деталка, ручне поповнення, `/admin/transactions`, `/admin/chats`, `/admin/topups`, `/admin/keys` |
-| 4.5B — User portal + TG Login | ❌ | не розпочато |
+| 4.5B — User portal + TG Login | ⚠️ | login-контур уже пройшов staging acceptance на `test.klawa.top`; user portal має `/`, `/history`, `/history/<turn_id>`, редагований web `/settings`, `/topup` з manual-request queue та історією, `_smartest_user` cookie і `db/portal_repository.py`; незакриті хвости тут уже не mechanics login, а password-fallback subdomain, додатковий portal polish і Stage 4.5C admin-through-Telegram |
 | 5 — Monobank | ❌ | відкладено свідомо |
 | 6 — ToS/Privacy | ❌ | — |
 | 7 — Бета | ❌ | — |
@@ -424,8 +424,12 @@ billing/
 - `/auth/telegram` POST endpoint
 - User portal: `/` (dashboard), `/history`, `/history/<turn_id>` (turn breakdown), `/topup`, `/settings`
 - Admin perms: `ADMIN_TG_USER_IDS` в `.env` — список числових tg_user_id
-- Admin backdoor: `[HIDDEN_SUBDOMAIN].smartest.klawa.top` → password login (існуючий механізм), URL не публікується, тільки в `.env`
-- Caddy: два server blocks — основний + backdoor subdomain
+- Admin password fallback: `[HIDDEN_SUBDOMAIN].smartest.klawa.top` → password login (існуючий механізм), URL не публікується, тільки в `.env`
+- Caddy: два server blocks — основний + password-fallback subdomain
+
+- **Вже зроблено в першому slice:** root `/` віддано під user portal, старий admin config переїхав на `/admin/config`, додано окремий cookie namespace `_smartest_user`, helper-и для Telegram Login (`telegram_login_client_id`, `verify_telegram_token`, `ADMIN_TG_USER_IDS`), репозиторний шар `db/portal_repository.py`, readonly сторінки `/history`, `/history/<turn_id>`, `/settings`, `/topup`.
+- **Оновлено 2026-04-20:** hybrid popup/widget fallback прибрано, але портал не сидить на code flow. Поточний контракт — нова Telegram Login library: browser відкриває `telegram-login.js`, отримує `id_token`, а backend на `/auth/telegram` верифікує JWT через JWKS і browser-bound nonce. Legacy `authData` fallback більше не використовується.
+- **Що ще лишається до реального rollout Stage 4.5B:** staging/browser acceptance нового library-flow, валідні Allowed URLs у `@BotFather` для staging/prod, POST-редагування portal `/settings` і `/topup`, а також окремо виконати Stage 4.5C — підсадити `/admin` на Telegram admin session, залишивши password fallback fallback-ом.
 
 **Що зміниться для існуючого бота.** Адмін отримує повний dashboard з реальними даними. Юзери отримують веб-портал де видно баланс, витрати і историю без Telegram. Додавання API ключів провайдерів — через UI замість ручного `.env`.
 
@@ -751,3 +755,131 @@ response = await asyncio.to_thread(
 - паралельні 20 turns через `asyncio.gather` на staging — це Stage 7 acceptance, не локальний стенд.
 - `/admin/users/<id>` UI прохід після поповнення 100 UAH і 5 turns — це Stage 7 acceptance.
 - PM2 `pm2 logs` під реальним 20-паралельним навантаженням — це Stage 7 acceptance.
+
+## 2026-04-19 — Stage 4.5B staging rollout note
+
+Portal/login first slice більше не лишається тільки локально. Станом на 2026-04-19 він уже розгорнутий на staging-домені `https://test.klawa.top/` через окремий `smartest-staging-admin.service` на `127.0.0.1:8788` і окремий Caddy host `test.klawa.top -> reverse_proxy 127.0.0.1:8788`.
+
+Що це означає practically:
+
+- Stage 4.5B перейшов із purely local/code state у реальний staging rollout state.
+- `test.klawa.top` уже має валідний Let’s Encrypt certificate і проходить health-check.
+- Наступний реальний acceptance step для Stage 4.5B — не ще один локальний рефакторинг, а browser-smoke Telegram Login на staging-домені.
+
+Стан staging rollout:
+
+- `/opt/smartest-staging/.venv/bin/python -m pytest -q tests/test_071_admin_ui.py --noconftest` -> зелений
+- `/opt/smartest-staging/.venv/bin/python -m pytest -q --color=no` -> зелений
+- `curl http://127.0.0.1:8788/health` -> `ok`
+- `curl -I https://test.klawa.top/health` -> `HTTP/2 200`
+
+Що лишається саме в цьому блоці:
+
+1. Перевірити browser login flow на `test.klawa.top`.
+2. Якщо Telegram Login ще не проходить, перевіряти вже `@BotFather /setdomain` і allowed domain policy, а не backend contract, який для staging уже розгорнутий.
+3. Після staging browser PASS переходити до наступного slice Stage 4.5B/4.5C.
+
+## 2026-04-20 — Stage 4.5B staging login acceptance (test.klawa.top)
+
+Стан зафіксовано як PASS після end-to-end перевірки з реальним користувачем.
+
+Що було критично:
+- Telegram OAuth вже проходив, але портал не робив redirect через падіння backend на DB auth.
+- Причина: на staging не були задані `DB_HOST/DB_PORT/DB_NAME/DB_USER/DB_PASS`, тому `/auth/telegram` валився в `ensure_portal_identity(...)` з `using password: NO`.
+
+Що зроблено:
+- staging `.env` доповнено DB-конфігом під `aisus_test`:
+  - `DB_HOST=127.0.0.1`
+  - `DB_PORT=3306`
+  - `DB_NAME=aisus_test`
+  - `DB_USER=aisus`
+  - `DB_PASS=VeryStrongPassword!`
+- staging portal переключено на бота, для якого увімкнено новий Telegram Web Login:
+  - `TELEGRAM_LOGIN_CLIENT_ID=8463730305`
+  - `TELEGRAM_LOGIN_CLIENT_SECRET` задано на сервері
+- `smartest-staging-admin.service` перезапущено.
+
+Результат:
+- `https://test.klawa.top/` віддає `client_id=8463730305`
+- помилка `origin required` для цього client_id не відтворюється
+- login flow проходить end-to-end і веде в портал
+
+Після цього Stage 4.5B більше не має blocker-а на рівні staging login mechanics. Далі лишається продуктова доробка portal flows і Stage 4.5C (admin через Telegram login).
+
+## 2026-04-22 — Stage 4.5B portal flows: editable web settings + manual topup queue
+
+Після того як staging login mechanics уже пройшли acceptance, головний незакритий user-facing gap у Stage 4.5B лишився всередині самого порталу:
+
+- `/settings` у вебі було лише readonly-відображення `user_settings`
+- `/topup` був порожньою заглушкою без історії і без будь-якого дії-контракту
+
+Що закрито цим slice:
+
+- `db/portal_repository.py`
+  - `get_portal_settings()` тепер повертає catalog для web form, а не тільки raw settings
+  - додано `update_portal_settings()` з валідацією model-group choice, `voice_id` і `persona_slug`
+  - додано `get_portal_topups()` і `create_portal_topup_request()`
+- `app/admin_ui.py`
+  - `/settings` тепер має реальний `GET/POST` flow
+  - web UI редагує три модельні групи, голос і persona через комбіновані select-и без зайвого browser JS
+  - `/topup` більше не stub: сторінка показує баланс, історію topup-ів і форму створення manual topup request
+  - `POST /topup` створює `pending` topup із `note=portal_request...`, який далі видно адміну в `/admin/topups`
+- `tests/test_071_admin_ui.py` і `tests/test_100_portal_repository.py`
+  - додано регресії на editable portal settings, topup form/history і валідацію repository-level update/create flows
+
+Стан цього slice:
+
+- локально `python -m pytest -q tests/test_071_admin_ui.py tests/test_100_portal_repository.py` -> зелений
+- локально повний `python -m pytest -q --color=no` -> зелений
+
+Що ще лишається саме в 4.5B після цього:
+
+1. staging rollout цього portal slice на `test.klawa.top`
+2. hidden password-fallback subdomain
+3. дрібний portal polish уже після того, як закриємо Stage 4.5C
+
+## 2026-04-22 — Stage 7 deploy slice: staging + prod rollout, server-side keypool bootstrap
+
+Цим кроком multitenant перестав бути лише локально-стейджинговим контуром і отримав реальний server-side rollout.
+
+Що зроблено:
+
+- staging:
+  - поточне дерево `multitenant` залито в `/opt/smartest-staging`
+  - створено code backup у `/opt/smartest-staging/app.prev`
+  - прогнано повний `.venv/bin/python -m pytest -q --color=no` прямо на сервері
+  - `smartest-staging-admin.service` перезапущено
+  - `http://127.0.0.1:8788/health` -> `ok`
+- prod:
+  - поточне дерево залито в `/opt/smartest/app`
+  - створено backup у `/opt/smartest/app.prev`
+  - `BILLING_MASTER_KEY` був відсутній і згенерований окремо на сервері для prod і staging
+  - prod `provider_keys` були порожні (`0`) і засіяні з існуючих env-ключів через runtime-safe path
+  - після seed у prod `provider_keys=12`
+  - `pricing_rows` у prod лишилися `27`
+  - `smartest-bot` і `smartest-admin` перезапущено
+  - `https://smartest.klawa.top/health` -> `HTTP 200`
+
+Що це означає:
+
+- multitenant runtime у prod більше не живе тільки на env-fallback
+- keypool bootstrap на prod уже не теоретичний, а реально виконаний
+- deploy path тепер має backup і staging-first перевірку
+
+Що НЕ закрито цим кроком:
+
+1. `Stage 4.5C` — `/admin` через Telegram login
+2. hidden password-fallback subdomain
+3. `Stage 5` Monobank
+4. `Stage 6` ToS / Privacy / Refund
+## 2026-04-22 - Stage 4.5C auth bridge status
+
+Поточний стан по auth bridge між portal і admin:
+
+- для `ADMIN_TG_USER_IDS` окремий password-login у `/admin` більше не є основним шляхом
+- якщо admin already logged in у portal, `/settings` показує кнопку `Адмінка` і `/admin` відкривається на тій самій portal session
+- з admin shell додано кнопку `Портал`, щоб не стрибати між двома незалежними login state
+- password fallback залишено як fallback, але сховано на `/403`
+- `/login` лишено тільки як compatibility redirect на `/403`, не як видимий primary entrypoint
+
+Це закриває user-facing частину Stage 4.5C для базового admin navigation. Далі в цьому напрямі лишається вже не auth-міст, а окреме полірування admin UX і hidden password-fallback subdomain, якщо вирішимо винести password fallback з основного домену повністю.

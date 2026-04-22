@@ -28,3 +28,6 @@ deploy/*.tar.gz
 .secrets/
 .claude/
 .zed/
+.tmp/
+*.zip
+

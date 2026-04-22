@@ -1079,3 +1079,213 @@ sudo -u smartest /opt/smartest/venv/bin/python /opt/smartest/app/run.py
 - Практичний результат:
   - `/settings` і `/model` у Telegram тепер дають окремі inline menus для `voice_id` і `persona_slug`
   - обидва значення зберігаються в `user_settings` і реально впливають на runtime, а не лишаються декоративними
+
+## 2026-04-19 — Staging portal rollout on test.klawa.top
+
+- На staging `/opt/smartest-staging` синхронізовано portal/login slice:
+  - `app/admin_ui.py`
+  - `db/portal_repository.py`
+  - `requirements.txt`
+  - `.env-example`
+  - `tests/test_071_admin_ui.py`
+  - `docs/project/devlog.md`
+  - `docs/project/multitenant-plan.md`
+- У staging venv встановлено актуальні залежності через:
+  - `/opt/smartest-staging/.venv/bin/pip install -q -r /opt/smartest-staging/requirements.txt`
+- Прогнано staging verification:
+  - `/opt/smartest-staging/.venv/bin/python -m pytest -q tests/test_071_admin_ui.py --noconftest`
+  - `/opt/smartest-staging/.venv/bin/python -m pytest -q --color=no`
+  - обидва прогони зелені
+- Для staging піднято окремий systemd unit:
+  - `/etc/systemd/system/smartest-staging-admin.service`
+  - `WorkingDirectory=/opt/smartest-staging`
+  - `SMARTEST_ENV_PATH=/opt/smartest-staging/.env`
+  - `SMARTEST_ADMIN_PORT=8788`
+- У `Caddy` додано окремий host:
+  - `test.klawa.top -> reverse_proxy 127.0.0.1:8788`
+- Після `systemctl reload caddy` для `test.klawa.top` автоматично випущено Let’s Encrypt certificate
+- Поточна перевірка:
+  - `systemctl is-active smartest-staging-admin.service` -> `active`
+  - `curl http://127.0.0.1:8788/health` -> `ok`
+  - `curl -I http://test.klawa.top/health` -> `308` на HTTPS
+  - `curl -I https://test.klawa.top/health` -> `HTTP/2 200`
+- Додатковий config fix після першого browser-open:
+  - у `/opt/smartest-staging/.env` staging portal спочатку не мав `TG_BOT_TOKEN`
+  - через це Telegram Login button рендерився disabled
+  - після додавання `TG_BOT_TOKEN` і restart `smartest-staging-admin.service` portal віддає:
+    - `Telegram Login готовий: bot id зчитано з конфігу бота`
+    - `client_id=8377179919`
+    - кнопка більше не disabled
+- Додатковий frontend hotfix:
+  - staging landing-page спочатку рендерив `request_access: ['phone']` у Telegram Login JS
+  - для portal login цей scope не потрібен, тому його прибрано з `Telegram.Login.auth/init`
+  - після sync і restart `smartest-staging-admin.service` перевірено:
+    - `PHONE_SCOPE_PRESENT=no` на `https://test.klawa.top/`
+
+## 2026-04-20 — Stage 4.5B OIDC staging config status (історично, до pivot на library-flow)
+
+- На staging `/opt/smartest-staging/.env` перевірено ключі нового Telegram OIDC flow:
+  - `TG_BOT_TOKEN=SET`
+  - `TELEGRAM_LOGIN_CLIENT_ID=MISSING`
+  - `TELEGRAM_LOGIN_CLIENT_SECRET=MISSING`
+- Практичний висновок на той момент:
+  - `client_id` не є окремим blocker, бо portal може обчислити його з `TG_BOT_TOKEN`
+  - для тодішнього code-flow blocker-ом був `TELEGRAM_LOGIN_CLIENT_SECRET`
+
+## 2026-04-20 — Stage 4.5B library-flow pivot
+
+- Після browser-debug portal auth на staging переведено з OIDC code flow на нову Telegram Login library (`telegram-login.js` + `id_token` callback).
+- Для цього flow staging більше не потребує:
+  - `TELEGRAM_LOGIN_CLIENT_SECRET`
+- Поточний staging contract:
+  - `TG_BOT_TOKEN=SET`
+  - portal сам обчислює `client_id`
+  - browser викликає `Telegram.Login.auth(...)`
+  - `POST /auth/telegram` завершує login через JWKS verify + nonce check
+- Практичний висновок:
+  - попередній blocker із `TELEGRAM_LOGIN_CLIENT_SECRET` більше неактуальний
+  - далі потрібна лише browser acceptance на `https://test.klawa.top/` з коректним `@BotFather /setdomain`
+
+## 2026-04-20 — Stage 4.5B staging acceptance PASS
+
+- Root cause не-redirect після успішного Telegram auth:
+  - staging admin service працював без DB credentials
+  - `/auth/telegram` падав у `ensure_portal_identity` з `pymysql.err.OperationalError: (1045, ... using password: NO)`
+- Фікс у `/opt/smartest-staging/.env`:
+  - `DB_HOST=127.0.0.1`
+  - `DB_PORT=3306`
+  - `DB_NAME=aisus_test`
+  - `DB_USER=aisus`
+  - `DB_PASS=VeryStrongPassword!`
+- Для нового Web Login бота на staging виставлено:
+  - `TELEGRAM_LOGIN_CLIENT_ID=8463730305`
+  - `TELEGRAM_LOGIN_CLIENT_SECRET=<set>`
+- Після restart `smartest-staging-admin.service`:
+  - `curl http://127.0.0.1:8788/health` -> `ok`
+- `https://test.klawa.top/` віддає `client_id=8463730305`
+- Telegram auth page відкривається без `origin required`
+- login flow у браузері проходить, redirect у портал працює
+
+## 2026-04-22 — Stage 7 rollout
+
+- staging deploy:
+  - поточний tree залито в `/opt/smartest-staging`
+  - backup створено в `/opt/smartest-staging/app.prev`
+  - staging full pytest:
+    - `/opt/smartest-staging/.venv/bin/python -m pytest -q --color=no` -> зелений
+  - `smartest-staging-admin.service` перезапущено
+  - `curl http://127.0.0.1:8788/health` -> `ok`
+  - `curl -I https://test.klawa.top/health` -> `HTTP/2 200`
+- prod deploy:
+  - поточний tree залито в `/opt/smartest/app`
+  - backup створено в `/opt/smartest/app.prev`
+  - `BILLING_MASTER_KEY` був відсутній:
+    - згенеровано окремо в `/opt/smartest/.env`
+    - згенеровано окремо в `/opt/smartest-staging/.env`
+  - prod `provider_keys` було `0`
+  - виконано seed з існуючих server env ключів:
+    - після seed `provider_keys=12`
+  - `pricing_rows=27`
+  - перезапущено:
+    - `smartest-bot`
+    - `smartest-admin`
+  - перевірка:
+    - `systemctl is-active smartest-bot` -> `active`
+    - `systemctl is-active smartest-admin` -> `active`
+    - `curl http://127.0.0.1:8787/health` -> `ok`
+    - `curl -I https://smartest.klawa.top/health` -> `HTTP/2 200`
+
+- Нефатальний warning під час prod seed:
+  - `aiomysql` warning про `migrations_log already exists`
+  - `Event loop is closed` у `Connection.__del__`
+  - deploy завершився з `EXIT_STATUS=0`, runtime не зламався
+
+## 2026-04-22 — Portal layout hotfix
+
+- source hotfix:
+  - `app/admin_ui.py`
+- scope:
+  - `/settings`
+  - `/topup`
+- причина:
+  - portal форми були зібрані на admin `filters` layout і в user portal виглядали як один злиплий горизонтальний рядок
+- що змінено:
+  - додано portal-specific CSS layout:
+    - `portal-form`
+    - `portal-form-grid`
+    - `portal-field`
+    - `portal-field-title`
+    - `portal-help`
+    - `portal-form-actions`
+  - `render_portal_settings_page()` і `render_portal_topup_page()` переведені на card/grid layout
+- після sync перевіряти:
+  - `https://smartest.klawa.top/settings`
+  - `https://smartest.klawa.top/topup`
+  - `https://test.klawa.top/settings`
+  - `https://test.klawa.top/topup`
+
+## 2026-04-22 — Portal/admin auth bridge
+
+- source hotfix:
+  - `app/admin_ui.py`
+- scope:
+  - `/settings`
+  - `/admin`
+  - `/403`
+- що змінено:
+  - portal admin user тепер бачить кнопку `Адмінка`
+  - `/admin` приймає поточну portal session для `ADMIN_TG_USER_IDS`
+  - admin shell має кнопку `Портал` назад у звичайні user settings
+  - password fallback перенесено на прихований маршрут `/403`
+  - `/login` лишено тільки як redirect на `/403`
+- після sync перевіряти:
+  - `https://smartest.klawa.top/settings`
+  - `https://smartest.klawa.top/admin`
+  - `https://test.klawa.top/settings`
+  - `https://test.klawa.top/admin`
+  - `GET /login` -> redirect на `/403`
+
+## 2026-04-22 — Prod portal DB/env fix
+
+- source hotfix:
+  - `app/admin_ui.py`
+  - `db/connection.py`
+- root cause:
+  - prod `ADMIN_TG_USER_IDS` був порожній
+  - `db/connection.py` читав `.env` через bare `load_dotenv()`, тому `smartest-admin` на portal routes падав у `aisus/no password`
+- що змінено:
+  - `ADMIN_TG_USER_IDS=311422683` виставлено в `/opt/smartest/.env` і `/opt/smartest-staging/.env`
+  - `_current_user_session()` тепер щоразу перераховує `is_admin`
+  - DB layer бере env через `SMARTEST_ENV_PATH` або `/opt/smartest/.env`
+  - у prod для `user_id=311422683` добито portal identity/account, бо user уже існував у `users`, але `accounts.owner_user_id=311422683` ще не було
+- після sync перевіряти:
+  - `https://smartest.klawa.top/settings`
+  - `https://test.klawa.top/settings`
+  - `journalctl -u smartest-admin` не містить `aisus'@'localhost' (using password: NO)` для portal routes
+
+## 2026-04-22 — Prod rollback to pre-portal state
+
+- причина:
+  - `smartest.klawa.top` і `@saintaibot` не мають бути live-полігонoм для нового multitenant portal/login до повного acceptance на тестовому стенді
+- що зроблено:
+  - `/opt/smartest/app` відновлено з `/opt/smartest/app.prev`
+  - `smartest-bot.service` і `smartest-admin.service` перезапущені після rollback
+  - `ADMIN_TG_USER_IDS` прибрано з prod `.env`
+- стан після rollback:
+  - `https://smartest.klawa.top/` -> `303 /login`
+  - `https://smartest.klawa.top/health` -> `200`
+  - `test.klawa.top` лишається окремим новим стендом на `127.0.0.1:8788`
+
+## 2026-04-22 — Prod rollback corrected to pre-multitenant commit
+
+- причина:
+  - backup `/opt/smartest/app.prev` уже містив Stage 7 multitenant код, тому перший rollback не прибрав billing/policy контур із prod
+- що зроблено:
+  - створено emergency backup поточного prod tree: `/opt/smartest/app.multitenant_<timestamp>`
+  - prod розгорнуто з git commit `cd36804` (`gpt_wiser`) поверх `/opt/smartest/app`
+  - `.env` і `venv` збережено
+  - `smartest-bot.service` і `smartest-admin.service` перезапущені
+- після sync перевіряти:
+  - `grep` по `/opt/smartest/app` не знаходить `check_budget`, `assign_owner_if_unassigned`, `Недостатньо коштів`, `/topup`
+  - `https://smartest.klawa.top/health` -> `200`
+  - `test.klawa.top` лишається на staging/test bot і не зачіпається rollback-ом

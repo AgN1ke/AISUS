@@ -22,6 +22,16 @@ smartest.klawa.top/admin     → Admin Panel (Telegram Login, tg_user_id-check)
 
 ## 2. Telegram Login Widget (новий, квітень 2026)
 
+**Оновлення від 2026-04-20.** Для Smartest user portal базовим контрактом є **нова Telegram Login library**, не code flow. Поточна реалізація працює так:
+
+- browser завантажує `https://oauth.telegram.org/js/telegram-login.js?3`
+- портал викликає `Telegram.Login.auth(...)`
+- popup повертає `id_token`
+- browser шле `id_token` на `/auth/telegram`
+- backend верифікує JWT через JWKS і додатково звіряє browser-bound `nonce`
+
+Тобто ми залишаємося на **новому** login stack від Telegram, але без server-side token exchange і без `client_secret`. Legacy `authData` (`id/auth_date/hash`) для portal auth більше не використовується.
+
 ### Що це
 
 Новий Login Widget від Telegram дозволяє:

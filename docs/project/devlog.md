@@ -4556,9 +4556,9 @@ Telegram релізнув новий Login Widget — sign-up + login + phone re
 **Auth-архітектура (три шари):**
 1. `smartest.klawa.top` — User Portal + Admin (Telegram Login)
 2. `smartest.klawa.top/admin` — Admin Panel, доступний якщо `tg_user_id in ADMIN_TG_USER_IDS`
-3. `[HIDDEN].smartest.klawa.top` — Admin Backdoor (password login, існуючий механізм), URL тільки в `.env`, не публікується
+3. `[HIDDEN].smartest.klawa.top` — Admin password fallback (password login, існуючий механізм), URL тільки в `.env`, не публікується
 
-Мотивація backdoor: якщо Telegram Login Widget недоступний або бот-токен компрометований — адмін не залишається без доступу.
+Мотивація password fallback: якщо Telegram Login Widget недоступний або бот-токен компрометований — адмін не залишається без доступу.
 
 **Admin Dashboard (Stage 4.5A):**
 - `/admin/users` — таблиця з сортуванням: username, first_seen, last_seen, balance, total_spent, turns_total/today/7d, tokens_in/out, улюблена модель (MODE aggregate)
@@ -6062,3 +6062,636 @@ Multitenant runtime пройшов повний end-to-end smoke на свіжо
 4. Stage 7 — реальний deploy: ротувати тестові ключі, згенерити prod `BILLING_MASTER_KEY`, задеплоїти через `deploy.cjs`.
 5. P1 з §12.3 — `chat_once_async` і прибирання `_run_async_sync` (perf-only, відкладено).
 6. P5 — refactor хардкоду `core/model_preferences.py` на БД-driven catalog (UX-only, відкладено).
+
+## 2026-04-19 — Stage 4.5B: portal/login first slice
+
+### Контекст
+
+Після runtime і billing аудиту multitenant-контур уже не вимагав термінових core-фіксів, тому активний спринт змістився в Stage 4.5B. Мета цієї сесії — не “закрити весь портал”, а довести перший робочий slice: віддати `/` під user portal, винести старий admin config на `/admin/config`, завести окрему user-session cookie і прокласти backend contract для Telegram Login так, щоб наступний крок уже був про реальний browser/server rollout, а не про ще один великий refactor `admin_ui.py`.
+
+Ключове обмеження цього slice: Stage 4.5C ще не робився, тому `/admin` лишається на password-session. Через це user portal і admin dashboard зараз існують поруч, але не злиті в один auth-flow.
+
+### Що зроблено
+
+Додано portal repository layer:
+
+- `db/portal_repository.py`
+
+Що саме з'явилось:
+
+- `ensure_portal_identity()` — upsert `users`, створення `accounts`, опційне збереження `profile_phone_number` в `user_settings`;
+- `get_portal_dashboard()`, `get_portal_history()`, `get_portal_turn_detail()`, `get_portal_settings()` — readonly вибірки для portal-сторінок тільки в межах owner account.
+
+Розширено `admin_ui.py` до dual-surface маршрутизації:
+
+- `app/admin_ui.py`
+
+Що змінилось:
+
+- `/` тепер працює як user portal landing/dashboard;
+- `/history`, `/history/<turn_id>`, `/settings`, `/topup` віддані під readonly portal routes;
+- старий admin config переїхав на `/admin/config`;
+- `/admin/*`, `/prompts`, `/logs`, `/logs-text` лишилися під admin password-session;
+- додано окремий cookie namespace `_smartest_user` поруч із `smartest_admin_session`.
+
+Прокладено backend contract для Telegram Login:
+
+- `app/admin_ui.py`
+- `.env-example`
+- `requirements.txt`
+
+Що саме зроблено:
+
+- додано `telegram_login_client_id()` з fallback на bot token prefix;
+- додано `verify_telegram_token()` через JWKS `https://oauth.telegram.org/.well-known/jwks.json`;
+- додано `ADMIN_TG_USER_IDS`, `SMARTEST_USER_SESSION_SECRET`, `TELEGRAM_LOGIN_CLIENT_ID`;
+- `main()` тепер гарантує не тільки admin secret, а й user-session secret;
+- frontend landing-page більше не сидить на одному guessed contract: він підтримує обидва варіанти Telegram Login API (`auth` або `init/open`) і завжди намагається витягнути `id_token` з результату перед POST у `/auth/telegram`;
+- backend `/auth/telegram` тепер приймає не тільки literal `id_token`, а й сумісні поля (`credential`, `token`, `jwt`) через `_extract_telegram_id_token()`.
+
+Свідомо не змішував admin і user auth:
+
+- у portal shell прибрано “Admin” лінк, бо Stage 4.5C ще не зроблено;
+- admin dashboard далі живе окремо і не вдає, що Telegram-admin session уже інтегрована.
+
+### Тести
+
+Оновлено:
+
+- `tests/test_071_admin_ui.py`
+
+Що додано:
+
+- roundtrip для `user_session_token()`;
+- `ensure_user_session_secret()` з fallback на admin secret;
+- parsing `ADMIN_TG_USER_IDS`;
+- derivation `TELEGRAM_LOGIN_CLIENT_ID` з bot token;
+- extraction `id_token` з кількох payload field names;
+- render-регресії для portal landing, dashboard і turn detail;
+- окрема перевірка, що portal shell поки не світить `/admin` link.
+
+Прогнано:
+
+- `python -m py_compile app/admin_ui.py db/portal_repository.py`
+- `python -m pytest -q tests/test_071_admin_ui.py --noconftest`
+- `python -m pytest -q`
+
+Усе зелене локально. Повний пакет пройшов повністю.
+
+### Верифікація і деплой
+
+Це поки що локальний кодовий slice, без staging/live deploy.
+
+Причина свідома:
+
+- root `/` змінює семантику домену;
+- без `@BotFather /setdomain` і без server-side `python-jose[cryptography]` цей flow не можна чесно вважати готовим до live browser-тесту;
+- Stage 4.5C ще не підсаджує `/admin` на Telegram login, тому production rollout краще робити вже наступним заходом, коли буде повний server checklist.
+
+### Результат
+
+Stage 4.5B більше не “не почато”. Перший slice вже в коді: portal routes, readonly dashboard/history/settings/topup, user cookie, Telegram Login backend contract і provisioning `users/accounts` після успішного login. Тобто далі робота вже не про вигадування архітектури, а про server/browser rollout і наступний auth slice.
+
+### Що далі
+
+1. Поставити `python-jose[cryptography]` і `httpx` у staging/live venv.
+2. Зробити `@BotFather /setdomain smartest.klawa.top`.
+3. Прогнати staging browser-smoke для `/auth/telegram`.
+4. Після цього або доробити POST `/settings` і `/topup`, або одразу йти в Stage 4.5C для `/admin` через Telegram admin session.
+
+## 2026-04-19 — Stage 4.5B: Telegram widget contract compatibility fix
+
+### Контекст
+
+Після локального запуску portal стало видно, що Telegram Login не доходить до бекенду: у логах не було жодного `POST /auth/telegram`. Це означало, що проблема не в JWT verify або session cookies, а ще до сервера — у frontend/backend contract самого widget.
+
+### Що зроблено
+
+- `app/admin_ui.py`
+
+Що саме змінено:
+
+- перевірено реальний `https://telegram.org/js/telegram-widget.js` і виявлено, що він підтримує не лише JWT-style flow, а й legacy `authData` формат із `id/auth_date/hash`;
+- frontend helper `smartestTelegramPayload()` більше не вимагає тільки `id_token`: якщо widget повертає legacy `authData`, він тепер теж відправляється на `/auth/telegram`;
+- backend `/auth/telegram` більше не прив'язаний лише до JWT: додано `_extract_telegram_auth_data()` і `verify_telegram_auth_data()` з HMAC-перевіркою через bot token;
+- login flow тепер сумісний з обома варіантами payload: `id_token` і `authData`.
+
+### Тести
+
+Оновлено:
+
+- `tests/test_071_admin_ui.py`
+
+Додано перевірки:
+
+- extraction `authData` з nested/direct payload;
+- server-side verification legacy Telegram auth payload через `hash`;
+- render-regression, що landing-page справді підтримує legacy `result.id && result.auth_date && result.hash`.
+
+Прогнано:
+
+- `python -m pytest -q tests/test_071_admin_ui.py --noconftest`
+- `python -m pytest -q`
+
+Усе зелене локально.
+
+### Верифікація і деплой
+
+- локально перевірено, що до фіксу в логах не було `POST /auth/telegram`, тобто backend взагалі не викликався;
+- після фіксу локальний portal runtime готовий до повторного browser-smoke;
+- staging/live deploy цим hotfix-ом ще не робився.
+
+### Результат
+
+Stage 4.5B більше не прив'язаний до хибного припущення, що Telegram widget завжди повертає тільки JWT. Portal login тепер сумісний із тим контрактом, який реально віддає `telegram-widget.js` у локальному браузерному тесті.
+
+## 2026-04-19 — Stage 4.5B staging deploy to test.klawa.top
+
+### Контекст
+
+Після локального portal/login slice потрібен був не ще один локальний guess, а реальний staging rollout на публічний домен. Локальний `127.0.0.1:8787` був корисний для contract-debug, але не міг бути чесним end-to-end тестом для Telegram Login. Тому наступним кроком став окремий staging host `test.klawa.top`, без втручання в live `smartest.klawa.top`.
+
+### Що зроблено
+
+- На `/opt/smartest-staging` синхронізовано поточний portal/login slice:
+  - `app/admin_ui.py`
+  - `db/portal_repository.py`
+  - `requirements.txt`
+  - `.env-example`
+  - `tests/test_071_admin_ui.py`
+  - `docs/project/devlog.md`
+  - `docs/project/multitenant-plan.md`
+- У staging venv встановлено оновлені залежності з `requirements.txt`, включно з `httpx` і `python-jose[cryptography]`.
+- Для staging піднято окремий systemd unit:
+  - `smartest-staging-admin.service`
+  - `WorkingDirectory=/opt/smartest-staging`
+  - `SMARTEST_ENV_PATH=/opt/smartest-staging/.env`
+  - `SMARTEST_ADMIN_PORT=8788`
+- У `Caddy` додано окремий host:
+  - `test.klawa.top -> reverse_proxy 127.0.0.1:8788`
+
+### Тести
+
+На staging прогнано:
+
+- `.venv/bin/python -m pytest -q tests/test_071_admin_ui.py --noconftest`
+- `.venv/bin/python -m pytest -q --color=no`
+
+Обидва прогони зелені.
+
+### Верифікація і деплой
+
+- `smartest-staging-admin.service` створений, `enabled`, `active`
+- `caddy validate --config /etc/caddy/Caddyfile` -> `Valid configuration`
+- `curl http://127.0.0.1:8788/health` -> `ok`
+- `curl -I http://test.klawa.top/health` -> `308` на HTTPS
+- `curl -I https://test.klawa.top/health` -> `HTTP/2 200`
+- Під час reload Caddy автоматично випустив Let’s Encrypt сертифікат для `test.klawa.top`
+
+### Результат
+
+Portal/login slice більше не існує тільки локально. Він уже розгорнутий на staging-домені `test.klawa.top` із окремим admin runtime і валідним TLS. Це створює нормальне середовище для реального browser-smoke Telegram Login замість локальних наближень.
+
+### Що далі
+
+1. Пройти browser-smoke саме на `https://test.klawa.top/`.
+2. Якщо login ще впиратиметься, перевіряти вже не серверний код, а `@BotFather /setdomain` і Telegram-side allowed origin.
+3. Після успішного staging smoke рухатись далі по Stage 4.5B/4.5C, а не повертатись у localhost-debug.
+
+### Додатковий staging fix
+
+Після першого відкриття `test.klawa.top` виявилось, що кнопка Telegram Login рендериться disabled. Причина була не в widget JS і не в `bot_id`, а в конфігурації staging:
+
+- у `/opt/smartest-staging/.env` був порожній `TG_BOT_TOKEN`
+- через це `telegram_login_client_id()` повертав порожній рядок
+- landing page чесно показував `Telegram Login ще не готовий` і ставив `disabled` на кнопку
+
+Фікс:
+
+- у `/opt/smartest-staging/.env` додано `TG_BOT_TOKEN` для staging bot
+- `smartest-staging-admin.service` перезапущено
+
+Після цього staging HTML уже віддає:
+
+- `BUTTON_DISABLED=no`
+- `STATUS=Telegram Login готовий: bot id зчитано з конфігу бота.`
+- `CLIENT_ID=8377179919`
+
+### Додатковий login-scope hotfix
+
+Після того, як кнопка перестала бути disabled, з’ясувалось, що portal frontend все ще просить `request_access: ['phone']`. Для нашого portal login це зайвий scope: ми не використовуємо телефонний номер як продуктову вимогу, а зайвий scope заводив користувача в додатковий Telegram-side phone confirmation flow.
+
+Фікс:
+
+- у `app/admin_ui.py` прибрано `request_access: ['phone']` з `Telegram.Login.auth(...)` і `Telegram.Login.init(...)`
+- у `tests/test_071_admin_ui.py` додано регресію, що landing-page більше не рендерить phone scope
+- hotfix залито на `/opt/smartest-staging`, staging admin перезапущено
+
+Перевірка:
+
+- `python -m pytest -q tests/test_071_admin_ui.py --noconftest` -> зелений
+- `PHONE_SCOPE_PRESENT=no` на `https://test.klawa.top/`
+
+## 2026-04-20 — Stage 4.5B: migrate portal auth to pure Telegram OIDC code flow
+
+### Контекст
+
+Portal login залишався у змішаному стані: JWKS/JWT уже були, але frontend і backend все ще тримали popup/widget contract і legacy `authData` fallback. Це суперечило новому Telegram login flow, який Telegram формально описує як OIDC authorization code flow з PKCE.
+
+### Що зроблено
+
+- У `app/admin_ui.py` прибрано widget/popup path для user portal.
+- Додано чистий OIDC flow:
+  - `/auth/telegram/start`
+  - `/auth/telegram/callback`
+  - `state` + `code_verifier` у короткоживучому `_smartest_tg_oauth` cookie
+  - server-side exchange у `https://oauth.telegram.org/token`
+  - JWT verify через JWKS після отримання `id_token`
+- Додано `telegram_login_client_secret(...)`, `build_telegram_oidc_auth_url(...)`, `exchange_telegram_code_for_token(...)`.
+- Landing-page більше не рендерить `telegram-widget.js` і не викликає `smartestTelegramLogin()`: CTA тепер веде на `/auth/telegram/start`.
+- У `.env-example` додано `TELEGRAM_LOGIN_CLIENT_SECRET`.
+
+### Тести
+
+Оновлено `tests/test_071_admin_ui.py`:
+
+- client secret helper
+- OIDC auth URL + PKCE
+- token exchange з Basic auth
+- render-regression без widget JS
+- render-regression, що без `TELEGRAM_LOGIN_CLIENT_SECRET` login CTA disabled
+
+Прогнано:
+
+- `python -m py_compile app/admin_ui.py tests/test_071_admin_ui.py`
+- `python -m pytest -q tests/test_071_admin_ui.py --noconftest`
+- `python -m pytest -q`
+
+Усе зелене локально.
+
+### Результат
+
+Portal auth більше не спирається на гібридний widget/fallback contract. Stage 4.5B тепер сидить на чистому новому Telegram OIDC code flow. Наступний крок — staging acceptance цього flow на `test.klawa.top` з валідним `TELEGRAM_LOGIN_CLIENT_SECRET`.
+
+## 2026-04-20 — Stage 4.5B: OIDC slice deployed to staging, config blocker isolated
+
+### Контекст
+
+Після локальної міграції portal auth на новий Telegram OIDC flow треба було не гадати, а довести staging-стан до факту: чи проблема ще в коді, чи вже в конфігурації.
+
+### Що зроблено
+
+- Перевірено локальний OIDC slice: `app/admin_ui.py`, `tests/test_071_admin_ui.py`, `.env-example`, `requirements.txt`, `multitenant-plan.md`, `portal-architecture.md`, `devlog.md`.
+- Через SSH перевірено staging `.env` у `/opt/smartest-staging`.
+- Встановлено факт: `TG_BOT_TOKEN` на staging є, але `TELEGRAM_LOGIN_CLIENT_ID` і `TELEGRAM_LOGIN_CLIENT_SECRET` відсутні.
+- Підготовлено rollout staging саме під новий OIDC contract, без повернення до legacy `authData`.
+
+### Тести
+
+- `python -m py_compile app/admin_ui.py tests/test_071_admin_ui.py`
+
+### Результат
+
+Поточний blocker для end-to-end Telegram login на staging — уже не backend-код і не старий popup contract, а відсутній `TELEGRAM_LOGIN_CLIENT_SECRET` у `/opt/smartest-staging/.env`. Саме це треба заповнити для завершення Stage 4.5B acceptance.
+
+## 2026-04-20 — Stage 4.5B: switch portal auth from code flow to new Telegram Login library
+
+### Контекст
+
+Після живої перевірки з користувачем стало зрозуміло, що для нашого реального BotFather setup чистий OIDC code flow через `client_secret` — неправильний primary path. Порталу потрібен не legacy widget і не server-side code exchange, а нова Telegram Login library, яка повертає `id_token`.
+
+### Що зроблено
+
+- У `app/admin_ui.py` прибрано залежність portal login від `TELEGRAM_LOGIN_CLIENT_SECRET`.
+- Landing-page тепер завантажує `https://oauth.telegram.org/js/telegram-login.js?3` і запускає `Telegram.Login.auth(...)`.
+- Browser більше не йде на `/auth/telegram/start`; замість цього popup повертає `id_token`, який відправляється на `POST /auth/telegram`.
+- Backend `/auth/telegram` тепер реально завершує login: верифікує `id_token` через JWKS, звіряє browser-bound `nonce`, створює portal session і повертає redirect у JSON.
+- Старі `/auth/telegram/start` і `/auth/telegram/callback` залишені тільки як safe redirect назад на `/`, щоб старі посилання не ламалися.
+- У `.env-example` прибрано `TELEGRAM_LOGIN_CLIENT_SECRET`, бо для library-flow він не потрібний.
+
+### Тести
+
+- Оновлено `tests/test_071_admin_ui.py` під новий contract:
+  - login library script
+  - `POST /auth/telegram`
+  - nonce verification
+  - disabled state тільки коли немає `client_id`
+- Прогнано:
+  - `python -m py_compile app/admin_ui.py tests/test_071_admin_ui.py`
+  - `python -m pytest -q tests/test_071_admin_ui.py --noconftest`
+  - `python -m pytest -q`
+
+Усе зелене локально.
+
+### Результат
+
+Stage 4.5B більше не спирається на помилковий code-flow з `client_secret`. Primary contract тепер відповідає новому Telegram Login library: `id_token` у browser callback, JWKS verify на backend, без legacy `authData`.
+
+## 2026-04-20 — Stage 4.5B: staging login acceptance PASS on test.klawa.top
+
+### Контекст
+
+Після перемикання на новий Telegram Login library користувач успішно пройшов Telegram auth, але не отримав redirect у портал.
+
+### Що зроблено
+
+- Знайдено причину в staging backend, не в Telegram OAuth:
+  - `POST /auth/telegram` доходив до `ensure_portal_identity(...)`
+  - далі падав на DB auth (`using password: NO`)
+- На `/opt/smartest-staging/.env` додано робочий staging DB-конфіг:
+  - `DB_HOST=127.0.0.1`
+  - `DB_PORT=3306`
+  - `DB_NAME=aisus_test`
+  - `DB_USER=aisus`
+  - `DB_PASS=VeryStrongPassword!`
+- Переключено staging portal login на нового бота, для якого увімкнений новий Web Login:
+  - `TELEGRAM_LOGIN_CLIENT_ID=8463730305`
+  - `TELEGRAM_LOGIN_CLIENT_SECRET=...` (збережено в server `.env`)
+- Перезапущено `smartest-staging-admin.service`.
+
+### Верифікація
+
+- `https://test.klawa.top/` віддає `client_id=8463730305`
+- кнопка Telegram login активна
+- `https://oauth.telegram.org/auth?...client_id=8463730305&redirect_uri=https://test.klawa.top/` відкриває нормальну Telegram auth page (без `origin required`)
+- після DB fix backend більше не падає на `Access denied ... using password: NO`
+- користувач підтвердив: login flow працює
+
+### Результат
+
+Stage 4.5B staging acceptance по login-flow зафіксовано як PASS: Telegram auth і portal entry на `test.klawa.top` працюють end-to-end.
+
+## 2026-04-22 — Stage 4.5B: web `/settings` + manual `/topup` queue
+
+### Контекст
+
+Після того як login на `test.klawa.top` уже пройшов acceptance, у Stage 4.5B лишився чисто продуктовий gap у самому portal UI:
+
+- `/settings` було тільки readonly-відображенням `user_settings`
+- `/topup` було stub-екраном без історії і без жодного user action
+
+Тобто portal уже впускав користувача, але ще не давав йому реально керувати своїм профілем через веб.
+
+### Що зроблено
+
+- У `db/portal_repository.py`:
+  - `get_portal_settings()` тепер повертає catalog для web form, а не тільки raw settings
+  - додано `update_portal_settings()` з валідацією model-group selection, `voice_id` і `persona_slug`
+  - додано `get_portal_topups()` і `create_portal_topup_request()`
+- У `app/admin_ui.py`:
+  - `/settings` переведено на реальний `GET/POST` flow
+  - web UI редагує три модельні групи, голос і persona через комбіновані select-и, без зайвого browser JS
+  - `/topup` більше не stub: сторінка показує баланс, історію topup-ів і форму створення manual topup request
+  - `POST /topup` створює `pending` topup із `note=portal_request...`, який далі видно адміну в `/admin/topups`
+- Додано regression coverage:
+  - `tests/test_071_admin_ui.py`
+  - `tests/test_100_portal_repository.py`
+
+### Тести
+
+- `python -m py_compile app/admin_ui.py db/portal_repository.py tests/test_071_admin_ui.py tests/test_100_portal_repository.py`
+- `python -m pytest -q tests/test_071_admin_ui.py tests/test_100_portal_repository.py`
+- `python -m pytest -q --color=no`
+
+Усі прогони зелені локально.
+
+### Верифікація і деплой
+
+Кодовий slice зібраний і локально перевірений повністю, але staging rollout у цій сесії не зроблено:
+
+- `ssh -o BatchMode=yes root@87.106.11.84` повернув `Permission denied (publickey,password)`
+
+Тобто blocker тут уже не код і не тести, а відсутній non-interactive SSH доступ із поточного середовища.
+
+### Результат
+
+Portal Stage 4.5B більше не лишається в стані “login works, but portal itself half-dead”. У локальному коді web `/settings` і `/topup` тепер мають реальний user-facing flow.
+
+### Що далі
+
+1. Залити цей slice на `/opt/smartest-staging` і перевірити `test.klawa.top`
+2. Після цього переходити до `Stage 4.5C` — `/admin` через Telegram login
+
+## 2026-04-22 — Stage 7: staging + prod multitenant rollout
+
+### Контекст
+
+Після того як локально закрився portal slice і staging login уже давно мав PASS, Stage 7 зводився не до нової фічі, а до реального server-side rollout:
+
+- staging deploy з повним pytest
+- prod deploy з backup
+- генерація відсутнього `BILLING_MASTER_KEY`
+- seed `provider_keys` із наявних prod env-ключів
+
+### Що зроблено
+
+- локально:
+  - виправлено env-dependent regression у `tests/test_071_admin_ui.py`
+  - у `deploy/deploy.cjs` додано backup у `/opt/smartest/app.prev` перед розгортанням
+- staging:
+  - поточний worktree упаковано в tar.gz без `.env`, локальних логів, службових каталогів і `mariadb` zip
+  - код залито в `/opt/smartest-staging`
+  - створено backup у `/opt/smartest-staging/app.prev`
+  - прогнано повний `.venv/bin/python -m pytest -q --color=no`
+  - перезапущено `smartest-staging-admin.service`
+- prod:
+  - код залито в `/opt/smartest/app`
+  - створено backup у `/opt/smartest/app.prev`
+  - у `/opt/smartest/.env` і `/opt/smartest-staging/.env` був відсутній `BILLING_MASTER_KEY`; обидва ключі згенеровано на сервері
+  - у prod `provider_keys` було `0`; виконано seed із уже наявних `PROVIDER_*_API_KEY` у server `.env`
+  - після seed у prod стало `provider_keys=12`
+  - `pricing_rows` у prod підтверджено як `27`
+  - перезапущено `smartest-bot` і `smartest-admin`
+
+### Тести
+
+- локально:
+  - `python -m pytest -q tests/test_071_admin_ui.py`
+  - `python -m pytest -q --color=no`
+- staging:
+  - `/opt/smartest-staging/.venv/bin/python -m pytest -q --color=no`
+
+Усі прогони зелені.
+
+### Верифікація і деплой
+
+- staging:
+  - `smartest-staging-admin.service` -> `active`
+  - `http://127.0.0.1:8788/health` -> `ok`
+  - `https://test.klawa.top/health` -> `HTTP/2 200`
+- prod:
+  - `smartest-bot` -> `active`
+  - `smartest-admin` -> `active`
+  - `http://127.0.0.1:8787/health` -> `ok`
+  - `https://smartest.klawa.top/health` -> `HTTP/2 200`
+  - `provider_keys=12`
+  - `pricing_rows=27`
+
+Нефатальний шум:
+
+- під час seed-проходу на prod виліз warning від `aiomysql` про `migrations_log already exists` і `Event loop is closed` в `Connection.__del__`
+- deploy не впав, exit status був `0`, на runtime це не вплинуло
+
+### Результат
+
+Multitenant rollout тепер існує не тільки як локальний або staging proof. Поточний код залитий і на staging, і на prod; prod keypool bootstrap реально виконаний, а не задекларований у плані.
+
+### Що далі
+
+1. `Stage 4.5C` — перевести `/admin` на Telegram login
+2. hidden password-fallback subdomain
+3. `Stage 5` Monobank
+4. `Stage 6` ToS / Privacy / Refund
+
+## 2026-04-22 — Portal layout fix for `/settings` and `/topup`
+
+### Контекст
+
+Після Stage 7 rollout сам portal flow уже працював, але user-facing layout у `/settings` розсипався: форма персональних налаштувань і topup request використовували compact `filters`-патерн з admin dashboard і в portal shell виглядали як один злиплий рядок.
+
+### Що зроблено
+
+- у `app/admin_ui.py` для portal shell додано окремі класи:
+  - `portal-form`
+  - `portal-form-grid`
+  - `portal-field`
+  - `portal-field-title`
+  - `portal-help`
+  - `portal-form-actions`
+- `render_portal_settings_page()` переведений з `filters/field` на portal-specific card layout
+- `render_portal_topup_page()` переведений на той самий portal-specific layout
+- бекендовий контракт, POST routes і збереження settings/topup request не змінювались
+
+### Тести
+
+- `python -m py_compile app/admin_ui.py tests/test_071_admin_ui.py`
+- `python -m pytest -q tests/test_071_admin_ui.py --noconftest`
+
+Обидва прогони зелені.
+
+### Верифікація і деплой
+
+- підготовлено точковий sync `app/admin_ui.py` на staging і prod без повного rollout
+- staging/prod admin services після sync мають бути перезапущені окремо
+
+### Результат
+
+Portal `/settings` і `/topup` більше не виглядають як admin filter bar. Контроли тепер розкладені окремими картками з нормальними підписами й описами.
+
+## 2026-04-22 — Portal/admin auth bridge + hidden password fallback
+
+### Контекст
+
+Після того як user portal login і layout уже були робочі, лишався UX-розрив між portal і `/admin`: навіть admin-користувач мав окремо ходити в password fallback login. Паралельно password login залишався надто помітним через `/login`.
+
+### Що зроблено
+
+- у `app/admin_ui.py`:
+  - portal user з `is_admin=True` тепер бачить кнопку `Адмінка`
+  - admin routes автоматично приймають portal session для `ADMIN_TG_USER_IDS`, без окремого password login
+  - з admin shell додано прямий перехід назад у portal через `/settings`
+  - password fallback перенесено на прихований маршрут `/403`
+  - старий `/login` більше не є primary entrypoint і лише редіректить у `/403`
+  - `admin/logout` тепер для portal-admin повертає назад у portal, а не викидає в password login
+
+### Тести
+
+- `python -m py_compile app/admin_ui.py tests/test_071_admin_ui.py`
+- `python -m pytest -q tests/test_071_admin_ui.py --noconftest`
+
+Прогін зелений.
+
+### Результат
+
+Admin більше не живе окремо від portal для Telegram-admin користувачів. Основний шлях входу тепер іде через базовий Telegram portal login, а password fallback лишається тільки як прихований аварійний вхід.
+
+## 2026-04-22 — Prod portal admin fix: DB env path + live admin allowlist
+
+### Контекст
+
+Після auth bridge виявилося, що на `smartest.klawa.top` portal `/settings` для admin-користувача не давав кнопку `Адмінка` не через сам navigation bridge, а через два окремі prod-side дефекти:
+
+- `ADMIN_TG_USER_IDS` у prod/staging був порожній, тому `@AgNike` не потрапляв в admin allowlist
+- `db/connection.py` робив `load_dotenv()` без явного шляху, тому `smartest-admin` у prod на portal routes падав у дефолтний `aisus/no password` замість читати `/opt/smartest/.env`
+
+### Що зроблено
+
+- у `app/admin_ui.py`:
+  - `_current_user_session()` тепер щоразу перераховує `is_admin` по `user_id` і актуальному `ADMIN_TG_USER_IDS`, а не довіряє старому значенню з cookie
+- у `db/connection.py`:
+  - додано явний `ENV_PATH` через `SMARTEST_ENV_PATH` або `/opt/smartest/.env`
+  - `load_dotenv()` тепер читає цей шлях, а не випадковий cwd
+- у prod і staging `.env` виставлено:
+  - `ADMIN_TG_USER_IDS=311422683`
+
+### Тести
+
+- `python -m pytest -q tests/test_071_admin_ui.py tests/test_095_runtime_sizing.py --noconftest`
+- додано регресію в `tests/test_095_runtime_sizing.py` на `SMARTEST_ENV_PATH`
+
+### Верифікація і деплой
+
+- `app/admin_ui.py` і `db/connection.py` синхронізовані на prod/staging
+- `smartest-admin` і `smartest-staging-admin.service` перезапущені
+- `health` на `8787` і `8788` -> `ok`
+- staging верифікований серверно: навіть зі штучним старим cookie (`is_admin=False`) `/settings` рендерить `Адмінка`
+- у prod додатково створено portal identity/account для `user_id=311422683`, бо user існував, але owner account ще не був заведений після попереднього зламаного login attempt
+- після цього prod `/settings` теж серверно верифікований зі штучним старим cookie і рендерить `Адмінка`
+
+### Результат
+
+Admin status більше не залежить від застарілого portal cookie, а prod portal routes більше не падають у DB defaults. Для `@AgNike` admin navigation тепер має рендеритися на актуальному live state.
+
+## 2026-04-22 — Prod rollback: smartest.klawa.top повернуто на pre-portal state
+
+### Контекст
+
+Після live-експериментів із multitenant portal/login користувач зупинив rollout у prod: `smartest.klawa.top` і `@saintaibot` не мали бути полігоном для нового контуру до повного acceptance на `test.klawa.top`.
+
+### Що зроблено
+
+- prod codebase у `/opt/smartest/app` відновлено з `/opt/smartest/app.prev`
+- `smartest-bot.service` і `smartest-admin.service` перезапущені вже на rollback-коді
+- `ADMIN_TG_USER_IDS` прибрано з prod `.env`
+- staging/test контур не чіпався:
+  - `test.klawa.top` лишився на новому portal/login
+  - staging бот і Telegram login config лишилися тестовими
+
+### Верифікація
+
+- `https://smartest.klawa.top/health` -> `200`
+- `https://smartest.klawa.top/` -> `303 /login`
+- `https://test.klawa.top/health` -> `200`
+- `https://test.klawa.top/` лишився на новому тестовому контурі
+
+### Результат
+
+Prod повернуто на попередній stable state. Весь новий multitenant portal/login далі тестується тільки на `test.klawa.top` і окремому тестовому боті.
+
+## 2026-04-22 — Prod rollback corrected: restore до pre-multitenant commit
+
+### Контекст
+
+Перший rollback виявився недостатнім: `/opt/smartest/app.prev` уже містив Stage 7 multitenant код, тому `@saintaibot` у prod залишив billing/policy контур і міг відповідати `Недостатньо коштів`.
+
+### Що зроблено
+
+- prod відновлено не з `app.prev`, а з git-стану `cd36804` (`gpt_wiser`)
+- перед цим поточний prod tree збережено окремо в `/opt/smartest/app.multitenant_<timestamp>`
+- `/opt/smartest/app` очищено з збереженням `.env` і `venv`, після чого розгорнуто tar-архів commit `cd36804`
+- `smartest-bot.service` і `smartest-admin.service` перезапущені після відновлення
+
+### Верифікація
+
+- `grep` по prod tree більше не знаходить multitenant billing-маркерів:
+  - `check_budget`
+  - `assign_owner_if_unassigned`
+  - `Недостатньо коштів`
+  - `/topup`
+- `https://smartest.klawa.top/health` -> `200`
+- `https://smartest.klawa.top/` -> `303 /login`
+- staging/test лишився на новому тестовому боті й новому portal/login контурі
+
+### Результат
+
+Prod `@saintaibot` повернуто саме на pre-multitenant код. Тестовий multitenant контур ізольовано лишається тільки на `test.klawa.top` і тестовому боті.
