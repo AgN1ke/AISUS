@@ -1,0 +1,20 @@
+[Unit]
+Description=Smartest Staging Admin UI
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/smartest-staging
+ExecStart=/opt/smartest-staging/.venv/bin/python -m app.admin_ui
+Restart=always
+RestartSec=3
+Environment=PYTHONUNBUFFERED=1
+Environment=SMARTEST_ENV_PATH=/opt/smartest-staging/.env
+Environment=SMARTEST_ADMIN_HOST=127.0.0.1
+Environment=SMARTEST_ADMIN_PORT=8788
+Environment=SMARTEST_MANAGED_SERVICE=smartest-staging-bot.service
+Environment=SMARTEST_ADMIN_SERVICE_NAME=smartest-staging-admin.service
+
+[Install]
+WantedBy=multi-user.target

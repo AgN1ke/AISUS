@@ -1,0 +1,18 @@
+[Unit]
+Description=Smartest Staging Telegram Bot
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/smartest-staging
+ExecStart=/opt/smartest-staging/.venv/bin/python /opt/smartest-staging/run.py
+Restart=always
+RestartSec=5
+StandardOutput=append:/opt/smartest-staging/logs/bot.log
+StandardError=append:/opt/smartest-staging/logs/bot.err.log
+Environment=PYTHONUNBUFFERED=1
+Environment=SMARTEST_ENV_PATH=/opt/smartest-staging/.env
+
+[Install]
+WantedBy=multi-user.target

@@ -1,12 +1,41 @@
-// Deploy Smartest bot to VPS
-// Usage: node deploy/deploy.cjs
+// Deploy Smartest to VPS
+// Usage: node deploy/deploy.cjs --target=prod
+//        node deploy/deploy.cjs --target=staging
+// --target must be explicit (no default) to avoid confusing prod and staging.
 // Requires env vars: DEPLOY_HOST, DEPLOY_USER, DEPLOY_PASS (or set in deploy/.env)
 const { Client } = require('ssh2');
 const { execSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 
-// Load deploy/.env if exists
+const TARGETS = {
+  prod: {
+    remoteApp: '/opt/smartest/app',
+    remoteAppPrev: '/opt/smartest/app.prev',
+    remoteVenv: '/opt/smartest/venv',
+    envPath: '/opt/smartest/.env',
+    botService: 'smartest-bot',
+    adminService: 'smartest-admin',
+  },
+  staging: {
+    remoteApp: '/opt/smartest-staging',
+    remoteAppPrev: '/opt/smartest-staging/app.prev',
+    remoteVenv: '/opt/smartest-staging/.venv',
+    envPath: '/opt/smartest-staging/.env',
+    botService: 'smartest-staging-bot',
+    adminService: 'smartest-staging-admin',
+  },
+};
+
+const argTarget = (process.argv.find(a => a.startsWith('--target=')) || '').split('=')[1];
+if (!argTarget || !TARGETS[argTarget]) {
+  console.error('[deploy] --target=prod or --target=staging is required.');
+  console.error('         prod    -> /opt/smartest/app (smartest.klawa.top, @saintaibot)');
+  console.error('         staging -> /opt/smartest-staging (test.klawa.top, test bot)');
+  process.exit(1);
+}
+const cfg = TARGETS[argTarget];
+
 const dotenvPath = path.join(__dirname, '.env');
 if (fs.existsSync(dotenvPath)) {
   for (const line of fs.readFileSync(dotenvPath, 'utf8').split('\n')) {
@@ -23,11 +52,7 @@ if (!DEPLOY_HOST || !DEPLOY_PASS) {
   process.exit(1);
 }
 
-// Always deploy from Smartest project, regardless of where this script runs
 const PROJECT_DIR = 'C:/Python_projects/Smartest';
-const REMOTE_APP = '/opt/smartest/app';
-const REMOTE_APP_PREV = '/opt/smartest/app.prev';
-const REMOTE_VENV = '/opt/smartest/venv';
 
 const excludes = [
   '.git',
@@ -41,12 +66,16 @@ const excludes = [
   'logs',
   'sessions',
   'tmp',
+  '.tmp',
   'Audio',
   'deploy/*.tar.gz',
+  'deploy/node_modules',
+  'mariadb-*.zip',
 ].map(e => `--exclude="${e}"`).join(' ');
 
-const tarFile = path.join(PROJECT_DIR, 'deploy', 'smartest.tar.gz');
+const tarFile = path.join(PROJECT_DIR, 'deploy', `smartest-${argTarget}.tar.gz`);
 
+console.log(`[deploy] target=${argTarget} -> ${cfg.remoteApp}`);
 console.log('[deploy] Creating archive...');
 try {
   const tarPosix = tarFile.replace(/\\/g, '/').replace(/^([A-Z]):/i, '/$1');
@@ -68,30 +97,25 @@ conn.on('ready', () => {
   conn.sftp((err, sftp) => {
     if (err) { console.error(err); conn.end(); return; }
 
-    const remoteTar = '/tmp/smartest.tar.gz';
+    const remoteTar = `/tmp/smartest-${argTarget}.tar.gz`;
     const ws = sftp.createWriteStream(remoteTar);
     ws.on('close', () => {
       console.log('[deploy] Uploaded, deploying...');
       const cmd = [
-        // Preserve .env
-        `cp ${REMOTE_APP}/.env /tmp/smartest-env.bak 2>/dev/null || true`,
-        // Backup previous app payload for rollback
-        `rm -rf ${REMOTE_APP_PREV}`,
-        `mkdir -p ${REMOTE_APP_PREV}`,
-        `cp -a ${REMOTE_APP}/. ${REMOTE_APP_PREV}/`,
-        // Extract new code
-        `tar xzf ${remoteTar} -C ${REMOTE_APP}`,
+        `cp ${cfg.envPath} /tmp/smartest-${argTarget}-env.bak 2>/dev/null || true`,
+        `rm -rf ${cfg.remoteAppPrev}`,
+        `mkdir -p ${cfg.remoteAppPrev}`,
+        `cp -a ${cfg.remoteApp}/. ${cfg.remoteAppPrev}/ 2>/dev/null || true`,
+        `mkdir -p ${cfg.remoteApp}`,
+        `tar xzf ${remoteTar} -C ${cfg.remoteApp}`,
         `rm -f ${remoteTar}`,
-        // Restore .env
-        `cp /tmp/smartest-env.bak ${REMOTE_APP}/.env 2>/dev/null || true`,
-        // Install/update dependencies
-        `${REMOTE_VENV}/bin/pip install -q -r ${REMOTE_APP}/requirements.txt`,
-        // Restart services
-        `systemctl restart smartest-bot`,
-        `systemctl restart smartest-admin`,
+        `cp /tmp/smartest-${argTarget}-env.bak ${cfg.envPath} 2>/dev/null || true`,
+        `${cfg.remoteVenv}/bin/pip install -q -r ${cfg.remoteApp}/requirements.txt`,
+        `systemctl restart ${cfg.botService}`,
+        `systemctl restart ${cfg.adminService}`,
         `sleep 2`,
-        `systemctl is-active smartest-bot && echo '[deploy] smartest-bot: OK' || echo '[deploy] smartest-bot: FAILED'`,
-        `systemctl is-active smartest-admin && echo '[deploy] smartest-admin: OK' || echo '[deploy] smartest-admin: FAILED'`,
+        `systemctl is-active ${cfg.botService} && echo '[deploy] ${cfg.botService}: OK' || echo '[deploy] ${cfg.botService}: FAILED'`,
+        `systemctl is-active ${cfg.adminService} && echo '[deploy] ${cfg.adminService}: OK' || echo '[deploy] ${cfg.adminService}: FAILED'`,
       ].join(' && ');
 
       conn.exec(cmd, (err2, stream) => {
