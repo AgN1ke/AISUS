@@ -300,7 +300,7 @@ def _chat_once_gemini(
         "Content-Type": "application/json",
     }
     last_exc: Exception | None = None
-    for attempt in range(2):
+    for attempt in range(3):
         if attempt:
             time.sleep(3)
         try:
@@ -322,7 +322,7 @@ def _chat_once_gemini(
         data = response.json()
         return _response_with_content(_gemini_extract_text(data))
     raise requests.exceptions.Timeout(
-        f"Gemini timed out after 2 attempts (model={model})"
+        f"Gemini timed out after 3 attempts (model={model})"
     ) from last_exc
 
 
