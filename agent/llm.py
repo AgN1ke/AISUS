@@ -465,29 +465,36 @@ def _chat_once_gemini(
         reasoning_active=reasoning_active,
         capability=binding.capability,
     )
-    response = requests.post(
-        _gemini_endpoint(binding, model),
-        headers={
-            "x-goog-api-key": binding.api_key,
-            "Content-Type": "application/json",
-        },
-        json=payload,
-        timeout=45,
-    )
-    try:
-        response.raise_for_status()
-    except requests.HTTPError as exc:
-        detail = ""
+    url = _gemini_endpoint(binding, model)
+    headers = {
+        "x-goog-api-key": binding.api_key,
+        "Content-Type": "application/json",
+    }
+    last_exc: Exception | None = None
+    for attempt in range(2):
+        if attempt:
+            time.sleep(3)
         try:
-            detail = response.text[:1000]
-        except Exception:
+            response = requests.post(url, headers=headers, json=payload, timeout=60)
+        except requests.exceptions.Timeout as exc:
+            last_exc = exc
+            continue
+        try:
+            response.raise_for_status()
+        except requests.HTTPError as exc:
             detail = ""
-        raise RuntimeError(
-            f"Gemini request failed with status {response.status_code}: {detail or exc}"
-        ) from exc
-
-    data = response.json()
-    return _response_with_content(_gemini_extract_text(data), usage=_gemini_usage(data))
+            try:
+                detail = response.text[:1000]
+            except Exception:
+                detail = ""
+            raise RuntimeError(
+                f"Gemini request failed with status {response.status_code}: {detail or exc}"
+            ) from exc
+        data = response.json()
+        return _response_with_content(_gemini_extract_text(data), usage=_gemini_usage(data))
+    raise requests.exceptions.Timeout(
+        f"Gemini timed out after 2 attempts (model={model})"
+    ) from last_exc
 
 
 def tool_spec() -> List[Dict[str, Any]]:
