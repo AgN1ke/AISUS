@@ -213,8 +213,8 @@ def test_render_user_portal_landing_has_telegram_login_contract():
 
     assert "Smartest Portal" in html
     assert "https://oauth.telegram.org/js/telegram-login.js?3" in html
-    assert 'fetch("/auth/telegram"' in html
-    assert "smartestTelegramLogin" in html
+    assert 'src="/static/admin.js"' in html
+    assert "window.SmartestTelegram" in html
     assert "/auth/telegram/start" not in html
     assert "/auth/telegram/callback" not in html
     assert "request_access: ['phone']" not in html
@@ -279,7 +279,7 @@ def test_render_portal_dashboard_page_shows_admin_link_for_admin_user():
         {},
     )
 
-    assert 'href="/admin">Адмінка</a>' in html
+    assert 'class="nav-cross" href="/admin"' in html
 
 
 def test_render_portal_settings_page_has_editable_form():
@@ -516,7 +516,7 @@ def test_render_dashboard_has_portal_link():
         }
     )
 
-    assert 'href="/settings">Портал</a>' in html
+    assert 'class="nav-cross" href="/"' in html
 
 
 def test_current_admin_session_falls_back_to_portal_admin():
@@ -675,5 +675,5 @@ def test_render_logs_page_has_source_and_filter_controls(monkeypatch):
     assert 'id="trace-input"' in html
     assert 'id="capability-input"' in html
     assert 'id="contains-input"' in html
-    assert "/logs-text?" in html
+    assert 'src="/static/admin.js"' in html
     assert "runtime.boot" in html

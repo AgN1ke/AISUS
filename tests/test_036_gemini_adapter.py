@@ -91,7 +91,7 @@ def test_chat_once_gemini_text_request(monkeypatch):
         "maxOutputTokens": 77,
         "thinkingConfig": {"thinkingBudget": 0},
     }
-    assert captured["timeout"] == 45
+    assert captured["timeout"] == 60
     assert response.choices[0].message.content == "All good."
     assert response.usage.prompt_tokens == 21
     assert response.usage.completion_tokens == 21

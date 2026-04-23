@@ -6767,3 +6767,115 @@ node deploy/deploy.cjs --target=staging  # -> /opt/smartest-staging, @chibigochi
 ### Підсумок
 
 Prod і multitenant — фізично різні каталоги, різні venv, різні systemd-юніти, різні боти, різні домени, різні БД, різні гілки git. Deploy-скрипт тепер вимагає явного `--target` і не може їх переплутати. Prod `@saintaibot` продовжує працювати на pre-multitenant коді з чистою схемою БД; staging `@chibigochibot` працює на `21bd10a` з чистим multitenant-контуром. Вся легасі-свалка в git (`codex/*`, `refactor_t*`, ін.) знесена.
+
+## 2026-04-24 — Session 093: Аналіз multitenant + план UI consolidation
+
+### Проблема / Ціль
+
+Користувач попросив проаналізувати multitenant-проєкт (що зроблено / не зроблено / TODO) і дав фідбек: "сайт зроблений криво, кнопки стрибають туди-сюди, немає єдиного підходу". Окрема вимога: staging-бот @chibigochibot повинен бути функціонально ідентичний prod @saintaibot, тільки на multitenant-runtime.
+
+### Аналіз: що ВЖЕ зроблено
+
+**Backend готовий.** Multitenant DB (users/accounts/transactions/topups/provider_keys/pricing/chat_policies), billing pipeline (BillingContext через ContextVar, gateway → runtime → keypool, thread-safe `_maybe_emit_billing` через `asyncio.run_coroutine_threadsafe(_MAIN_LOOP)`), keypool-first для billed turns, Gemini usage extraction (P8), pricing seed автоматом, `chat_once` обгорнутий через `to_thread` у 8 callsite-ах, `DB_POOL_SIZE=50` + `ThreadPoolExecutor(128)`, тести 094/095, локально 308 passed.
+
+**Telegram UI:** `/settings` (3 групи моделей + voice + persona), `/balance last`, `/balance turn <id>` з sub-transaction breakdown.
+
+**Admin dashboard (Stage 4.5A):** `/admin/users`, деталка з ручним поповненням, `/admin/transactions`, `/admin/chats`, `/admin/topups`, `/admin/keys`, `/admin/config`, `/prompts`, `/logs`.
+
+**User portal (Stage 4.5B):** Telegram Login на `test.klawa.top` (PASS), `/`, `/history`, `/history/<turn_id>`, editable `/settings` (POST flow), `/topup` як manual queue з історією. `db/portal_repository.py` + `tests/test_100_portal_repository.py`.
+
+**Stage 7 deploy:** prod і staging залиті, окремі `BILLING_MASTER_KEY`, prod keypool 12 ключів, окремий staging DB `aisus_test`.
+
+### Аналіз: що НЕ зроблено
+
+| Пункт | Блокує бету? |
+|------|-------------|
+| Stage 4.5C — `/admin` через TG Login (частково: admin вже в portal session дістає `/admin`) | ні |
+| Hidden password-fallback subdomain | ні |
+| Stage 5 — Monobank acquiring | так |
+| Stage 6 — ToS / Privacy / Refund | так |
+| §12.6 acceptance: 20 паралельних turns на staging + browser smoke `/admin/users/<id>` | так |
+| P1 — прибрати `_run_async_sync` (perf-only) | ні |
+| P5 — model catalog у БД (UX-only) | ні |
+
+### Аналіз: чому "кнопки стрибають" (UI)
+
+`app/admin_ui.py` має 4782 рядки склеєного HTML з **сімома окремими `<style>` блоками**, кожен зі своєю палітрою:
+- `render_dashboard:1108` — `#f3ead9`, класи `.sh .hero .st-card .panel .cap-card .prov-card`, `.btn` padding `14px 20px`
+- `render_prompts_page:1479` — окремий блок
+- `render_logs_page:1756` — окремий
+- `_admin_shell:1999` — `#f4e8cf`, інші класи `.wrap .topbar .nav .data-table .grid2 .stack`, `.btn` padding `11px 16px`
+- `render_login:2916` — окремий
+- `render_user_portal_landing:2980` — окремий
+- `render_portal_shell:3121` — наполовину дублює `_admin_shell`, `.btn` padding `14px 18px`
+
+`.btn .btn-main` визначений тричі з різним padding — звідси і "стрибання". Flash-кінди розходяться: admin використовує `.flash-info|error`, portal — `.flash-info|ok|warn`. Нав-лінк `Портал` у admin shell веде на `/settings` (це **portal** контекст) — leaky abstraction.
+
+Немає `app/templates/`, немає `app/static/`. Все — inline f-string + inline CSS + inline JS.
+
+### План покращень
+
+**P0 — UI consolidation (відчутно для користувача):**
+1. `app/static/admin.css` — єдиний CSS зі змінними, `.btn`, `.panel`, `.flash`, `.data-table` як єдиними.
+2. Route `/static/<path>` у `SmartestAdminHandler`.
+3. Замінити 7 inline `<style>` блоків на `<link rel="stylesheet" href="/static/admin.css">`.
+4. Уніфікувати flash-кінди → `info|ok|warn|error` всюди.
+5. Розв'язати cross-context лінки: admin shell не лінкує на `/settings` (portal).
+
+**P1 — Bot parity (staging = prod functional clone):**
+6. Перевірити, що `adapters/telegram_bot.py` на staging має ВСІ команди prod-бота: `/balance`, `/settings`, `/topup`, `/start`, voice replies, vision, video, search, podcast (якщо є), memory commands.
+7. Прогнати `tests/` повністю на staging venv після перевірки.
+
+**P1 — Acceptance перед бетою:**
+8. 20 паралельних `run_capability` через `asyncio.gather` на staging.
+9. Browser smoke `/admin/users/<id>` після `+100 UAH` і 5 turns на staging.
+
+**P2 — Auth + продуктові хвости:**
+10. Stage 4.5C: admin через TG Login.
+11. Stage 5: Monobank acquiring.
+12. Stage 6: ToS/Privacy/Refund сторінки.
+
+**P3 — Tech debt after release:**
+13. P1: `chat_once_async` через `AsyncOpenAI` + `httpx.AsyncClient`.
+14. P5: model catalog у `provider_catalog` таблицю.
+
+### Старт у цій сесії
+
+Починаю з P0 (UI consolidation) — це те, що користувач відчуває фізично. Потім P1 (bot parity).
+
+## 2026-04-24 — Session 094: P0 виконано, JS винесено, deploy на staging
+
+### Що зроблено
+
+**CSS consolidation.** Усі 7 inline `<style>` блоків у `app/admin_ui.py` замінено на `<link rel="stylesheet" href="/static/admin.css">` через `_shared_head()` helper. Створено `app/static/admin.css` (~640 рядків) з єдиною палітрою, одним `.btn` (з аліасами `.btn-main`/`.btn-sec` для backward compat), одним `.flash` (info/ok/warn/error), `.panel`, `.data-table`, `.portal-form`, `.login-card`, темним `body.logs-body` + `.logs-shell`, `.portal-landing`. Більше немає трьох різних padding на `.btn-main` — кнопки не стрибають.
+
+**Static route.** Додано `_send_static()` метод і `/static/<path>` обробник у `SmartestAdminHandler.do_GET`. STATIC_ROOT = `Path(__file__).resolve().parent / "static"`.
+
+**JS consolidation.** Винесено три inline `<script>` блоки (dashboard ~110 рядків, logs ~50 рядків, portal landing ~60 рядків) в один `app/static/admin.js` (~280 рядків). Кожен модуль (`initDashboard`, `initLogs`, `initPortalLanding`) self-contained, gated по наявності root-елемента (`.cap-card`, `.logs-shell`, `.portal-landing`), тому одне підключення `/static/admin.js` працює на всіх сторінках. Дані передаються через `window.SmartestModels`, `window.SmartestTelegram` (тонкий inline `<script>` перед external load).
+
+**Cross-context nav.** Введено `.nav-cross` пілку з префіксом `↗` для переходів admin↔portal. Admin shell/dashboard/prompts/logs тепер мають `↗ У портал`, portal shell для адмінів має `↗ В адмінку`. Більше не плутаємось між контекстами.
+
+**Flash unification.** `_portal_flash_html` тепер делегує в `_flash_block` з нормалізацією (`success→ok`, `danger→error`, fallback на `info`). Усі рендери використовують один і той самий рендеринг.
+
+**Bot parity verified.** Diff `master..multitenant` для `adapters/`, `run.py` показує: multitenant — strict superset master. `adapters/telegram_bot.py` додає `_is_edited_update` skip, `CallbackQueryHandler` для billing inline-кнопок, явні фільтри `TEXT|PHOTO|VIDEO|VIDEO_NOTE|VOICE|AUDIO|Document.ALL|CAPTION`, `media_group_id`/`has_video_note`. `run.py` додає `purge_stale_media_tmp` на boot, `ThreadPoolExecutor` із `llm_thread_pool_size`, `set_main_event_loop` для thread-safe billing, `start_scheduler` для memory cron, try/finally clean shutdown. 10K+ insertions vs 388 deletions у `app/billing/core/media/memory` — нічого не вирізано.
+
+**Tests.** Виправлено три тести під нову поведінку: `test_036_gemini_adapter` (timeout 45→60 у відповідь до `da8d908 Fix Gemini timeouts`), `test_071_admin_ui::test_render_portal_dashboard_page_shows_admin_link_for_admin_user` і `test_render_dashboard_has_portal_link` (новий селектор `class="nav-cross"`), `test_render_user_portal_landing_has_telegram_login_contract` і `test_render_logs_page_has_source_and_filter_controls` (тепер перевіряють `src="/static/admin.js"` замість inline JS). Локально: 330 passed.
+
+### Розмір зміни
+
+`app/admin_ui.py`: -854 рядки видалено, +130 додано (sub-net -700 рядків HTML/CSS/JS removed). `app/static/admin.css` (новий, 640 рядків). `app/static/admin.js` (новий, 280 рядків).
+
+### Не зроблено (потребує користувача)
+
+- Stage 4.5C — pricing UI / model preferences page для юзерів (UX-decision)
+- Stage 5 — Telegram Web Login для `/admin` (security-sensitive)
+- Stage 6 — Auto-topup flow (Monobank acquiring credentials)
+- Stage 8 — production cutover @saintaibot → multitenant (один-в-один deploy decision)
+- Розбиття 4 тис рядків `app/admin_ui.py` на модулі (`routes_admin.py`, `routes_portal.py`, `render_admin.py`, `render_portal.py`) — велика рефактор, варто з review
+- Audit log для admin дій (потребує schema migration)
+- Per-tenant rate limiting (design decision)
+- E2E browser tests для portal flow
+
+### Деплой
+
+`node deploy/deploy.cjs --target=staging` → `/opt/smartest-staging` (окрема директорія від prod `/opt/smartest/app`, окремі systemd-юніти `smartest-staging-bot`/`smartest-staging-admin`, окремий бот `@chibigochibot`, домен `test.klawa.top`, БД `aisus_test`).

@@ -67,6 +67,7 @@ LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 logger = logging.getLogger(__name__)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+STATIC_ROOT = Path(__file__).resolve().parent / "static"
 DEFAULT_SERVER_ENV_PATH = Path("/opt/smartest/.env")
 ENV_PATH = Path(
     os.getenv("SMARTEST_ENV_PATH")
@@ -890,6 +891,37 @@ def _effective_reasoning_effort(cap: CapabilityDef, values: dict[str, str]) -> s
 # Rendering: dashboard
 # ---------------------------------------------------------------------------
 
+FLASH_KINDS = {"info", "ok", "warn", "error"}
+
+
+def _normalize_flash_kind(kind: str) -> str:
+    candidate = (kind or "info").strip().lower()
+    if candidate == "success":
+        return "ok"
+    if candidate == "danger":
+        return "error"
+    return candidate if candidate in FLASH_KINDS else "info"
+
+
+def _flash_block(flash: str, flash_kind: str) -> str:
+    if not flash:
+        return ""
+    kind = _normalize_flash_kind(flash_kind)
+    return f'<div class="flash flash-{kind}">{html.escape(flash)}</div>'
+
+
+def _shared_head(title: str, *, extra_head: str = "") -> str:
+    return f"""<!doctype html>
+<html lang=\"uk\">
+<head>
+<meta charset=\"utf-8\">
+<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">
+<title>{html.escape(title)}</title>
+<link rel=\"stylesheet\" href=\"/static/admin.css\">
+{extra_head}
+</head>"""
+
+
 def render_dashboard(values: dict[str, str], flash: str = "", flash_kind: str = "info") -> str:
     bot_status = service_status(MANAGED_BOT_SERVICE)
     admin_status = service_status(SELF_SERVICE_NAME)
@@ -909,10 +941,7 @@ def render_dashboard(values: dict[str, str], flash: str = "", flash_kind: str = 
     )
     podcast_client_email = html.escape(podcast_cfg.client_email or "—")
     podcast_message = html.escape(podcast_cfg.status_message or "Сервіс подкастів ще не налаштований.")
-    flash_html = (
-        f'<div class="flash flash-{html.escape(flash_kind)}">{html.escape(flash)}</div>'
-        if flash else ""
-    )
+    flash_html = _flash_block(flash, flash_kind)
 
     # Which providers have keys?
     providers_with_keys: set[str] = set()
@@ -1099,168 +1128,44 @@ def render_dashboard(values: dict[str, str], flash: str = "", flash_kind: str = 
         v = html.escape(values.get(f.key, "") or f.placeholder)
         adv_fields += f'<label class="adv-label">{html.escape(f.label)}<input class="inp" type="text" name="{html.escape(f.key)}" value="{v}" placeholder="{html.escape(f.placeholder)}"></label>'
 
-    return f"""<!doctype html>
-<html lang="uk">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Smartest Control</title>
-<style>
-:root {{
-  --bg: #f3ead9; --paper: rgba(255,248,236,0.88); --ink: #1f1d19;
-  --muted: #655d4d; --line: rgba(59,45,30,0.14); --accent: #bf4b2c;
-  --accent2: #204d46; --ok: #2c6b44; --warn: #935a14;
-  --sh: 0 24px 60px rgba(52,36,18,0.12);
-}}
-*{{ box-sizing:border-box; }}
-body{{ margin:0; min-height:100vh; font-family:"IBM Plex Sans","Segoe UI",sans-serif; color:var(--ink);
-  background: radial-gradient(circle at top left,rgba(191,75,44,.22),transparent 32%),
-    radial-gradient(circle at bottom right,rgba(32,77,70,.18),transparent 28%),
-    linear-gradient(135deg,#efe1c4 0%,#f7f0e3 42%,#e8dcc5 100%);
-}}
-.sh{{ max-width:1480px; margin:0 auto; padding:28px 18px 48px; }}
-
-/* Hero */
-.hero{{ display:grid; gap:18px; grid-template-columns:1.2fr .8fr; align-items:end; margin-bottom:24px; }}
-.hero-card,.st-card,.panel,.cap-card,.prov-card{{
-  background:var(--paper); backdrop-filter:blur(12px);
-  border:1px solid var(--line); border-radius:24px; box-shadow:var(--sh);
-}}
-.hero-card{{ padding:28px; }}
-.hero-card h1{{ margin:0 0 10px; font-size:clamp(2rem,4vw,3.4rem); line-height:.95; letter-spacing:-.04em; }}
-.hero-card p{{ margin:0; color:var(--muted); max-width:62ch; }}
-.st-grid{{ display:grid; gap:14px; grid-template-columns:1fr 1fr; }}
-.st-card{{ padding:20px; }}
-.st-lbl{{ display:block; color:var(--muted); font-size:.82rem; text-transform:uppercase; letter-spacing:.14em; margin-bottom:8px; }}
-.st-val{{ font-size:1.2rem; font-weight:700; }}
-.st-ok{{ color:var(--ok); }} .st-warn{{ color:var(--warn); }}
-
-/* Flash */
-.flash{{ margin-bottom:20px; padding:14px 16px; border-radius:16px; font-weight:600; }}
-.flash-info{{ background:rgba(32,77,70,.12); color:var(--accent2); border:1px solid rgba(32,77,70,.18); }}
-.flash-error{{ background:rgba(191,75,44,.12); color:#8b2e14; border:1px solid rgba(191,75,44,.18); }}
-
-/* Toolbar */
-.toolbar{{ display:flex; gap:12px; flex-wrap:wrap; justify-content:space-between; align-items:center; margin-bottom:18px; }}
-.toolbar-left,.toolbar-right{{ display:flex; gap:10px; align-items:center; flex-wrap:wrap; }}
-.btn{{ border:0; border-radius:999px; padding:14px 20px; font:inherit; font-weight:700; cursor:pointer; transition:transform .16s; }}
-.btn:hover{{ transform:translateY(-1px); }}
-.btn-main{{ color:#fff7ef; background:linear-gradient(135deg,var(--accent),#d96c44); }}
-.btn-sec{{ color:var(--ink); background:rgba(255,255,255,.7); border:1px solid var(--line); }}
-.chk{{ display:inline-flex; gap:10px; align-items:center; color:var(--muted); font-weight:600; }}
-.muted{{ color:var(--muted); font-size:.94rem; }}
-
-/* Panel */
-.panel{{ padding:22px; margin-bottom:20px; }}
-.panel h2{{ margin:0 0 8px; font-size:1.15rem; }}
-.panel-desc{{ margin:0 0 16px; color:var(--muted); line-height:1.5; }}
-
-/* Provider cards */
-.prov-grid{{ display:grid; gap:14px; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); }}
-.prov-card{{ padding:16px; border-radius:20px; }}
-.prov-header{{ display:flex; align-items:center; gap:8px; margin-bottom:6px; }}
-.prov-hint{{ margin:0 0 10px; color:var(--muted); font-size:.85rem; }}
-.info-btn{{
-  display:inline-flex; align-items:center; justify-content:center;
-  width:20px; height:20px; border-radius:50%; border:1.5px solid var(--accent2);
-  background:transparent; color:var(--accent2); font-size:.75rem; font-weight:700;
-  font-style:italic; cursor:help; margin-left:6px; padding:0; flex-shrink:0;
-}}
-.dot{{ width:10px; height:10px; border-radius:50%; flex-shrink:0; }}
-.dot-ok{{ background:var(--ok); box-shadow:0 0 6px rgba(44,107,68,.4); }}
-.dot-empty{{ background:var(--line); }}
-.prov-key-row{{ display:flex; gap:8px; align-items:center; }}
-.prov-key-row input{{ flex:1; }}
-.search-default-row{{ margin-bottom:16px; max-width:360px; }}
-
-/* Capability cards */
-.cap-grid{{ display:grid; gap:16px; grid-template-columns:repeat(auto-fit,minmax(320px,1fr)); }}
-.cap-card{{ padding:18px; animation:rise .35s ease both; }}
-.cap-top{{ display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin-bottom:4px; }}
-.cap-top h3{{ margin:0; font-size:1rem; }}
-.badge{{
-  display:inline-block; padding:3px 10px; border-radius:999px;
-  font-size:.76rem; font-weight:600; background:rgba(32,77,70,.1); color:var(--accent2);
-}}
-.cap-desc{{ margin:0 0 12px; color:var(--muted); font-size:.9rem; line-height:1.4; }}
-.cap-fields{{ display:grid; gap:12px; grid-template-columns:1fr 1fr; }}
-.cap-label{{ display:block; font-weight:700; font-size:.88rem; }}
-.cap-label select,.cap-label input{{ margin-top:6px; }}
-
-/* Inputs */
-.inp,.secret-input{{
-  width:100%; border:1px solid rgba(59,45,30,.18); border-radius:14px;
-  background:rgba(255,255,255,.82); padding:11px 14px; font:inherit; color:var(--ink);
-}}
-select.inp{{ appearance:auto; }}
-option.no-key{{ color:#bbb; }}
-.btn-eye{{
-  border:1px solid rgba(59,45,30,.18); background:rgba(255,255,255,.7);
-  color:var(--ink); padding:10px 12px; border-radius:14px; font:inherit; cursor:pointer; flex-shrink:0;
-}}
-
-/* Custom key */
-.ck-toggle{{
-  display:flex; align-items:center; gap:8px; margin-top:12px;
-  color:var(--muted); font-size:.85rem; cursor:pointer;
-}}
-.ck-toggle input{{ width:auto; }}
-.ck-field{{ margin-top:8px; }}
-.reasoning-controls{{ margin-top:12px; display:grid; gap:10px; }}
-.reasoning-toggle{{ display:flex; align-items:center; gap:8px; color:var(--muted); font-size:.85rem; font-weight:600; }}
-.reasoning-toggle input{{ width:auto; }}
-.reasoning-effort{{ max-width:180px; }}
-
-/* Advanced */
-.adv-toggle{{ cursor:pointer; color:var(--accent2); font-weight:600; margin-bottom:12px; display:block; }}
-.adv-body{{ display:none; }}
-.adv-body.open{{ display:block; }}
-.adv-grid{{ display:grid; gap:14px; grid-template-columns:repeat(auto-fit,minmax(260px,1fr)); }}
-.adv-label{{ display:block; font-weight:700; font-size:.88rem; }}
-.adv-label input{{ margin-top:6px; }}
-
-/* Access */
-.acc-grid{{ display:grid; gap:16px; grid-template-columns:repeat(auto-fit,minmax(260px,1fr)); }}
-.acc-label{{ display:block; font-weight:700; font-size:.88rem; }}
-.acc-label input{{ margin-top:6px; }}
-.acc-help{{ margin:6px 0 0; color:var(--muted); font-size:.83rem; }}
-
-@keyframes rise{{ from{{ opacity:0; transform:translateY(8px); }} to{{ opacity:1; transform:translateY(0); }} }}
-@media(max-width:980px){{ .hero{{ grid-template-columns:1fr; }} .st-grid{{ grid-template-columns:1fr 1fr; }} }}
-@media(max-width:620px){{
-  .sh{{ padding:18px 14px 34px; }} .st-grid{{ grid-template-columns:1fr; }}
-  .cap-fields{{ grid-template-columns:1fr; }} .toolbar{{ align-items:stretch; }}
-}}
-</style>
-</head>
+    return f"""{_shared_head("Smartest · Config")}
 <body>
-<div class="sh">
-  <section class="hero">
-    <div class="hero-card">
-      <h1>Smartest Control</h1>
-      <p>Конфігурація бота: API ключі і моделі для кожного агента.</p>
+<div class="wrap">
+  <div class="topbar">
+    <div>
+      <span class="ctx-badge ctx-badge--admin">Admin · Config</span>
+      <h1>Конфігурація</h1>
+      <p>API-ключі провайдерів і моделі агентів. Зміни застосовуються після перезапуску бота.</p>
     </div>
-    <div class="st-grid">
-      <div class="st-card"><span class="st-lbl">Bot</span><div class="st-val {"st-ok" if bot_status=="active" else "st-warn"}">{html.escape(bot_status)}</div></div>
-      <div class="st-card"><span class="st-lbl">Admin</span><div class="st-val {"st-ok" if admin_status=="active" else "st-warn"}">{html.escape(admin_status)}</div></div>
-      <div class="st-card"><span class="st-lbl">Env</span><div class="st-val">{html.escape(env_mtime)}</div></div>
-      <div class="st-card"><span class="st-lbl">Service</span><div class="st-val">{html.escape(MANAGED_BOT_SERVICE)}</div></div>
+    <nav class="nav">
+      <a href="/admin/users">Користувачі</a>
+      <a href="/admin/transactions">Транзакції</a>
+      <a href="/admin/chats">Чати</a>
+      <a href="/admin/topups">Поповнення</a>
+      <a href="/admin/keys">Ключі</a>
+      <a href="/prompts">Промпти</a>
+      <a href="/logs">Логи</a>
+      <a class="nav-cross" href="/">У портал</a>
+      <form class="nav-form" method="post" action="/admin/logout"><button type="submit">Вийти</button></form>
+    </nav>
+  </div>
+  <section class="panel">
+    <div class="meta-grid">
+      <div class="stat"><span class="lbl">Bot</span><div class="val {"st-ok" if bot_status=="active" else "st-warn"}">{html.escape(bot_status)}</div></div>
+      <div class="stat"><span class="lbl">Admin</span><div class="val {"st-ok" if admin_status=="active" else "st-warn"}">{html.escape(admin_status)}</div></div>
+      <div class="stat"><span class="lbl">Env</span><div class="val">{html.escape(env_mtime)}</div></div>
+      <div class="stat"><span class="lbl">Service</span><div class="val">{html.escape(MANAGED_BOT_SERVICE)}</div></div>
     </div>
   </section>
   {flash_html}
   <form method="post" action="/save">
     <div class="toolbar">
       <div class="toolbar-left">
-        <button class="btn btn-main" type="submit">Зберегти і перезапустити</button>
+        <button class="btn btn-primary" type="submit">Зберегти і перезапустити</button>
         <label class="chk"><input type="checkbox" name="restart_bot" value="1" checked> Перезапустити бота</label>
       </div>
       <div class="toolbar-right">
-        <a class="btn btn-sec" href="/settings">Портал</a>
-        <a class="btn btn-sec" href="/admin/users">Користувачі</a>
-        <a class="btn btn-sec" href="/prompts">Промпти</a>
-        <a class="btn btn-sec" href="/logs">Логи</a>
-        <button class="btn btn-sec" type="submit" formaction="/clear-memory" formmethod="post" onclick="return confirm('Очистити всю пам\\'ять бота? Це видалить recent, long-term і core пам\\'ять для всіх чатів.');">Очистити пам'ять</button>
-        <button class="btn btn-sec" type="submit" formaction="/admin/logout" formmethod="post">Вийти</button>
+        <button class="btn btn-secondary" type="submit" formaction="/clear-memory" formmethod="post" onclick="return confirm('Очистити всю пам\\'ять бота? Це видалить recent, long-term і core пам\\'ять для всіх чатів.');">Очистити пам'ять</button>
       </div>
     </div>
 
@@ -1312,115 +1217,8 @@ option.no-key{{ color:#bbb; }}
   </form>
 </div>
 
-<script>
-const MODELS = {models_json};
-
-// Toggle password visibility
-document.querySelectorAll('[data-toggle-secret]').forEach(btn => {{
-  btn.addEventListener('click', () => {{
-    const inp = btn.closest('.prov-key-row, .field-control')?.querySelector('input') || btn.parentElement.querySelector('input');
-    if (!inp) return;
-    inp.type = inp.type === 'password' ? 'text' : 'password';
-  }});
-}});
-
-// Advanced toggle
-document.getElementById('adv-toggle')?.addEventListener('click', () => {{
-  document.getElementById('adv-body')?.classList.toggle('open');
-}});
-
-// Custom key checkbox
-document.querySelectorAll('.ck-check').forEach(cb => {{
-  cb.addEventListener('change', () => {{
-    const f = document.querySelector('.ck-field[data-cap="'+cb.dataset.cap+'"]');
-    if (f) {{ f.style.display = cb.checked ? '' : 'none'; if (!cb.checked) {{ const i = f.querySelector('input'); if(i) i.value=''; }} }}
-  }});
-}});
-
-// Which providers have keys
-function activeProviders() {{
-  const s = new Set();
-  document.querySelectorAll('.prov-key-input').forEach(i => {{ if(i.value.trim()) s.add(i.dataset.provider); }});
-  return s;
-}}
-
-// Update provider dropdowns when keys change
-function refreshProviderDropdowns() {{
-  const active = activeProviders();
-  document.querySelectorAll('.cap-provider').forEach(sel => {{
-    const cur = sel.value;
-    Array.from(sel.options).forEach(opt => {{
-      opt.disabled = !active.has(opt.value) && opt.value !== cur;
-      opt.textContent = opt.textContent.replace(/ \\(немає ключа\\)$/, '');
-      if (opt.disabled && opt.value !== cur) opt.textContent += ' (немає ключа)';
-    }});
-  }});
-}}
-
-// Update model list when provider changes
-function refreshModels(sel) {{
-  const card = sel.closest('.cap-card');
-  if (!card) return;
-  const mt = card.dataset.modelType;
-  const prov = sel.value;
-  const modelEl = card.querySelector('.cap-model');
-  const adapterEl = card.querySelector('.cap-adapter');
-  if (adapterEl) {{
-    adapterEl.value = prov === 'gemini' ? 'gemini_generate_content' : mt === 'vision' ? 'openai_vision' : 'openai_chat';
-  }}
-  const opts = (MODELS[mt] || MODELS['text'] || {{}})[prov] || [];
-  const prev = modelEl.value;
-  modelEl.innerHTML = '';
-  opts.forEach(m => {{ const o = new Option(m, m, false, m===prev); modelEl.add(o); }});
-  refreshReasoning(card);
-}}
-
-function reasoningSupportedFor(provider, model) {{
-  const p = (provider || '').toLowerCase();
-  const m = (model || '').toLowerCase();
-  if (!p || !m) return false;
-  if (p === 'openai') return m.includes('gpt-5') || m.includes('o1') || m.includes('o3') || m.includes('o4');
-  if (p === 'gemini') return m.includes('gemini-2.5') || m.includes('gemini-3');
-  if (p === 'deepseek') return m.includes('reasoner');
-  if (p === 'openrouter') return m.includes('gpt-5') || m.includes('o1') || m.includes('o3') || m.includes('o4') || m.includes('gemini-2.5') || m.includes('gemini-3') || m.includes('reasoner') || m.includes('claude-opus-4') || m.includes('claude-sonnet-4');
-  return false;
-}}
-
-function refreshReasoning(card) {{
-  if (!card) return;
-  const prov = card.querySelector('.cap-provider')?.value || '';
-  const model = card.querySelector('.cap-model')?.value || '';
-  const checkbox = card.querySelector('.reasoning-check');
-  const effortWrap = card.querySelector('.reasoning-effort');
-  if (!checkbox || !effortWrap) return;
-  const supported = reasoningSupportedFor(prov, model);
-  checkbox.disabled = !supported;
-  if (!supported) checkbox.checked = false;
-  effortWrap.style.display = checkbox.checked && supported ? '' : 'none';
-}}
-
-// Update search default dropdown when keys change
-function refreshSearchDefault() {{
-  const active = activeProviders();
-  const sel = document.getElementById('search-default-select');
-  if (!sel) return;
-  Array.from(sel.options).forEach(opt => {{
-    if (opt.value === 'auto') return;
-    opt.disabled = !active.has(opt.value);
-    opt.textContent = opt.textContent.replace(/ \(немає ключа\)$/, '');
-    if (opt.disabled) opt.textContent += ' (немає ключа)';
-  }});
-}}
-
-document.querySelectorAll('.prov-key-input').forEach(i => i.addEventListener('input', () => {{ refreshProviderDropdowns(); refreshSearchDefault(); }}));
-document.querySelectorAll('.cap-provider').forEach(s => s.addEventListener('change', () => refreshModels(s)));
-document.querySelectorAll('.cap-provider').forEach(s => refreshModels(s));
-document.querySelectorAll('.cap-model').forEach(s => s.addEventListener('change', () => refreshReasoning(s.closest('.cap-card'))));
-document.querySelectorAll('.reasoning-check').forEach(cb => cb.addEventListener('change', () => refreshReasoning(cb.closest('.cap-card'))));
-document.querySelectorAll('.cap-card').forEach(card => refreshReasoning(card));
-refreshProviderDropdowns();
-refreshSearchDefault();
-</script>
+<script>window.SmartestModels = {models_json};</script>
+<script src="/static/admin.js" defer></script>
 </body>
 </html>"""
 
@@ -1428,10 +1226,7 @@ refreshSearchDefault();
 def render_prompts_page(values: dict[str, str], flash: str = "", flash_kind: str = "info") -> str:
     """Render the prompts editing page."""
     defaults = _get_prompt_defaults()
-    flash_html = (
-        f'<div class="flash flash-{html.escape(flash_kind)}">{html.escape(flash)}</div>'
-        if flash else ""
-    )
+    flash_html = _flash_block(flash, flash_kind)
 
     # Resolve effective model per capability (same logic as main page)
     cap_map = {c.slug: c for c in CAPABILITIES}
@@ -1470,96 +1265,44 @@ def render_prompts_page(values: dict[str, str], flash: str = "", flash_kind: str
           <p class="prompt-hint">Env: <code>{html.escape(pd.env_key)}</code> &middot; Capability: <code>{html.escape(pd.capability)}</code></p>
         </div>'''
 
-    return f"""<!doctype html>
-<html lang="uk">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Smartest — Промпти</title>
-<style>
-:root {{
-  --bg: #f3ead9; --paper: rgba(255,248,236,0.88); --ink: #1f1d19;
-  --muted: #655d4d; --line: rgba(59,45,30,0.14); --accent: #bf4b2c;
-  --accent2: #204d46; --ok: #2c6b44; --warn: #935a14;
-  --sh: 0 24px 60px rgba(52,36,18,0.12);
-}}
-*{{ box-sizing:border-box; }}
-body{{ margin:0; min-height:100vh; font-family:"IBM Plex Sans","Segoe UI",sans-serif; color:var(--ink);
-  background: radial-gradient(circle at top left,rgba(191,75,44,.22),transparent 32%),
-    radial-gradient(circle at bottom right,rgba(32,77,70,.18),transparent 28%),
-    linear-gradient(135deg,#efe1c4 0%,#f7f0e3 42%,#e8dcc5 100%);
-}}
-.sh{{ max-width:1480px; margin:0 auto; padding:28px 18px 48px; }}
-
-.hero-card{{
-  background:var(--paper); backdrop-filter:blur(12px);
-  border:1px solid var(--line); border-radius:24px; box-shadow:var(--sh);
-  padding:28px; margin-bottom:24px;
-}}
-.hero-card h1{{ margin:0 0 10px; font-size:clamp(1.6rem,3vw,2.4rem); line-height:.95; letter-spacing:-.04em; }}
-.hero-card p{{ margin:0; color:var(--muted); max-width:62ch; }}
-.nav-link{{ color:var(--accent2); font-weight:700; text-decoration:none; }}
-.nav-link:hover{{ text-decoration:underline; }}
-
-.flash{{ margin-bottom:20px; padding:14px 16px; border-radius:16px; font-weight:600; }}
-.flash-info{{ background:rgba(32,77,70,.12); color:var(--accent2); border:1px solid rgba(32,77,70,.18); }}
-.flash-error{{ background:rgba(191,75,44,.12); color:#8b2e14; border:1px solid rgba(191,75,44,.18); }}
-
-.toolbar{{ display:flex; gap:12px; flex-wrap:wrap; justify-content:space-between; align-items:center; margin-bottom:18px; }}
-.btn{{ border:0; border-radius:999px; padding:14px 20px; font:inherit; font-weight:700; cursor:pointer; transition:transform .16s; }}
-.btn:hover{{ transform:translateY(-1px); }}
-.btn-main{{ color:#fff7ef; background:linear-gradient(135deg,var(--accent),#d96c44); }}
-.btn-sec{{ color:var(--ink); background:rgba(255,255,255,.7); border:1px solid var(--line); }}
-
-.prompt-grid{{ display:grid; gap:20px; grid-template-columns:1fr; }}
-.prompt-card{{
-  background:var(--paper); backdrop-filter:blur(12px);
-  border:1px solid var(--line); border-radius:24px; box-shadow:var(--sh);
-  padding:22px; animation:rise .35s ease both;
-}}
-.prompt-top{{ display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin-bottom:6px; }}
-.prompt-top h3{{ margin:0; font-size:1.05rem; }}
-.badge{{
-  display:inline-block; padding:3px 10px; border-radius:999px;
-  font-size:.76rem; font-weight:600;
-}}
-.badge-model{{ background:rgba(32,77,70,.12); color:var(--accent2); }}
-.badge-override{{ background:rgba(191,75,44,.12); color:#8b2e14; }}
-.badge-default{{ background:rgba(59,45,30,.08); color:var(--muted); }}
-.prompt-desc{{ margin:0 0 6px; color:var(--muted); font-size:.92rem; line-height:1.45; }}
-.prompt-stage{{ margin:0 0 10px; font-size:.88rem; color:var(--accent2); }}
-.prompt-text{{
-  width:100%; border:1px solid rgba(59,45,30,.18); border-radius:14px;
-  background:rgba(255,255,255,.82); padding:12px 14px; font:inherit; font-size:.88rem;
-  color:var(--ink); resize:vertical; min-height:80px; line-height:1.5;
-}}
-.prompt-text::placeholder{{ color:#baa; font-style:italic; }}
-.prompt-hint{{ margin:6px 0 0; color:var(--muted); font-size:.78rem; }}
-.prompt-hint code{{ background:rgba(0,0,0,.06); padding:2px 5px; border-radius:6px; font-size:.78rem; }}
-
-.section-label{{
-  margin:28px 0 14px; padding:0; font-size:1.1rem; font-weight:700;
-  color:var(--accent2); letter-spacing:.02em;
-}}
-
-@keyframes rise{{ from{{ opacity:0; transform:translateY(8px); }} to{{ opacity:1; transform:translateY(0); }} }}
-@media(max-width:620px){{ .sh{{ padding:18px 14px 34px; }} }}
-</style>
-</head>
+    extra_css = """<style>
+.prompt-grid { display: grid; gap: 20px; grid-template-columns: 1fr; }
+.prompt-card { background: var(--paper); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow); padding: 22px; animation: rise .35s ease both; }
+.prompt-top { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 6px; }
+.prompt-top h3 { margin: 0; font-size: 1.05rem; }
+.badge-model { background: rgba(32,77,70,.12); color: var(--accent-deep); }
+.badge-override { background: rgba(191,75,44,.12); color: var(--error); }
+.badge-default { background: rgba(59,45,30,.08); color: var(--muted); }
+.prompt-desc { margin: 0 0 6px; color: var(--muted); font-size: .92rem; line-height: 1.45; }
+.prompt-stage { margin: 0 0 10px; font-size: .88rem; color: var(--accent-deep); }
+.prompt-text { width: 100%; border: 1px solid var(--line-strong); border-radius: var(--radius-sm); background: rgba(255,255,255,.9); padding: 12px 14px; font: inherit; font-size: .88rem; color: var(--ink); resize: vertical; min-height: 80px; line-height: 1.5; }
+.prompt-hint { margin: 6px 0 0; color: var(--muted); font-size: .78rem; }
+.prompt-hint code { background: rgba(0,0,0,.06); padding: 2px 5px; border-radius: 6px; font-size: .78rem; }
+</style>"""
+    return f"""{_shared_head("Smartest · Промпти", extra_head=extra_css)}
 <body>
-<div class="sh">
-  <div class="hero-card">
-    <h1>Промпти</h1>
-    <p>Системні промпти для кожного етапу. Модель підтягується з <a class="nav-link" href="/admin/config">головної сторінки</a>.
-    Порожнє поле = використовується вбудований промпт за замовчуванням.</p>
+<div class="wrap">
+  <div class="topbar">
+    <div>
+      <span class="ctx-badge ctx-badge--admin">Admin · Prompts</span>
+      <h1>Промпти</h1>
+      <p>Системні промпти для кожного етапу. Модель підтягується з <a href="/admin/config">конфігурації</a>. Порожнє поле = вбудований дефолт.</p>
+    </div>
+    <nav class="nav">
+      <a href="/admin/config">Конфіг</a>
+      <a href="/admin/users">Користувачі</a>
+      <a href="/logs">Логи</a>
+      <a class="nav-cross" href="/">У портал</a>
+      <form class="nav-form" method="post" action="/admin/logout"><button type="submit">Вийти</button></form>
+    </nav>
   </div>
   {flash_html}
   <form method="post" action="/save-prompts">
     <div class="toolbar">
-      <button class="btn btn-main" type="submit">Зберегти промпти</button>
-      <a class="nav-link" href="/admin/config">&larr; Назад до конфігурації</a>
+      <div class="toolbar-left">
+        <button class="btn btn-primary" type="submit">Зберегти промпти</button>
+      </div>
     </div>
-
     <div class="prompt-grid">
       {cards}
     </div>
@@ -1747,64 +1490,9 @@ def render_logs_page(
     safe_capability = html.escape(capability or "")
     log_line_count = len((log_text or "").splitlines())
 
-    return f"""<!doctype html>
-<html lang="uk">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Smartest — Логи ({html.escape(service_label)})</title>
-<style>
-:root {{
-  --bg: #1a1a1a; --paper: #1e1e1e; --ink: #d4d4d4;
-  --muted: #888; --line: rgba(255,255,255,0.08); --accent: #bf4b2c;
-  --accent2: #4ec9b0; --ok: #4ec9b0; --warn: #d7ba7d;
-}}
-*{{ box-sizing:border-box; }}
-body{{ margin:0; min-height:100vh; font-family:"JetBrains Mono","Fira Code","Consolas",monospace; color:var(--ink);
-  background:var(--bg); font-size:13px; }}
-.sh{{ display:flex; flex-direction:column; height:100vh; }}
-
-.toolbar{{
-  display:flex; gap:12px; align-items:center; flex-wrap:wrap;
-  padding:12px 18px; background:var(--paper); border-bottom:1px solid var(--line);
-  flex-shrink:0;
-}}
-.toolbar-title{{ font-weight:700; font-size:1.1rem; color:var(--accent2); margin-right:auto; }}
-.nav-link{{ color:var(--accent2); font-weight:600; text-decoration:none; font-size:.9rem; }}
-.nav-link:hover{{ text-decoration:underline; }}
-
-select,input,button{{
-  font-family:inherit; font-size:.85rem; padding:6px 12px;
-  border:1px solid var(--line); border-radius:8px;
-  background:var(--bg); color:var(--ink); cursor:pointer;
-}}
-input{{ min-width:180px; cursor:text; }}
-button{{ font-weight:700; }}
-button:hover{{ background:#333; }}
-.filters{{ display:flex; gap:12px; align-items:center; flex-wrap:wrap; padding:10px 18px; background:#181818; border-bottom:1px solid var(--line); }}
-.filters label{{ display:flex; flex-direction:column; gap:6px; color:var(--muted); font-size:.8rem; }}
-
-.log-wrap{{
-  flex:1; overflow:auto; padding:12px 18px;
-}}
-.log-pre{{
-  margin:0; white-space:pre-wrap; word-break:break-all; line-height:1.55;
-  color:#ccc; font-size:12.5px;
-}}
-.log-pre .ts{{ color:#6a9955; }}
-.log-pre .lvl-err{{ color:#f44747; font-weight:700; }}
-.log-pre .lvl-warn{{ color:#d7ba7d; }}
-.log-pre .lvl-info{{ color:#4ec9b0; }}
-
-.status-bar{{
-  display:flex; gap:16px; align-items:center; padding:8px 18px;
-  background:var(--paper); border-top:1px solid var(--line);
-  font-size:.82rem; color:var(--muted); flex-shrink:0;
-}}
-</style>
-</head>
-<body>
-<div class="sh">
+    return f"""{_shared_head(f"Smartest — Логи ({service_label})")}
+<body class="logs-body">
+<div class="logs-shell">
   <div class="toolbar">
     <span class="toolbar-title">Логи: {html.escape(service_label)}</span>
     <label>Сервіс:
@@ -1825,8 +1513,8 @@ button:hover{{ background:#333; }}
         <option value="journal"{journal_sel}>journalctl</option>
       </select>
     </label>
-    <button onclick="reload()">Оновити</button>
-    <button onclick="scrollEnd()">&#8595; Кінець</button>
+    <button onclick="window.smartestLogsReload()">Оновити</button>
+    <button onclick="window.smartestLogsScrollEnd()">&#8595; Кінець</button>
     <a class="nav-link" href="/admin/config">&larr; Конфігурація</a>
     <a class="nav-link" href="/prompts">Промпти</a>
   </div>
@@ -1863,48 +1551,7 @@ button:hover{{ background:#333; }}
     <span id="auto-label"></span>
   </div>
 </div>
-<script>
-function buildParams() {{
-  const params = new URLSearchParams();
-  params.set('service', document.getElementById('svc-select').value);
-  params.set('lines', document.getElementById('lines-select').value);
-  params.set('source', document.getElementById('source-select').value);
-  params.set('chat_id', document.getElementById('chatid-input').value);
-  params.set('message_id', document.getElementById('messageid-input').value);
-  params.set('trace', document.getElementById('trace-input').value);
-  params.set('capability', document.getElementById('capability-input').value);
-  params.set('level', document.getElementById('level-select').value);
-  params.set('contains', document.getElementById('contains-input').value);
-  return params;
-}}
-function reload() {{
-  window.location.href = '/logs?' + buildParams().toString();
-}}
-function scrollEnd() {{
-  const el = document.getElementById('log-wrap');
-  el.scrollTop = el.scrollHeight;
-}}
-document.getElementById('svc-select').addEventListener('change', reload);
-document.getElementById('lines-select').addEventListener('change', reload);
-document.getElementById('source-select').addEventListener('change', reload);
-document.getElementById('level-select').addEventListener('change', reload);
-// Auto-scroll to bottom on load
-scrollEnd();
-
-// Auto-refresh every 10s
-let autoTimer = setInterval(() => {{
-  fetch('/logs-text?' + buildParams().toString())
-    .then(r => r.text())
-    .then(t => {{
-      const pre = document.getElementById('log-pre');
-      const wrap = document.getElementById('log-wrap');
-      const wasBottom = (wrap.scrollHeight - wrap.scrollTop - wrap.clientHeight) < 60;
-      pre.textContent = t;
-      if (wasBottom) scrollEnd();
-    }}).catch(() => {{}});
-}}, 10000);
-document.getElementById('auto-label').textContent = 'Авто-оновлення: 10с';
-</script>
+<script src="/static/admin.js" defer></script>
 </body>
 </html>"""
 
@@ -1986,87 +1633,28 @@ def _admin_shell(
     flash: str = "",
     flash_kind: str = "info",
 ) -> str:
-    flash_html = (
-        f'<div class="flash flash-{html.escape(flash_kind)}">{html.escape(flash)}</div>'
-        if flash else ""
-    )
-    return f"""<!doctype html>
-<html lang="uk">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{html.escape(title)} · Smartest Admin</title>
-<style>
-:root {{
-  --bg:#f4e8cf; --paper:rgba(255,248,236,.92); --ink:#1f1d19; --muted:#6a624f;
-  --line:rgba(59,45,30,.12); --accent:#bf4b2c; --accent2:#204d46; --warn:#8b2e14;
-  --ok:#1f6b45; --shadow:0 30px 80px rgba(44,28,10,.14);
-}}
-*{{ box-sizing:border-box; }}
-body{{ margin:0; min-height:100vh; font-family:"IBM Plex Sans","Segoe UI",sans-serif; color:var(--ink);
-  background: radial-gradient(circle at top left,rgba(191,75,44,.18),transparent 30%),
-              radial-gradient(circle at bottom right,rgba(32,77,70,.14),transparent 26%),
-              linear-gradient(145deg,#f4e8cf 0%,#fbf6ec 55%,#eadfc9 100%);
-}}
-.wrap{{ width:min(1420px,100%); margin:0 auto; padding:22px 18px 36px; }}
-.topbar{{ display:flex; gap:12px; align-items:center; justify-content:space-between; margin-bottom:18px; flex-wrap:wrap; }}
-.topbar h1{{ margin:0; font-size:clamp(1.8rem,4vw,2.5rem); letter-spacing:-.04em; }}
-.topbar p{{ margin:6px 0 0; color:var(--muted); }}
-.nav{{ display:flex; gap:10px; flex-wrap:wrap; }}
-.nav a,.nav button{{ text-decoration:none; border:1px solid var(--line); background:rgba(255,255,255,.82); color:var(--ink);
-  padding:10px 14px; border-radius:999px; font:inherit; cursor:pointer; }}
-.nav a:hover,.nav button:hover{{ border-color:rgba(32,77,70,.25); color:var(--accent2); }}
-.flash{{ margin:0 0 18px; padding:12px 14px; border-radius:14px; border:1px solid var(--line); background:rgba(255,255,255,.76); }}
-.flash-info{{ color:var(--accent2); }}
-.flash-ok{{ color:var(--ok); }}
-.flash-warn{{ color:var(--warn); }}
-.panel{{ background:var(--paper); border:1px solid var(--line); border-radius:24px; box-shadow:var(--shadow); padding:18px; margin-bottom:18px; }}
-.panel h2,.panel h3{{ margin:0 0 10px; }}
-.panel-desc{{ margin:0 0 12px; color:var(--muted); }}
-.filters{{ display:flex; gap:12px; flex-wrap:wrap; align-items:end; }}
-.field{{ display:grid; gap:6px; min-width:180px; }}
-.field input,.field select,.field textarea{{ width:100%; border:1px solid rgba(59,45,30,.18); border-radius:12px; background:rgba(255,255,255,.88);
-  padding:10px 12px; font:inherit; color:var(--ink); }}
-.field textarea{{ min-height:92px; resize:vertical; }}
-.btn{{ border:0; border-radius:999px; padding:11px 16px; font:inherit; font-weight:700; cursor:pointer; text-decoration:none; display:inline-flex; align-items:center; justify-content:center; }}
-.btn-main{{ background:linear-gradient(135deg,var(--accent),#d96c44); color:#fff7ef; }}
-.btn-sec{{ background:rgba(255,255,255,.88); color:var(--ink); border:1px solid var(--line); }}
-.meta-grid{{ display:grid; gap:12px; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); }}
-.stat{{ padding:14px; border-radius:18px; background:rgba(255,255,255,.72); border:1px solid rgba(59,45,30,.08); }}
-.stat .lbl{{ display:block; color:var(--muted); font-size:.84rem; margin-bottom:6px; }}
-.stat .val{{ font-size:1.28rem; font-weight:700; letter-spacing:-.03em; }}
-.data-table{{ width:100%; border-collapse:collapse; font-size:.94rem; }}
-.data-table th,.data-table td{{ padding:10px 12px; border-bottom:1px solid rgba(59,45,30,.08); text-align:left; vertical-align:top; }}
-.data-table thead th{{ position:sticky; top:0; background:rgba(250,245,236,.98); z-index:1; }}
-.data-table th a{{ color:inherit; text-decoration:none; }}
-.muted{{ color:var(--muted); }}
-.mono{{ font-family:"IBM Plex Mono","Consolas",monospace; font-size:.88rem; }}
-.grid2{{ display:grid; gap:18px; grid-template-columns:1.15fr .85fr; }}
-.stack{{ display:grid; gap:18px; }}
-.tag{{ display:inline-block; padding:4px 9px; border-radius:999px; background:rgba(32,77,70,.1); color:var(--accent2); font-size:.82rem; font-weight:700; }}
-@media(max-width:980px){{ .grid2{{ grid-template-columns:1fr; }} }}
-</style>
-</head>
+    flash_html = _flash_block(flash, flash_kind)
+    return f"""{_shared_head(f"{title} · Smartest Admin")}
 <body>
 <div class="wrap">
   <div class="topbar">
     <div>
+      <span class="ctx-badge ctx-badge--admin">Admin</span>
       <h1>{html.escape(title)}</h1>
       <p>Multitenant admin dashboard.</p>
     </div>
-    <div class="nav">
-      <a href="/settings">Портал</a>
+    <nav class="nav">
       <a href="/admin/config">Конфіг</a>
       <a href="/admin/users">Користувачі</a>
       <a href="/admin/transactions">Транзакції</a>
       <a href="/admin/chats">Чати</a>
       <a href="/admin/topups">Поповнення</a>
       <a href="/admin/keys">Ключі</a>
+      <a href="/prompts">Промпти</a>
       <a href="/logs">Логи</a>
-      <form method="post" action="/admin/logout" style="margin:0">
-        <button type="submit">Вийти</button>
-      </form>
-    </div>
+      <a class="nav-cross" href="/">У портал</a>
+      <form class="nav-form" method="post" action="/admin/logout"><button type="submit">Вийти</button></form>
+    </nav>
   </div>
   {flash_html}
   {body}
@@ -2907,45 +2495,22 @@ def _parse_admin_key_toggle_path(path: str) -> int | None:
 
 def render_login(message: str = "", *, action_path: str = ADMIN_PASSWORD_LOGIN_PATH) -> str:
     flash = f'<div class="login-flash">{html.escape(message)}</div>' if message else ""
-    return f"""<!doctype html>
-<html lang="uk">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Smartest Login</title>
-<style>
-:root {{ --bg:#efe1c4; --paper:rgba(255,248,236,.9); --ink:#1f1d19; --muted:#6a624f; --accent:#bf4b2c; --line:rgba(59,45,30,.14); --sh:0 30px 80px rgba(44,28,10,.16); }}
-*{{ box-sizing:border-box; }}
-body{{ margin:0; min-height:100vh; display:grid; place-items:center; font-family:"IBM Plex Sans","Segoe UI",sans-serif; color:var(--ink);
-  background: radial-gradient(circle at top left,rgba(191,75,44,.2),transparent 30%), radial-gradient(circle at bottom right,rgba(32,77,70,.16),transparent 26%), linear-gradient(145deg,#f4e8cf 0%,#fbf6ec 55%,#eadfc9 100%); padding:18px; }}
-.card{{ width:min(100%,430px); background:var(--paper); border:1px solid var(--line); border-radius:28px; box-shadow:var(--sh); padding:28px; }}
-h1{{ margin:0 0 12px; font-size:clamp(2rem,5vw,2.8rem); line-height:.94; letter-spacing:-.04em; }}
-p{{ margin:0 0 20px; color:var(--muted); line-height:1.55; }}
-.field{{ display:block; margin-top:14px; }}
-.field span{{ display:block; margin-bottom:8px; font-weight:700; font-size:.92rem; }}
-input{{ width:100%; border:1px solid rgba(59,45,30,.18); border-radius:14px; background:rgba(255,255,255,.84); padding:13px 14px; font:inherit; color:var(--ink); }}
-button{{ width:100%; margin-top:18px; border:0; border-radius:999px; padding:14px 18px; font:inherit; font-weight:700; color:#fff7ef; background:linear-gradient(135deg,var(--accent),#d96c44); cursor:pointer; }}
-.login-flash{{ margin-bottom:16px; padding:12px 14px; border-radius:14px; background:rgba(191,75,44,.12); color:#8b2e14; border:1px solid rgba(191,75,44,.18); font-weight:600; }}
-</style>
-</head>
-<body>
-<form class="card" method="post" action="{html.escape(action_path)}">
+    return f"""{_shared_head("Smartest Login")}
+<body class="login-body">
+<form class="login-card" method="post" action="{html.escape(action_path)}">
   <h1>Smartest<br>Control</h1>
   <p>Увійди в панель керування.</p>
   {flash}
-  <label class="field"><span>Логін</span><input name="username" autocomplete="username" required></label>
-  <label class="field"><span>Пароль</span><input type="password" name="password" autocomplete="current-password" required></label>
-  <button type="submit">Увійти</button>
+  <label class="field-block"><span>Логін</span><input name="username" autocomplete="username" required></label>
+  <label class="field-block"><span>Пароль</span><input type="password" name="password" autocomplete="current-password" required></label>
+  <button class="btn btn-primary btn-block" type="submit">Увійти</button>
 </form>
 </body>
 </html>"""
 
 
 def _portal_flash_html(flash: str, flash_kind: str) -> str:
-    if not flash:
-        return ""
-    kind = flash_kind if flash_kind in {"info", "ok", "warn"} else "info"
-    return f'<div class="flash flash-{html.escape(kind)}">{html.escape(flash)}</div>'
+    return _flash_block(flash, flash_kind)
 
 
 def render_user_portal_landing(
@@ -2964,112 +2529,18 @@ def render_user_portal_landing(
         else "Telegram Login ще не готовий: потрібен валідний `TG_BOT_TOKEN` або `TELEGRAM_LOGIN_CLIENT_ID`."
     )
     login_cta = (
-        '<button class="btn btn-main" type="button" id="tg-login-btn" onclick="smartestTelegramLogin()">Увійти через Telegram</button>'
+        '<button class="btn btn-main" type="button" id="tg-login-btn">Увійти через Telegram</button>'
         if login_ready
         else '<button class="btn btn-main" type="button" disabled>Увійти через Telegram</button>'
     )
     client_id_js = json.dumps(client_id, ensure_ascii=False)
     login_nonce_js = json.dumps(login_nonce, ensure_ascii=False)
-    return f"""<!doctype html>
-<html lang="uk">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Smartest Portal</title>
-<script src="https://oauth.telegram.org/js/telegram-login.js?3" async></script>
-<style>
-:root {{ --bg:#f6ecd7; --paper:rgba(255,249,240,.9); --ink:#1f1d19; --muted:#6a624f; --accent:#bf4b2c; --accent2:#204d46; --line:rgba(59,45,30,.14); --ok:#1c7b5d; --warn:#9f5e17; --shadow:0 28px 70px rgba(44,28,10,.16); }}
-*{{ box-sizing:border-box; }}
-body{{ margin:0; min-height:100vh; font-family:"IBM Plex Sans","Segoe UI",sans-serif; color:var(--ink);
-  background: radial-gradient(circle at top left,rgba(191,75,44,.18),transparent 30%),
-    radial-gradient(circle at bottom right,rgba(32,77,70,.14),transparent 26%),
-    linear-gradient(145deg,#f4e8cf 0%,#fbf6ec 55%,#eadfc9 100%); }}
-.wrap{{ max-width:1120px; margin:0 auto; padding:28px 18px 48px; }}
-.hero{{ display:grid; gap:22px; grid-template-columns:1.1fr .9fr; align-items:stretch; }}
-.card{{ background:var(--paper); border:1px solid var(--line); border-radius:28px; box-shadow:var(--shadow); padding:26px; }}
-.hero h1{{ margin:0 0 12px; font-size:clamp(2.1rem,5vw,3.2rem); line-height:.92; letter-spacing:-.05em; }}
-.hero p{{ margin:0; color:var(--muted); line-height:1.6; }}
-.flash{{ margin:0 0 18px; padding:12px 14px; border-radius:14px; border:1px solid var(--line); background:rgba(255,255,255,.82); }}
-.flash-info{{ color:var(--accent2); }}
-.flash-ok{{ color:var(--ok); }}
-.flash-warn{{ color:var(--warn); }}
-.cta{{ display:flex; gap:12px; flex-wrap:wrap; margin-top:18px; }}
-.btn{{ border:0; border-radius:999px; padding:14px 18px; font:inherit; font-weight:700; cursor:pointer; }}
-.btn-main{{ background:linear-gradient(135deg,var(--accent),#d96c44); color:#fff7ef; }}
-.btn-main:disabled{{ opacity:.45; cursor:not-allowed; }}
-.btn-sec{{ background:rgba(255,255,255,.84); color:var(--ink); border:1px solid var(--line); text-decoration:none; }}
-.meta{{ display:grid; gap:14px; }}
-.meta-item{{ padding:14px 16px; border-radius:18px; background:rgba(255,255,255,.72); border:1px solid rgba(59,45,30,.08); }}
-.meta-item span{{ display:block; color:var(--muted); font-size:.84rem; margin-bottom:6px; }}
-.mono{{ font-family:"IBM Plex Mono","Consolas",monospace; font-size:.88rem; }}
-.status{{ margin-top:14px; min-height:24px; color:var(--accent2); font-weight:600; }}
-.foot{{ margin-top:18px; display:flex; gap:12px; flex-wrap:wrap; align-items:center; }}
-.foot a{{ color:var(--accent2); font-weight:700; text-decoration:none; }}
-.foot a:hover{{ text-decoration:underline; }}
-@media (max-width:840px) {{ .hero{{ grid-template-columns:1fr; }} }}
-</style>
-<script>
-const smartestTelegramClientId = {client_id_js};
-const smartestTelegramNonce = {login_nonce_js};
-
-function smartestSetLoginStatus(text) {{
-  const node = document.getElementById("tg-login-status");
-  if (node) node.textContent = text;
-}}
-
-async function smartestSubmitTelegramIdToken(idToken) {{
-  const response = await fetch("/auth/telegram", {{
-    method: "POST",
-    credentials: "same-origin",
-    headers: {{"Content-Type": "application/json"}},
-    body: JSON.stringify({{ id_token: idToken }}),
-  }});
-  const payload = await response.json().catch(() => ({{ ok: false, message: "invalid_json" }}));
-  if (!response.ok || !payload.ok) {{
-    throw new Error(payload.message || "telegram_login_failed");
-  }}
-  window.location.href = payload.redirect || "/";
-}}
-
-function smartestTelegramLogin() {{
-  if (!smartestTelegramClientId) {{
-    smartestSetLoginStatus("Telegram Login не сконфігурований для цього portal.");
-    return;
-  }}
-  if (!window.Telegram || !window.Telegram.Login || typeof window.Telegram.Login.auth !== "function") {{
-    smartestSetLoginStatus("Telegram Login library ще не завантажилась. Перезавантаж сторінку і спробуй ще раз.");
-    return;
-  }}
-  smartestSetLoginStatus("Відкриваю Telegram Login...");
-  window.Telegram.Login.auth({{
-    client_id: Number(smartestTelegramClientId),
-    nonce: smartestTelegramNonce || undefined,
-    lang: "uk",
-  }}, async function(result) {{
-    if (!result) {{
-      smartestSetLoginStatus("Telegram Login не повернув відповідь. Закрий popup і спробуй ще раз.");
-      return;
-    }}
-    if (result.error) {{
-      smartestSetLoginStatus("Telegram Login не завершився: " + result.error);
-      return;
-    }}
-    if (!result.id_token) {{
-      smartestSetLoginStatus("Telegram Login не повернув id_token.");
-      return;
-    }}
-    smartestSetLoginStatus("Перевіряю Telegram token...");
-    try {{
-      await smartestSubmitTelegramIdToken(result.id_token);
-    }} catch (error) {{
-      smartestSetLoginStatus("Telegram Login не завершився: " + (error.message || error));
-    }}
-  }});
-}}
-</script>
-</head>
+    return f"""{_shared_head("Smartest Portal", extra_head='<script src="https://oauth.telegram.org/js/telegram-login.js?3" async></script>')}
 <body>
-<div class="wrap">
+<script>window.SmartestTelegram = {{ client_id: {client_id_js}, nonce: {login_nonce_js} }};</script>
+<script src="/static/admin.js" defer></script>
+<div class="portal-landing">
+  <div class="ctx-badge ctx-badge--portal">Portal</div>
   {flash_html}
   <section class="hero">
     <div class="card">
@@ -3111,58 +2582,11 @@ def render_portal_shell(
     )
     safe_name = html.escape(str(display_name))
     safe_username = html.escape("@" + user["tg_username"]) if user.get("tg_username") else "—"
-    admin_link = '<a href="/admin">Адмінка</a>' if user.get("is_admin") else ""
-    return f"""<!doctype html>
-<html lang="uk">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{html.escape(title)}</title>
-<style>
-:root {{ --bg:#f6ecd7; --paper:rgba(255,249,240,.9); --ink:#1f1d19; --muted:#6a624f; --accent:#bf4b2c; --accent2:#204d46; --line:rgba(59,45,30,.14); --ok:#1c7b5d; --warn:#9f5e17; --shadow:0 28px 70px rgba(44,28,10,.16); }}
-*{{ box-sizing:border-box; }}
-body{{ margin:0; min-height:100vh; font-family:"IBM Plex Sans","Segoe UI",sans-serif; color:var(--ink);
-  background: radial-gradient(circle at top left,rgba(191,75,44,.18),transparent 30%),
-    radial-gradient(circle at bottom right,rgba(32,77,70,.14),transparent 26%),
-    linear-gradient(145deg,#f4e8cf 0%,#fbf6ec 55%,#eadfc9 100%); }}
-.wrap{{ max-width:1200px; margin:0 auto; padding:24px 18px 40px; }}
-.topbar{{ display:flex; gap:12px; justify-content:space-between; align-items:center; flex-wrap:wrap; margin-bottom:18px; }}
-.topbar h1{{ margin:0; font-size:clamp(1.8rem,4vw,2.6rem); letter-spacing:-.04em; }}
-.topbar p{{ margin:4px 0 0; color:var(--muted); }}
-.nav{{ display:flex; gap:10px; flex-wrap:wrap; align-items:center; }}
-.nav a,.nav button{{ text-decoration:none; border:1px solid var(--line); background:rgba(255,255,255,.82); color:var(--ink); padding:10px 14px; border-radius:999px; font:inherit; cursor:pointer; }}
-.nav a:hover,.nav button:hover{{ border-color:rgba(32,77,70,.25); color:var(--accent2); }}
-.flash{{ margin:0 0 18px; padding:12px 14px; border-radius:14px; border:1px solid var(--line); background:rgba(255,255,255,.82); }}
-.flash-info{{ color:var(--accent2); }}
-.flash-ok{{ color:var(--ok); }}
-.flash-warn{{ color:var(--warn); }}
-.panel{{ background:var(--paper); border:1px solid var(--line); border-radius:24px; box-shadow:var(--shadow); padding:18px; margin-bottom:18px; }}
-.panel h2,.panel h3{{ margin:0 0 10px; }}
-.meta-grid{{ display:grid; gap:12px; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); }}
-.stat{{ padding:14px; border-radius:18px; background:rgba(255,255,255,.72); border:1px solid rgba(59,45,30,.08); }}
-.stat .lbl{{ display:block; color:var(--muted); font-size:.84rem; margin-bottom:6px; }}
-.stat .val{{ font-size:1.28rem; font-weight:700; letter-spacing:-.03em; }}
-.data-table{{ width:100%; border-collapse:collapse; font-size:.94rem; }}
-.data-table th,.data-table td{{ padding:10px 12px; border-bottom:1px solid rgba(59,45,30,.08); text-align:left; vertical-align:top; }}
-.data-table a{{ color:var(--accent2); text-decoration:none; }}
-.data-table a:hover{{ text-decoration:underline; }}
-.muted{{ color:var(--muted); }}
-.mono{{ font-family:"IBM Plex Mono","Consolas",monospace; font-size:.88rem; }}
-.tag{{ display:inline-block; padding:4px 9px; border-radius:999px; background:rgba(32,77,70,.1); color:var(--accent2); font-size:.82rem; font-weight:700; }}
-.empty{{ color:var(--muted); font-style:italic; }}
-.portal-copy{{ max-width:78ch; line-height:1.6; }}
-.portal-form{{ display:grid; gap:18px; }}
-.portal-form-grid{{ display:grid; gap:14px; grid-template-columns:repeat(auto-fit,minmax(260px,1fr)); }}
-.portal-form-grid--compact{{ grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); }}
-.portal-field{{ display:grid; gap:8px; align-content:start; padding:16px; border-radius:18px; background:rgba(255,255,255,.72); border:1px solid rgba(59,45,30,.08); }}
-.portal-field-title{{ font-size:1.04rem; font-weight:700; letter-spacing:-.02em; }}
-.portal-help{{ color:var(--muted); font-size:.92rem; line-height:1.45; }}
-.portal-field input,.portal-field select,.portal-field textarea{{ width:100%; border:1px solid rgba(59,45,30,.18); border-radius:12px; background:rgba(255,255,255,.95); padding:10px 12px; font:inherit; color:var(--ink); }}
-.portal-form-actions{{ display:flex; justify-content:flex-start; }}
-</style>
-</head>
+    admin_link = '<a class="nav-cross" href="/admin">В адмінку</a>' if user.get("is_admin") else ""
+    return f"""{_shared_head(f"{title} · Smartest")}
 <body>
 <div class="wrap">
+  <div class="ctx-badge ctx-badge--portal">Portal</div>
   <div class="topbar">
     <div>
       <h1>{html.escape(title)}</h1>
@@ -3174,7 +2598,7 @@ body{{ margin:0; min-height:100vh; font-family:"IBM Plex Sans","Segoe UI",sans-s
       <a href="/settings">Налаштування</a>
       <a href="/topup">Поповнення</a>
       {admin_link}
-      <form method="post" action="/logout" style="margin:0">
+      <form class="nav-form" method="post" action="/logout">
         <button type="submit">Вийти</button>
       </form>
     </div>
@@ -3556,6 +2980,8 @@ class SmartestAdminHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         if parsed.path == "/health":
             self._send_text("ok"); return
+        if parsed.path.startswith("/static/"):
+            self._send_static(parsed.path[len("/static/"):]); return
         if parsed.path == ADMIN_PASSWORD_LOGIN_PATH:
             self._send_html(render_login(self._query_param(parsed.query, "message"))); return
         if parsed.path == "/login":
@@ -4754,6 +4180,36 @@ class SmartestAdminHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(encoded)))
         self.end_headers()
         self.wfile.write(encoded)
+
+    def _send_static(self, rel_path: str) -> None:
+        clean = (rel_path or "").lstrip("/")
+        if not clean or ".." in clean.split("/"):
+            self.send_error(HTTPStatus.NOT_FOUND); return
+        target = (STATIC_ROOT / clean).resolve()
+        try:
+            target.relative_to(STATIC_ROOT.resolve())
+        except ValueError:
+            self.send_error(HTTPStatus.NOT_FOUND); return
+        if not target.is_file():
+            self.send_error(HTTPStatus.NOT_FOUND); return
+        suffix = target.suffix.lower()
+        ctype = {
+            ".css": "text/css; charset=utf-8",
+            ".js": "application/javascript; charset=utf-8",
+            ".svg": "image/svg+xml",
+            ".png": "image/png",
+            ".jpg": "image/jpeg",
+            ".jpeg": "image/jpeg",
+            ".webp": "image/webp",
+            ".ico": "image/x-icon",
+        }.get(suffix, "application/octet-stream")
+        data = target.read_bytes()
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "public, max-age=300")
+        self.end_headers()
+        self.wfile.write(data)
 
 
 def main() -> None:
