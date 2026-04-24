@@ -6879,3 +6879,28 @@ Prod і multitenant — фізично різні каталоги, різні v
 ### Деплой
 
 `node deploy/deploy.cjs --target=staging` → `/opt/smartest-staging` (окрема директорія від prod `/opt/smartest/app`, окремі systemd-юніти `smartest-staging-bot`/`smartest-staging-admin`, окремий бот `@chibigochibot`, домен `test.klawa.top`, БД `aisus_test`).
+
+## 2026-04-24 — Session 095: Stage 6 (legal pages) + розбиття admin_ui на модулі
+
+### Що зроблено
+
+**Stage 6 — Legal pages.** Додано три статичні правові сторінки, потрібні для Monobank Acquiring: `/tos` (Умови користування), `/privacy` (Політика конфіденційності), `/refund` (Політика повернення коштів). Контент українською, структура з нумерованими секціями (ToS — 11, Privacy — 11, Refund — 8). Оператор у плейсхолдері (`ФОП Загамула Нікіта Андрійович`, `support@klawa.top`) — поміняти на реальні реквізити перед production. Сторінки доступні і анонімно (standalone layout), і залогіненим юзерам (через `render_portal_shell`, з повним навігаційним меню). Додано footer links у portal landing і portal shell — `/tos · /privacy · /refund`.
+
+**Модулі.** `app/admin_ui.py` був 4238 рядків у моноліті. Винесено рендери в `app/render/`:
+- `app/render/__init__.py` (empty)
+- `app/render/legal.py` (346 рядків) — `render_tos_page`, `render_privacy_page`, `render_refund_page`, `_LEGAL_OPERATOR`
+- `app/render/portal.py` (446 рядків) — `_portal_flash_html`, `render_user_portal_landing`, `render_portal_shell`, `render_portal_dashboard_page`, `render_portal_history_page`, `render_portal_turn_page`, `render_portal_settings_page`, `render_portal_topup_page`
+
+`admin_ui.py` тепер 3840 рядків (-398). Розбиття виконано через lazy resolver `_au()` у portal.py (щоб `import app.render.portal` напряму не робив circular import з admin_ui). legal.py використовує локальні `from app.admin_ui import ...` всередині функцій. Обидві стратегії безпечні; фактичний резольв модуля закешовано в `sys.modules`.
+
+**CSS для legal.** Додано `.wrap-narrow`, `.legal-doc`, `.legal-footer`, `.legal-nav`, `.portal-legal-links` (~40 рядків) у `app/static/admin.css`. Legal-сторінки reuse existing palette/типографіки.
+
+### Тести
+
+330 passed локально після Stage 6 + module split. Тести на portal render функції продовжують працювати — admin_ui re-export через `from app.render.portal import ...` зберігає backward-compat для `app.admin_ui.render_portal_shell` і т.д. (тести використовують саме цю форму).
+
+### Що залишилось (потребує користувача)
+
+- Реальні реквізити ФОП (ЕДРПОУ, адреса, контакти) в `_LEGAL_OPERATOR` — зараз плейсхолдери.
+- Monobank acquiring integration (API ключі, інвойси, webhook) — окрема Stage.
+- Розбиття admin renders (`render_dashboard`, `render_prompts_page`, `render_logs_page`, `_admin_shell`, `render_admin_*_page`) у `app/render/admin.py` — залишено на наступну сесію, бо adminові рендери залежать від більшої кількості helpers (`service_status`, `read_current_config`, admin_repository функції) і ризик регресії вищий.

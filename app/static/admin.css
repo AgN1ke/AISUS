@@ -599,6 +599,46 @@ body.logs-body {
   font-size: .82rem; color: #888; flex-shrink: 0;
 }
 
+/* Legal pages (ToS, Privacy, Refund) */
+.wrap-narrow {
+  max-width: 780px; margin: 0 auto; padding: 28px 20px 48px;
+}
+.wrap-narrow .topbar { margin-bottom: 18px; }
+.wrap-narrow .topbar h1 { margin: 0 0 6px; font-size: 1.8rem; }
+.wrap-narrow .topbar p { margin: 0; color: var(--muted); }
+.legal-doc h2 {
+  margin: 20px 0 10px; font-size: 1.05rem; color: var(--ink);
+  border-bottom: 1px solid var(--line); padding-bottom: 6px;
+}
+.legal-doc h2:first-child { margin-top: 0; }
+.legal-doc p, .legal-doc ul, .legal-doc ol { line-height: 1.6; color: var(--ink); }
+.legal-doc ul, .legal-doc ol { padding-left: 20px; }
+.legal-doc li { margin: 6px 0; }
+.legal-doc code {
+  background: var(--bg); padding: 1px 6px; border-radius: 4px;
+  border: 1px solid var(--line); font-size: .88em;
+}
+.legal-doc a { color: var(--accent); text-decoration: none; }
+.legal-doc a:hover { text-decoration: underline; }
+.legal-footer {
+  margin-top: 28px; padding: 18px 20px; background: var(--paper);
+  border: 1px solid var(--line); border-radius: var(--radius);
+  color: var(--muted); font-size: .88rem; text-align: center;
+}
+.legal-footer p { margin: 4px 0; }
+.legal-footer .muted { color: var(--muted); }
+.legal-footer .legal-nav { margin-top: 10px; }
+.legal-footer .legal-nav a {
+  color: var(--accent); text-decoration: none; margin: 0 4px;
+}
+.legal-footer .legal-nav a:hover { text-decoration: underline; }
+.portal-legal-links {
+  margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--line);
+  font-size: .85rem; color: var(--muted); text-align: center;
+}
+.portal-legal-links a { color: var(--accent); text-decoration: none; margin: 0 6px; }
+.portal-legal-links a:hover { text-decoration: underline; }
+
 /* Animations */
 @keyframes rise {
   from { opacity: 0; transform: translateY(8px); }
@@ -615,4 +655,5 @@ body.logs-body {
   .wrap { padding: 18px 14px 34px; }
   .cap-fields { grid-template-columns: 1fr; }
   .toolbar { align-items: stretch; }
+  .wrap-narrow { padding: 18px 14px 34px; }
 }
