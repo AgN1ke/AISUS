@@ -211,3 +211,68 @@ def test_B030_one_chat_turn_does_not_leak_to_next_user():
     # Second user has NO Микита label (pending was consumed)
     assert "Микита" not in out[1]["content"]
     assert out[1]["content"] == "друге без turn"
+
+
+# ===== B-030 anti-rule: trim_terminal_user_duplicate handles speaker prefix =====
+
+
+def test_trim_terminal_duplicate_handles_speaker_prefixed_message():
+    """Session 111: speaker-prefixed last user message must be detected as
+    duplicate of user_text. Without this, model sees the same question twice
+    (once with [Speaker:...] prefix, once as bare user_text from make_messages)
+    and hallucinates 'ти двічі питаєш'."""
+    from agent.search_task import trim_terminal_user_duplicate
+
+    speaker_prefixed = (
+        "[Speaker: Євген Іванов (@yourivanov)]\n"
+        "addressed_via_mention: true\n\n"
+        "який твій улюблений рівень іронії?"
+    )
+    context = [
+        {"role": "user", "content": "попереднє повідомлення"},
+        {"role": "assistant", "content": "відповідь"},
+        {"role": "user", "content": speaker_prefixed},
+    ]
+    user_text = "який твій улюблений рівень іронії?"
+
+    out = trim_terminal_user_duplicate(context, user_text)
+    # Speaker-prefixed duplicate must be trimmed
+    assert len(out) == 2
+    assert out[-1]["role"] == "assistant"
+
+
+def test_trim_terminal_duplicate_strict_equality_still_works():
+    """Legacy bare turns must still be trimmed."""
+    from agent.search_task import trim_terminal_user_duplicate
+
+    context = [
+        {"role": "user", "content": "якесь питання"},
+    ]
+    out = trim_terminal_user_duplicate(context, "якесь питання")
+    assert out == []
+
+
+def test_trim_terminal_duplicate_does_not_trim_different_text():
+    """If last user message is genuinely different from current user_text,
+    keep it in context."""
+    from agent.search_task import trim_terminal_user_duplicate
+
+    context = [
+        {"role": "user", "content": "[Speaker: A]\n\nстаре питання"},
+    ]
+    out = trim_terminal_user_duplicate(context, "нове питання")
+    # Different text, keep
+    assert len(out) == 1
+
+
+def test_trim_terminal_duplicate_does_not_trim_when_last_is_assistant():
+    """If last context message is assistant (not user), nothing to trim."""
+    from agent.search_task import trim_terminal_user_duplicate
+
+    context = [
+        {"role": "user", "content": "питання"},
+        {"role": "assistant", "content": "відповідь"},
+    ]
+    out = trim_terminal_user_duplicate(context, "питання")
+    # Last is assistant, untouched
+    assert len(out) == 2

@@ -519,14 +519,32 @@ def is_explicit_search_request(user_text: str) -> bool:
 def trim_terminal_user_duplicate(
     context_msgs: list[dict], user_text: str
 ) -> list[dict]:
+    """Drop the last user message from context if it duplicates user_text.
+
+    Match strategies (in priority order):
+      1. Strict equality (legacy: bare user role + content).
+      2. Suffix match: speaker-prefixed turns store the original text after
+         `\\n\\n` (Session 105 _annotate_recent_rows). Strip that header
+         and compare. Without this fix the model sees the same question
+         twice — once in recent (speaker-prefixed) and once as the appended
+         user_text — and hallucinates "ти двічі питаєш".
+    """
     if not context_msgs:
         return []
     last = context_msgs[-1]
-    if (
-        last.get("role") == "user"
-        and (last.get("content") or "").strip() == (user_text or "").strip()
-    ):
+    if last.get("role") != "user":
+        return context_msgs
+    last_content = (last.get("content") or "").strip()
+    target = (user_text or "").strip()
+    if not target:
+        return context_msgs
+    if last_content == target:
         return context_msgs[:-1]
+    # Speaker-prefixed: "[Speaker: ...]\n...\n\n<actual user text>"
+    if "\n\n" in last_content:
+        tail = last_content.split("\n\n", 1)[1].strip()
+        if tail == target:
+            return context_msgs[:-1]
     return context_msgs
 
 
