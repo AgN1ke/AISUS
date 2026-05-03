@@ -75,6 +75,23 @@ const excludes = [
 
 const tarFile = path.join(PROJECT_DIR, 'deploy', `smartest-${argTarget}.tar.gz`);
 
+// ── Acceptance gate ─────────────────────────────────────────────────
+// Run product-invariant tests before building the archive.
+// See docs/project/testing-protocol.md and docs/project/behavior-audit.md.
+// Skip with SKIP_ACCEPTANCE=1 only when you know what you're doing.
+if (!process.env.SKIP_ACCEPTANCE) {
+  console.log('[deploy] Running acceptance tests (gate)...');
+  try {
+    execSync('python -m pytest tests/acceptance/ -x --tb=short -q', {
+      stdio: 'inherit', cwd: PROJECT_DIR, shell: 'bash',
+    });
+  } catch (e) {
+    console.error('[deploy] Acceptance gate FAILED. Deploy blocked.');
+    console.error('[deploy] Fix the failing invariants or set SKIP_ACCEPTANCE=1 to bypass.');
+    process.exit(1);
+  }
+}
+
 console.log(`[deploy] target=${argTarget} -> ${cfg.remoteApp}`);
 console.log('[deploy] Creating archive...');
 try {

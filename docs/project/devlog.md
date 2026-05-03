@@ -6904,3 +6904,827 @@ Prod і multitenant — фізично різні каталоги, різні v
 - Реальні реквізити ФОП (ЕДРПОУ, адреса, контакти) в `_LEGAL_OPERATOR` — зараз плейсхолдери.
 - Monobank acquiring integration (API ключі, інвойси, webhook) — окрема Stage.
 - Розбиття admin renders (`render_dashboard`, `render_prompts_page`, `render_logs_page`, `_admin_shell`, `render_admin_*_page`) у `app/render/admin.py` — залишено на наступну сесію, бо adminові рендери залежать від більшої кількості helpers (`service_status`, `read_current_config`, admin_repository функції) і ризик регресії вищий.
+
+## 2026-05-01 — Session 101: Hot-fix prod (multitenant код випадково задеплоєно на @saintaibot) + behavior contract bootstrap
+
+### Проблема / Ціль
+
+1. **@saintaibot не запускався на prod.** Користувач написав, що сайт `smartest.klawa.top` показує тестову версію, бот не працює.
+2. **Системна проблема процесу:** інша модель (Codex) при змінах "пробиває стіни" — виконує локальний таск, ламає неповʼязані продуктові інваріанти, тести цього не ловлять. Юніт-тести (330 passed) перевіряють внутрішню логіку, не продуктову поведінку.
+
+### Що зроблено
+
+**1. Hot-fix prod (smartest-bot падав з ModuleNotFoundError).**
+
+Розслідування: на `/opt/smartest/app` лежав multitenant-код (`billing/`, `app/render/`, 137 рядковий `adapters/telegram_bot.py` з `from billing import commands`). Master не має `billing/`, тому `smartest-bot` падав на імпорті.
+
+Корінна причина: попередня сесія робила deploy --target=prod з гілки `multitenant`. **`deploy/deploy.cjs` має хардкоднутий `PROJECT_DIR = 'C:/Python_projects/Smartest'`** — завжди тарболить з основної робочої директорії, незалежно від того, з якої теки запускається `node deploy/deploy.cjs`. Тобто навіть запуск з worktree `Smartest-prod-backport` тарболив multitenant-код.
+
+Виправлення:
+- SSH на сервер, `cp .env /tmp/smartest-env-clean.bak`, `rm -rf /opt/smartest/app/*`.
+- Тимчасово в `Smartest-prod-backport/deploy/deploy.cjs` міняв `PROJECT_DIR` на `C:/Python_projects/Smartest-prod-backport`, запустив deploy, повернув назад.
+- Master код (`6d21f91 Gemini retry`) задеплоївся чисто. Обидва сервіси `active`.
+
+**Hardcoded PROJECT_DIR — критичний bug у deploy.cjs.** Зафіксовано як ризик: треба переписати щоб брати CWD або параметр `--source`. Зараз будь-хто, хто зробить `cd Smartest-prod-backport && node deploy/deploy.cjs --target=prod`, отримає той самий тихий race на multitenant код.
+
+**2. Behavior contract — нова рамка проти Codex-bullets.**
+
+Користувач сформулював системну проблему: "коли інша модель робить правки, вона як джагернаут пробиває стіни — те, що просили, працює, решта зламана нахуй". Запропонував стратегічне рішення: продуктові інваріанти повинні бути **виконуваним контрактом**, не документацією. Юніт-тести цього не дають — потрібен новий шар.
+
+**Створено два документи:**
+
+`docs/project/testing-protocol.md` (~250 рядків, 9 секцій) — філософія, мотивація, правила:
+- Три рівні тестів: юніт (внутрішня логіка, можуть валитись при рефакторі), acceptance (продуктові інваріанти, святі), smoke (живий бот, ручний прохід раз перед prod-релізом).
+- Three-state policy: 🟢 GREEN (gate), 🟡 YELLOW (`xfail`), 🔴 RED (`skip` + reason). Тест **виконуваний** у всіх трьох станах, різниця тільки в маркері. 🔴 → 🟢 = знімаєш `skip`, gate починає стерегти.
+- 5-ітераційний bootstrap-процес: інвентаризація з коду → тріаж із користувачем → код тестів із маркерами → інтеграція в `deploy.cjs` як gate → поступове позеленіння.
+- Розділ "Якщо ти модель і читаєш це" — прямі інструкції для Codex/Claude.
+- **Критична секція 9 "Як це виглядає на практиці"** — відповідає на питання користувача "я повинен 50 годин по колу проходити аудит?". Не повинен. Bootstrap-прохід один раз → далі pytest acceptance/ за 4 секунди автоматично перед кожним deploy. Користувач відкриває аудит знов тільки коли додається нова фіча (1-3 нові пункти на фічу) або свідомо міняється існуюче правило (окремий PR).
+
+`docs/project/behavior-audit.md` (~63 пункти, 10 категорій) — інвентаризація `@saintaibot` (master, **не** multitenant):
+- A. Команди (15): `/c@saintaibot`, anti-hallucination після clear, `/think`, 🧠, "use reasoning"/"запусти різонінг", `/a@saintaibot` (всі форми: text, private bare, reply target, no-LLM, no-text-fallback при fail TTS, multi-bot ізоляція), `/v@saintaibot` (всі форми)
+- B. Адресація (7): private auto-reply, mention, text_mention entity (UI клік), reply-to-bot, group без меншну → мовчання, working memory без recent storage, edit ignore
+- C. Медіа (15): фото/відео/voice/document як reply target, caption mention, альбом aggregation, mixed-album → video route, mention на будь-якому елементі альбому, current media vs reply target, текстовий reply на медіа бота без меншну, gpt-4o-transcribe
+- D. Пам'ять (9): recent, long, CORE-факти, `[CHAT-TURN]` маркери з reply_chain_depth/hop_N, geometry blocks, thread-history overlay
+- E. Пошук (7): explicit triggers (пошукай/шукай/загугли/новини/актуальн), heuristic перебиває planner, search gate з вузьким контекстом fail-closed, citations `[[N]](url)` без блоку "Джерела", marker `⚠️УВАГА! ВІДБУВСЯ ПОШУК!⚠️`, retry ≤3 з targeted retry
+- F. Reasoning (3): tool loop (search+fetch), Gemini thinkingConfig тільки при active reasoning, список моделей що підтримують reasoning
+- G. Група (4): speaker identification, стабільний user_id при зміні імені, факти не змішуються між учасниками, multi-bot ізоляція
+- H. Render (4): markdown→HTML, error messages з ⚠️ (timeout/connection/rate-limit, retry 3 спроб 2s/4s/8s)
+- I. Інфра (3): purge_stale_media_tmp, пам'ять переживає рестарт, dialogue context — 6 повідомлень
+- J. Невизначене (7): forwarded, стікери, GIF, sender_chat anonymous admin, reactions, `/start` в master, `/help`
+
+Кожен пункт має формат: **Як перевірити** (крок-за-кроком в Telegram) + **Що має статись** + **Що НЕ має статись** (анти-кейс — критичний для майбутніх моделей які можуть "оптимізувати" поведінку, не зрозумівши призначення) + **Статус** + **Коментар**. На початку — 5 worked-приклад заповнень.
+
+**Bootstrap-розширення документу через 4 ітерації:** v1 (моноліт-формат, надто стислий) → v2 (формат з прикладами, але виявилось в multitenant-коді) → v3 (master-only, але без нюансів — `/c` без перевірки multi-bot) → v4 (deep dive у devlog: добавлено повний профіль `/a` `/v`, edge cases альбомів, reply-chain hop-N, voice transcription model, search gate з вузьким контекстом, J-секція "невизначене").
+
+**3. Коротко про підхід.**
+
+Юніт-тести (330) — про внутрішню форму, валиться при рефакторі. Acceptance-тести (acceptance/test_BNNN_*.py, ще не створено) — про продуктову поведінку, формулюються у термінах користувача, перевіряються через внутрішні структури коду (`MessageGeometry`, `UserTask`, `ExecutionPlan`) на сирому Telegram-update. Без живого LLM, без мережі — 4 секунди на повний прогон. Codex/Claude перед `git push` отримує `pytest tests/acceptance/`. Пройшло — деплой йде. Зламано — список конкретних `B-NNN` інваріантів, які треба полагодити.
+
+### Що далі
+
+1. **Користувач проходить `behavior-audit.md`** — ставить статуси 🟢/🟡/🔴/🗑 і коментарі. Це bootstrap baseline. Один раз.
+2. **Я пишу acceptance-тести** для кожного пункту з відповідним маркером (без skip / xfail / skip).
+3. **Інтеграція в `deploy.cjs`** — `pytest tests/acceptance/ -x` перед `tar czf`. Не пройшло — деплою немає.
+4. **Виправити hardcoded PROJECT_DIR в deploy.cjs** — зробити параметр `--source` або брати CWD. Інакше повториться race з multitenant-кодом на prod.
+5. **Сесія за сесією** — береться один 🔴 з аудиту, фіксимо, переводимо в 🟢. Документ — robust ledger того, що залишилось.
+
+### Складнощі сесії
+
+- Перші три ітерації аудит-документу були поверхневими: спочатку multitenant-код залишив сліди, потім по master занадто стислі описи без анти-кейсів, потім без специфіки `/a` `/v`. Користувач коректно вловлював прорахунки ("в чаті 3 боти, /c приб'є пам'ять усім"). Кожна ітерація — повне переписування документу.
+- Bootstrap-фаза вимагає глибокого читання devlog (~6900 рядків), бо нюанси розкидані по 95 сесіях. Без агента-Explore це невиконувано в розумний час.
+- Deploy-bug з PROJECT_DIR — small footgun. Симптом проявився тільки коли prod-deploy зробили з worktree, а не з основної директорії. Класична причина "бот працював у CI, але впав у prod".
+
+### Артефакти сесії
+
+- `docs/project/testing-protocol.md` (~360 рядків, новий) — філософія + правила + детальний "Як це працює на практиці".
+- `docs/project/behavior-audit.md` (~870 рядків, новий) — 63 пункти інвентаризації з анти-кейсами і прикладами заповнення.
+- Master prod (`/opt/smartest/app`) — очищено від multitenant залишків, задеплоєно `6d21f91` (Gemini retry stable). `smartest-bot` і `smartest-admin` обидва active.
+- Multitenant staging (`/opt/smartest-staging`) — без змін, продовжує працювати як було.
+
+### Round 2 (вечір тієї ж сесії): bootstrap audit + acceptance scaffolding + gate
+
+**Контекст:** користувач пройшов аудит руками і розставив статуси. Результат — реальна картина стану `@saintaibot` зафіксована вперше.
+
+**Підсумок ручної інвентаризації (баseline Session 101):**
+
+| Категорія           | 🟢 | 🟡 | 🔴 | 🗑 |
+|---------------------|----|----|----|----|
+| A. Команди (15)     |  0 | 0  | 7  | 3  |
+| B. Адресація (7)    |  5 | 0  | 0  | 0  |
+| C. Медіа (15)       |  1 | 7  | 3  | 0  |
+| D. Пам'ять (9)      |  3 | 2  | 0  | 1  |
+| E. Пошук (7)        |  2 | 3  | 0  | 0  |
+| G. Група (4)        |  0 | 2  | 1  | 0  |
+| H. Render (4)       |  0 | 1  | 0  | 0  |
+| I. Інфра (3)        |  1 | 0  | 0  | 0  |
+| J. Невизначене (7)  |  3 | 0  | 2  | 1  |
+
+**Критичні відкриття:**
+- Voice-команди `/a` `/v` повністю зламані (8 з 9 пунктів категорії A — RED/DROP).
+- Бот реагує на медіа-меншни, але **не бачить** фото/відео — підтверджує початкову скаргу користувача про "@saintaibot не бачить картинок і відео".
+- Voice-pipeline падає з провайдер-помилкою на STT (B-020, B-021, B-022).
+- Альбоми обробляються поштучно — кілька відповідей замість однієї.
+- Multi-bot ізоляція (B-049) **зламана** — `@saintaibot` реагує на bare-команди в multi-bot чаті, тобто bare `/c` у спільному чаті може знищити пам'ять усім ботам.
+- Цитати у пошуку зламані: `[1]` без посилань, плутана нумерація.
+
+**Прийняті продуктові рішення (round 2):**
+1. Reasoning тригери — тільки `/think`. 🧠 emoji (B-004) і фрази "use reasoning" (B-005) → DROP.
+2. **Новий B-069**: видимий маркер `🧠 [reasoning ON]` у відповіді коли `/think` спрацював — інакше неможливо перевірити з боку користувача.
+3. **Новий B-070**: цитати у форматі `[domain.com](url)` замість плутаних `[N]`. Замінює B-041.
+4. `/v` як reply (B-012) → DROP, бо це функціонал `/a`.
+5. B-031 переформульовано: бачить тільки прямий reply-target (1 hop), бо Telegram забороняє ботам читати чужі повідомлення.
+6. B-056 переформульовано: повний recent + long + CORE контекст, не "тільки 6 повідомлень".
+
+**Створено acceptance scaffolding (`tests/acceptance/`):**
+- `conftest.py` — builders для синтетичних Telegram updates (`make_unified_message`, `make_geometry`), override DB-fixture з parent conftest (acceptance не лізе в БД).
+- `test_addressing.py` — 4 GREEN (B-009..B-013) + 1 SKIP (B-049 multi-bot ізоляція).
+- `test_clear_command.py` — 2 SKIP (B-001, B-002 — pending verification).
+- `test_media.py` — 1 GREEN (B-017) + 5 XFAIL (B-016, B-018, B-019, B-024, B-027) + 3 SKIP (B-020, B-021, B-022 — voice broken).
+- `test_memory.py` — 2 GREEN (B-032, B-040) + 2 XFAIL (B-030, B-046).
+- `test_search.py` — 3 XFAIL (B-037, B-039, B-041) + 2 SKIP (B-042 pending re-apply, B-070 new requirement).
+- `test_reasoning.py` — 4 SKIP (B-003 pending B-069, B-004/B-005 dropped, B-069 not implemented).
+- `test_voice_commands.py` — 8 SKIP (вся voice-функціональність зламана).
+- `README.md` — інструкція по запуску, статус-легенда, backlog для подальших сесій.
+
+**Гейт у `deploy/deploy.cjs`:**
+- Перед `tar czf` запускається `python -m pytest tests/acceptance/ -x --tb=short -q`.
+- Не пройшло — `process.exit(1)`, деплой блокується.
+- Bypass: `SKIP_ACCEPTANCE=1` (тільки в крайніх випадках).
+
+**Поточний baseline (зеленіє):**
+```
+7 passed, 20 skipped, 10 xfailed, 0 failed in ~10s
+```
+
+**План на наступні сесії (приорітет з аудиту):**
+1. Voice-команди `/a` `/v` — фундамент UX, треба перші.
+2. Медіа vision/video — давня скарга користувача "не бачить фото/відео".
+3. STT pipeline (voice transcription).
+4. Альбоми → одна відповідь на пост.
+5. Multi-bot ізоляція bare-команд.
+6. B-070 domain-based citations.
+7. B-069 reasoning marker.
+
+Кожна задача = взяти один SKIP/XFAIL, реалізувати фікс, зняти маркер, тест зеленіє, gate починає стерегти. Користувачу не треба повторно проходити аудит — `pytest tests/acceptance/` за 10 секунд страхує далі.
+
+## 2026-05-01 — Session 102: Voice commands ported to master + deploy gate fix
+
+### Проблема / Ціль
+
+Користувач у round-1 audit поставив усі пункти A-секції (`/a` `/v`) як 🔴 RED. Розслідування показало: **на master коді цих команд ніколи не було** — feature існувала лише на multitenant. На @saintaibot prod ці команди тихо ігнорувались, бо handler-а нема.
+
+Також виявлено критичний бажaний фікс: hardcoded `PROJECT_DIR` у `deploy/deploy.cjs`, через який попередня сесія випадково задеплоїла multitenant-код на prod.
+
+### Що зроблено
+
+**1. Порт voice infrastructure на master (`Smartest-prod-backport`).**
+
+- **`core/env.py`** — додано 7 helper-функцій: `openai_tts_api_key`, `openai_stt_api_key`, `tts_base_url`, `stt_base_url`, `tts_model`, `vocalizer_voice`, `whisper_model`. Всі читають з env, mappings до `OPENAI_TTS_API_KEY/OPENAI_API_KEY` тощо.
+- **`media/voice.py`** (новий, 183 рядки) — спрощений порт з multitenant: TTS/STT клієнти, `normalize_tts_text` (strip markdown/citations/URLs), `split_tts_text` (chunking 3500 chars), `_synthesize_chunk_sync`, `synthesize_voice_chunks`, `_send_ptb_voice`, `send_voice_response`, `cleanup_voice_files`. Викинуто multi-tenant залежності (`runtime_user_settings`, `voice_option`) — використовується тільки env-конфігований `vocalizer_voice()`.
+- **`app/message_logic.py`** — додано:
+  - `_VOICE_CMD_RE` regex: `^/(a|v)(?:@(\w+))?(?:\s+(.*))?$`
+  - `_parse_voice_command(text, bot_username) -> (cmd, payload, addressed)` — нова 3-tuple signature, обробляє `/a@bot` / `/v@bot` / bare форми. Команди для `@otherbot` тегу повертають `(None, '', False)` — multi-bot safety.
+  - `_voice_command_error_message(command)` — UA error msgs.
+  - `_find_last_assistant_reply_text(chat_id)` — scan recent memory backwards.
+  - У `_process_message_inner`: інжектовано voice command dispatch після `check_access`, перед `_resolve_media_instruction`. Логіка:
+    - `/a <text>` → speak text from command
+    - `/a` як reply → speak text from reply target
+    - `/v` → speak last assistant reply (or reply target if /v is reply)
+    - У групі: bare `/a`/`/v` (без `@bot` тегу) ігнорується — multi-bot safety (B-015 з аудиту).
+    - При TTS exception → user-facing error msg, не fallback у текст.
+
+**2. Виправлено критичний bug у `deploy/deploy.cjs` (master).**
+
+Було: `const PROJECT_DIR = 'C:/Python_projects/Smartest';` — хардкод, через який попередня сесія залила multitenant-код на prod.
+
+Стало: `const PROJECT_DIR = argSource || path.resolve(__dirname, '..');` — береться з директорії скрипта (тобто власний worktree), або через `--source=` флаг. Рекурсивна помилка більше не повторюється.
+
+**3. Додано acceptance gate у master `deploy.cjs`.**
+
+Перед `tar czf` запускається `python -m pytest tests/acceptance/ -x --tb=short -q`. Не пройшло — `process.exit(1)`, deploy блокується. Bypass: `SKIP_ACCEPTANCE=1`.
+
+**4. Acceptance тести оновлені.**
+
+На multitenant `tests/acceptance/test_voice_commands.py` — 4 нових GREEN тести під 2-tuple parser API (B-007, B-010, B-013, B-008). На master `tests/acceptance/test_voice_commands.py` — 7 GREEN тестів під 3-tuple parser API з `@bot` suffix (B-007, B-008, B-009, B-010, B-011, B-013, B-015). Решта B-014 — SKIP (потребує мокованого TTS exception).
+
+**5. Deploy на prod успішний.**
+
+```
+node deploy/deploy.cjs --target=prod
+[deploy] Creating archive...
+[deploy] Archive: 0.6MB
+...
+active
+[deploy] smartest-bot: OK
+active
+[deploy] smartest-admin: OK
+```
+
+Verify через SSH: `_parse_voice_command` присутній в `/opt/smartest/app/app/message_logic.py`, `/opt/smartest/app/media/voice.py` — 183 рядки, обидва сервіси active.
+
+### Результат acceptance
+
+- **Multitenant baseline**: 11 passed, 17 skipped, 10 xfailed (було 7 passed)
+- **Master baseline**: 14 passed, 13 skipped, 10 xfailed
+
+Voice-команди тепер тестово зеленіють на обох гілках. `@saintaibot` має реагувати на `/a@saintaibot текст`, `/a@saintaibot` (як reply на повідомлення), `/v@saintaibot` (озвучити останню відповідь), bare `/a текст`/`/v` у приваті.
+
+### Що ще залишилось після цієї сесії
+
+- **B-014 PENDING**: integration test з мокованим TTS failure — пропустили, потребує більше плумбінгу.
+- **Жива перевірка користувачем на @saintaibot** — потрібна, бо tests перевіряють лише parser contract, не реальний TTS API.
+- **Решта RED-пунктів аудиту**: media vision (бот не бачить фото/відео), voice STT pipeline (B-020-022), альбоми (B-024-026), multi-bot ізоляція bare-команд (B-049 потребує перевірки на full message dispatch), B-069 reasoning marker, B-070 domain citations.
+
+### Артефакти
+
+- `Smartest-prod-backport/core/env.py` (+30 рядків)
+- `Smartest-prod-backport/media/voice.py` (новий, 183 рядки)
+- `Smartest-prod-backport/app/message_logic.py` (+99 рядків)
+- `Smartest-prod-backport/deploy/deploy.cjs` (PROJECT_DIR fix + acceptance gate)
+- `Smartest-prod-backport/tests/acceptance/` (скопійовано з multитenant + master version `test_voice_commands.py`)
+- `Smartest/tests/acceptance/test_voice_commands.py` (оновлено, +4 GREEN)
+- Prod (`/opt/smartest/app`) — voice-команди живі, обидва сервіси active.
+
+## 2026-05-02 — Session 103: Масовий фікс @saintaibot (prod) — vision, voice, альбоми, цитати, reasoning, multi-bot
+
+### Контекст
+
+Після аудиту behavior-audit.md (~63 пункти, заповнені користувачем у Session 101) мали повний перелік того, що зламано. Сесія 103 — фікс-марафон.
+
+### Зроблено (хронологічно)
+
+**1. Vision модель `gpt-4.1` → `gpt-4o-mini` (env on prod)**
+- `CAPABILITY_VISION_IMAGE_MODEL=gpt-4.1` на проді повертала відповіді "не маю доступу до вмісту" — модель не підтримувала vision input.
+- Замінено на `gpt-4o-mini` (OpenAI vision-capable). Одинокі фото тепер описуються.
+
+**2. STT pipeline: `whisper_tool` → `media.voice.transcribe_audio_sync`**
+- master використовував `whisper_tool.transcribe(path)` який записував `.txt` поруч із аудіо. На проді `.txt` не створювався → `_transcribe_media` повертав порожній рядок.
+- Замінено на `media.voice.transcribe_audio_sync(path)` — прямий OpenAI Whisper API.
+- Попередньо `CAPABILITY_STT_VOICE_MODEL=whisper-1` теж фіксили (whisper-1 не chat-модель, не можна в chat.completions).
+
+**3. Voice-in → voice-out (`_should_reply_with_voice`)**
+- Якщо `current_media_kind == 'voice'` — відповідь синтезується голосом (TTS) і шлеться як voice-повідомлення.
+- STT не відповідав voice-ом бо цей механізм не був портований на master.
+
+**4. transcript як user_text (B-STT bug)**
+- Транскрипт зберігався тільки в `[MEDIA]` system-блок, user_text = `MEDIA_DEFAULT_TASK_PROMPT`.
+- LLM відповідав "я не маю доступу до вмісту аудіо" бо не бачив transcript як message.
+- `_build_media_context` тепер повертає `(context_block, semantic_text)` де `semantic_text` = транскрипт, який стає user_text.
+
+**5. B-070: domain-based citation format**
+- Замість `[1]`, `[5]`, `[1]` з плутаною нумерацією — тепер `[nasa.gov](url)`, `[reuters.com](url)`.
+- `_domain_label_from_url` + updated `_apply_inline_citation_links` + `_ensure_answer_has_citations`.
+- Обидва формати конвертуються: bare `[N]` і старий `[[N]](url)`.
+- www-prefix стрипається. 7 зелених acceptance тестів.
+
+**6. B-069: reasoning marker `🧠 [reasoning ON]`**
+- Без маркера неможливо з боку користувача перевірити, чи спрацював `/think`.
+- `REASONING_MARKER = "🧠 [reasoning ON]"` — додається в кінець відповіді коли `plan.use_reasoning=True`.
+- Також `SEARCH_PERFORMED_MARKER` портовано з backup-гілки.
+
+**7. DROP-cleanup: reasoning тригери (B-004, B-005)**
+- 🧠 emoji: видалено з `_needs_reasoning` — міг випадково спрацювати у звичайному тексті.
+- Фрази "use reasoning" / "роздумай" / "step-by-step" / "запусти різонінг": видалено.
+- Залишено тільки `/think` як єдиний явний тригер.
+
+**8. B-001: multi-bot ізоляція `/c` команди**
+- `_is_clear_context_command` тепер приймає `chat_type`. У групі bare `/c` НЕ очищає (multi-bot safety). Тільки `/c@saintaibot`. У приваті bare `/c` OK.
+- 7 нових зелених acceptance тестів.
+
+**9. Mention detection: `text_mention` entity (B-011)**
+- `_has_mention_ptb` не вмів обробляти Telegram's `text_mention` entity (UI-click менションинг без буквального `@username` у тексті).
+- Портовано multitenant версію: entity type=`text_mention` → перевіряємо `entity.user.id == bot.id`.
+
+**10. Альбоми — трьохетапна робота:**
+
+  *Етап 1: album_registry + claim/settle*
+  - Портовано `media/album_registry.py` з multitenant.
+  - `UnifiedMessage` тепер має `media_group_id`, `has_video_note`.
+  - `_process_message_inner`: album gate (claim/settle/skip_duplicate).
+  - Перший item клеймить альбом, чекає settle, решта silent skip.
+  - Acceptance тести (B-024, B-025).
+
+  *Етап 2: повний album bundle із multitenant*
+  - Скопійовано повні `media/downloader.py` і `media/router.py` з multitenant.
+  - `download_from_ptb_album` завантажує всі sibling-items.
+  - `_compose_album_bundle` — LLM бачить всі айтеми (`album_item_1_type`, `album_item_1_media_analysis`, ...).
+  - Per-item try/except: 1 зламаний item не вбиває весь альбом.
+  - `build_user_task` отримав `media_type_override` для album route kind.
+
+  *Етап 3: concurrent_updates + adapter-level observe*
+  - **Корінна причина** того, що album_items=0 навіть після settle: PTB обробляє updates **послідовно** за замовчуванням. Поки item-1 спав 6с і завантажував (разом 16с), items 2/3 чекали у черзі. `observe_album_message` для них запускався **після** того як перший закінчив.
+  - Фікс: `Application.builder().token(self.token).concurrent_updates(True).build()` — кожен update обробляється паралельним asyncio task.
+  - Додатково: `observe_album_message` тепер викликається в `_on_message` ПЕРЕД `handler(um)` — реєстрація на найранішому можливому моменті.
+
+**11. deploy.cjs: виправлено PROJECT_DIR bug**
+- Hardcoded `PROJECT_DIR = 'C:/Python_projects/Smartest'` — причина попереднього prod-disaster (multitenant код на prod).
+- Замінено на `path.resolve(__dirname, '..')` + `--source=` флаг.
+
+**12. Acceptance gate в deploy.cjs (master)**
+- `pytest tests/acceptance/ -x` перед `tar czf`. Не пройшло → `process.exit(1)`.
+
+### Результати тестів по ходу
+
+| Момент | Passed | Skipped | XFailed |
+|--------|--------|---------|---------|
+| Початок Session 103 | 14 (master) | 13 | 10 |
+| Після voice/citations/reasoning/clear | 36 | 6 | 8 |
+| Після albums | 39 | 8 | 8 |
+
+### Що підтвердив користувач (🟢)
+
+- Одинокі фото: бот бачить ✅
+- Відео (reply + меншн): бот описує ✅
+- Voice: транскрибує + відповідає голосом ✅
+- Свіжий альбом (3 фото, з concurrent_updates): бот бачить всі ✅
+- Пошук + domain-based цитати: confirmed ✅
+
+### Що залишилось (залишкові RED)
+
+1. **Старий альбом (reply на архівний альбом)**: фундаментальне обмеження Telegram Bot API — не можна ретроспективно fetched media_group siblings. Реєстр in-memory TTL 1 год. Для повного вирішення потрібно персистентне сховище в БД (albums_registry таблиця). Окрема задача.
+
+2. **B-049 зеленіє частково**: `/c` multi-bot ізоляція зафіксована (acceptance testi green), але user-side verification ще не підтверджено live.
+
+3. **Search gate B-039**: гуглить трохи частіше ніж треба на пограничних запитах (🟡, xfail).
+
+4. **Memory speaker disambiguation (B-046, B-048)**: "трохи плутається" — потребує memory layer rework.
+
+5. **Стікери (B-058)**, **GIF (B-059)**: бот не бачить. Low priority, не задокументовані в devlog.
+
+### Артефакти сесії (master worktree `Smartest-prod-backport`)
+
+- `adapters/base.py` — `has_video_note`, `media_group_id` поля
+- `adapters/telegram_bot.py` — `concurrent_updates(True)`, adapter-level `observe_album_message`, `media_group_id` в UnifiedMessage
+- `app/chat_geometry.py` — `_has_mention_ptb` виправлено для text_mention entity
+- `app/message_logic.py` — album gate, `_is_clear_context_command` з chat_type, `_should_reply_with_voice`, `_resolve_media_instruction` 2-tuple, `build_user_task` з media_type_override, markers (search/reasoning)
+- `agent/runner.py` — `_needs_reasoning` (тільки `/think`), domain-based citations
+- `core/env.py` — TTS/STT helpers
+- `media/album_registry.py` — портовано з multитenant
+- `media/downloader.py` — повна версія з multитenant (album, per-item error handling, purge, video_note)
+- `media/router.py` — повна версія з multитenant (album bundle, per-item analysis)
+- `media/voice.py` — портовано з multитenant (TTS/STT, send_voice_response, transcribe_audio_sync)
+- `deploy/deploy.cjs` — PROJECT_DIR fix, acceptance gate, `SKIP_ACCEPTANCE` bypass
+- `tests/acceptance/` — 39 passed baseline
+- Env prod: `CAPABILITY_VISION_IMAGE_MODEL=gpt-4o-mini`, `CAPABILITY_STT_VOICE_MODEL=gpt-4o-mini`, `ALBUM_PROCESSING_SETTLE_SECONDS=6.0`
+
+## 2026-05-02 — Session 104: Acceptance test lock-in для всіх Session-103 фіксів
+
+### Контекст
+
+Сесія 103 (масовий фікс @saintaibot) залишила 40 acceptance-тестів — це покривало частину фіксів, але не все. Користувач разом із Codex далі фіксили баги у пошуку (SearchOutcome refactor, citation handling). Користувач попросив зафіксувати **усе що зроблено** acceptance-тестами, щоб майбутні правки нічого не зламали без видимого сигналу через gate.
+
+### Зроблено
+
+**1. `tests/acceptance/test_addressing.py` — нові тести для B-011 text_mention.**
+- `test_B011_text_mention_entity_with_bot_id_detected` — UI-click мention розпізнається через `entity.user.id == bot.id`.
+- `test_B011_text_mention_entity_with_other_bot_id_NOT_detected` — entity на іншого бота не активує нас.
+- `test_B011_literal_at_username_in_text_detected` — текст із `@saintaibot` визначається без entity.
+- `test_B011_text_mention_in_caption_entities_detected` — caption_entities теж читаються.
+- `test_B011_no_mention_no_addressing` — negative case, текст без меншну.
+
+**2. `tests/acceptance/test_albums.py` — album bundle і per-item error handling.**
+- `test_B026_album_bundle_includes_every_item` — `_compose_album_bundle` рендерить ВСІ айтеми (`album_item_count`, `album_item_N_type`, аналіз і transcript кожного).
+- `test_B026_mixed_album_route_kind_is_video` — `_album_route_kind` повертає 'video' для mixed photo+video, 'image' для photo-only.
+- `test_B026_one_broken_item_does_not_kill_album` — async тест: один айтем із `error_reason` не валить bundle, error потрапляє в `analysis` цього айтема.
+- `test_B027_album_messages_lookup_returns_all_siblings` — `get_ptb_album_messages` знаходить всі sibling-items за `media_group_id`.
+
+**3. `tests/acceptance/test_voice_commands.py` — STT і transcript flow.**
+- `test_B020_router_uses_openai_whisper_transcribe` — статичний source check: router викликає `transcribe_audio`, legacy `whisper_tool` прибрано.
+- `test_B021_voice_transcript_becomes_semantic_text` (async) — voice → transcript повертається як `semantic_text` для user_text.
+- `test_B021_voice_transcribe_failure_returns_none_semantic` (async) — failed transcribe → bundle отримує помилку, semantic_text=None, бот не падає.
+
+**4. `tests/acceptance/test_media.py` — повна переробка.**
+- `test_B016_photo_download_error_returns_bundle_with_error` — `error_reason` потрапляє у bundle як media_analysis.
+- `test_B019_video_analysis_failure_returns_error_bundle` — video.analyze_video raises → friendly error в bundle.
+- `test_B016_photo_analysis_appears_as_media_analysis` — vision result embedded у bundle.
+- `test_downloader_handles_get_file_exception_gracefully` — source check: download try/except + error_reason.
+- `test_B022_text_reply_on_bot_voice_addresses_via_reply_to_bot` — geometry check.
+- `test_search_marker_constant_defined`, `test_reasoning_marker_constant_defined` — константи маркерів існують.
+- `test_build_user_task_uses_media_type_override` — async: `media_type_override='video'` перевизначає `target_media_kind='image'` (для mixed albums).
+
+**5. `tests/acceptance/test_search.py` — SearchOutcome contract.**
+- `test_search_outcome_dataclass_contract` — поля status, evidence_block, queries, citation_map, intent_hypothesis.
+- `test_search_outcome_default_factories` — defaults порожні.
+- `test_run_search_strips_bare_N_from_chat_final_output` (async) — bare `[N]` → `[domain](url)` через citation_map.
+- `test_run_search_no_results_status_propagates` (async) — `[SEARCH-RESULT]` блок інжектиться у `chat_final` контекст з status.
+- `test_now_system_msg_emits_iso_date` — `_now_system_msg()` повертає `[NOW]\\ntoday_date_utc: YYYY-MM-DD`.
+
+**6. `tests/acceptance/test_adapter.py` (новий) — adapter-level invariants.**
+- `test_adapter_uses_concurrent_updates` — `concurrent_updates(True)` у source. Без цього album sibling-апдейти стоять у черзі.
+- `test_adapter_observes_album_message_before_handler` — observe-call передує `await handler(um)` у source.
+- `test_unified_message_has_album_fields` — `media_group_id`, `has_video_note` у dataclass fields.
+- `test_unified_message_media_group_id_default_none` — defaults None/False.
+
+**7. Multitenant compat — pytestmark.skipif.**
+
+Master-only тести (test_voice_commands, test_search, test_adapter, test_media) мають top-level `pytestmark = pytest.mark.skipif(...)` що skip-ить їх на multitenant де API інша:
+- voice parser: master 3-tuple, multitenant 2-tuple.
+- runner: master має `_domain_label_from_url`, `SearchOutcome`, multitenant ні.
+- adapter: master має `concurrent_updates(True)`, multitenant ні.
+- message_logic: master має `REASONING_MARKER`, multitenant ні.
+
+Це дозволяє multitenant deploy.cjs gate проходити без помилок (master-specific тести silently skipped, не fail).
+
+**8. Виправлено tar в `deploy.cjs` (master).**
+
+Codex поставив `IS_WIN ? tarFile : tarPosix` — на Windows tar отримував `C:\Python_projects\...` і інтерпретував `C:` як remote host (`Cannot connect to C: resolve failed`). Повернуто на завжди POSIX-paths + `shell: 'bash'` (Git Bash на Windows).
+
+### Результати тестів
+
+| Проєкт | Passed | Skipped | XFailed |
+|--------|--------|---------|---------|
+| Master (Smartest-prod-backport) | **69** | 3 | 3 |
+| Multitenant (Smartest) | 18 | 46 (master-only) | 2 |
+
+### Що це блокує від поломки
+
+Кожен наступний agent (я, Codex, людина) перед deploy запускає `pytest tests/acceptance/`. Якщо хтось зламає:
+- text_mention detection → 5 тестів падають.
+- album bundle composition → `test_B026_album_bundle_includes_every_item` падає.
+- per-item album error handling → `test_B026_one_broken_item_does_not_kill_album` падає.
+- voice transcript flow → 2 тести падають.
+- adapter concurrent_updates → 2 тести падають.
+- SearchOutcome refactor → 4 тести падають.
+- domain-based citations → 6 тестів падають.
+- markers (search/reasoning) → 2 тести падають.
+
+Deploy блокується. Користувач НЕ повторно проходить аудит — pytest за ~14с страхує далі.
+
+### Артефакти
+
+- `Smartest-prod-backport/tests/acceptance/test_addressing.py` (+5 тестів B-011)
+- `Smartest-prod-backport/tests/acceptance/test_albums.py` (+4 тести B-026/B-027)
+- `Smartest-prod-backport/tests/acceptance/test_voice_commands.py` (+3 тести STT/transcript)
+- `Smartest-prod-backport/tests/acceptance/test_media.py` (повна переробка, +7 тестів)
+- `Smartest-prod-backport/tests/acceptance/test_search.py` (+5 тестів SearchOutcome)
+- `Smartest-prod-backport/tests/acceptance/test_adapter.py` (новий, 4 тести)
+- `Smartest-prod-backport/deploy/deploy.cjs` — tar fix (POSIX paths always)
+- `Smartest/tests/acceptance/*.py` — синхронізовано з master + skipif для master-specific
+- Prod (`/opt/smartest/app`) — задеплоєно з gate `pytest -x tests/acceptance/` (69 passed)
+
+## 2026-05-02 — Session 105: Speaker disambiguation + reply geometry + B-012 DROP
+
+### Зроблено
+
+**1. B-046/B-048/B-030/B-036 — speaker prefix у working memory.**
+
+Корінь проблеми: `select_context` повертав recent_rows як bare `{role, content}` пари. У групі бот бачив:
+```
+user: я люблю каву
+user: я люблю чай
+```
+і не міг сказати хто що сказав. `[CHAT-TURN]` system-блок над кожним user-меседжем містив `sender_display_name`, `sender_username` тощо, але модель не могла надійно прив'язати цей блок до конкретного user-message.
+
+Виправлено через port commit `98e659e` із backup-гілки `backup/multitenant-2026-04-25`:
+- Додано `_structured_fields(content)` у `memory/manager.py` — парсить `key: value` лінії з [CHAT-TURN].
+- `_speaker_label_from_fields(fields)` — будує stable label з пріоритетом: `display+username → display → sender → @username → user_id`.
+- `_annotate_recent_rows(rows)` — нова функція, що:
+  - Парсить кожен [CHAT-TURN] блок.
+  - Дропає raw [CHAT-TURN] з промпту (timestamps/message_ids — noise для LLM).
+  - Підмонтовує `[Speaker: <name>]` header на наступний user-меседж у тому самому turn-і:
+    ```
+    [Speaker: Микита Загамула (@ag)]
+    addressed_via_mention: true
+    reply_to_bot: true
+    reply_target_text: <240 char preview>
+
+    <user text>
+    ```
+  - role залишається `user/assistant/system` (не flatten-ить у `system`, інакше chat_completions API втрачає turn structure).
+  - Інші service-блоки ([SEARCH], [LONG-MEMO], [CORE]) проходять через без змін.
+- `select_context` тепер: `recent_msgs = _annotate_recent_rows(recent_rows)` замість прямого map-у.
+
+**Що це дає:**
+- B-046: бот стабільно розрізняє хто що сказав у групі, не плутає speaker_id.
+- B-048: факти про різних учасників не змішуються — модель бачить prefix і прив'язує факт до правильної людини.
+- B-030: технічний [CHAT-TURN] блок прибрано з промпту — менше токенів, менше плутанини.
+- B-036: reply_target_text лежить у speaker header — модель розуміє що user reply-їв на що.
+
+**2. B-012 DROP — `/v` як reply більше не озвучує reply target.**
+
+Користувач у round-1 audit поставив 🗑: "/v як reply — це функціонал /a, не дублюємо".
+
+Виправлено в `_process_message_inner`:
+- Раніше: `if voice_cmd == "speak_last": if reply_target.text: text = reply_target.text else: text = last_assistant_reply`.
+- Тепер: `if voice_cmd == "speak_last": text = await _find_last_assistant_reply_text(chat_id)` — без reply_target гілки.
+
+`/a@bot` як reply озвучує текст з reply target (це його роль). `/v@bot` тільки повторює останню текстову відповідь бота.
+
+**3. Acceptance тести.**
+
+- `tests/acceptance/test_speaker_prefix.py` (новий, 12 тестів):
+  - `_structured_fields` parse [CHAT-TURN] block.
+  - `_speaker_label_from_fields` priority order (display+username → display → sender → username → user_id → empty).
+  - `_annotate_recent_rows`: speaker prefix attached to user turn, two speakers don't collide, [CHAT-TURN] dropped from prompt, other service blocks pass through, legacy rows without [CHAT-TURN] pass through, reply_target_text lifted to header, pending speaker not leaked between turns.
+- `tests/acceptance/test_voice_commands.py` — додано `test_B012_DROP_v_does_not_speak_reply_target_text` — source check, що в `speak_last` гілці немає `reply_target.text`.
+
+### Результат
+
+| Проєкт | Passed | Skipped | XFailed |
+|--------|--------|---------|---------|
+| Master | **83** | 3 | 3 |
+
+Було 69 → 83 (+14 нових: 13 speaker prefix + 1 B-012 DROP).
+
+### Що скіпаємо (свідомо)
+
+- **B-058 стікери, B-059 GIF** — не задокументовано в devlog, не критично, low priority.
+- **B-060 анонімний admin** — користувач не зрозумів пункт.
+- **Старі альбоми (TTL 1 год)** — фундаментальне обмеження Telegram Bot API; для повного рішення треба персистентне сховище в БД (окрема велика задача).
+- **B-039 search gate тюнінг** — потребує A/B з prompt; залишається `xfail`.
+- **B-014, B-002 інтеграційні тести** — потребують більше плумбінгу.
+
+### Артефакти
+
+- `Smartest-prod-backport/memory/manager.py` (+103 рядки: `_structured_fields`, `_speaker_label_from_fields`, `_annotate_recent_rows`; `select_context` використовує annotate)
+- `Smartest-prod-backport/app/message_logic.py` (B-012 DROP: 5 рядків замінено на 1)
+- `Smartest-prod-backport/tests/acceptance/test_speaker_prefix.py` (новий, 12 тестів)
+- `Smartest-prod-backport/tests/acceptance/test_voice_commands.py` (+1 тест B-012)
+- Prod (`/opt/smartest/app`) — обидва сервіси active
+
+## 2026-05-03 — Session 106: reply-to-bot exemption + search_gate prompt rewrite + wiring tests
+
+### Зроблено
+
+**1. Виправлено: bare `/v` як reply на бота у групі ігнорувався.**
+
+Користувач: написав `/v` reply-ом на повідомлення бота у групі — бот мовчав. Логи: `flow.voice_cmd_ignored_bare_in_group trace=ptb:-1001656354144:256639` хоча `reply_to_bot=True, addressed=True`.
+
+Корінь: multi-bot safety guard перевіряв тільки `chat_type != "private" and is_bare`, не дивився на `reply_to_bot`. Reply на повідомлення бота — це **явна** адресація, multi-bot конфлікту немає.
+
+Виправлено в `app/message_logic.py`:
+```python
+if (
+    geometry.chat_type != "private"
+    and is_bare
+    and not geometry.reply_to_bot   # ← exempt: reply addresses us unambiguously
+):
+    return  # ignore (multi-bot safety)
+```
+
+Acceptance: `test_bare_v_as_reply_to_bot_in_group_is_NOT_ignored` (source check).
+
+**2. Системне виправлення `SEARCH_GATE_SYSTEM_PROMPT`.**
+
+Користувач питав про принцип роботи реактивного двигуна на надзвуку — бот пішов гуглити. Логи: `planner.search_gate verdict=SEARCH last="розкажи про цей прикол, шо коли літак надзвук достігає, то гальмівні камери..."`.
+
+Корінь: старий gate prompt описував SEARCH через "запит про події/ціни/новини" і CHAT через "загальновідомі факти", але **недостатньо чітко** для технічних/теоретичних питань. Модель плутала "складне технічне питання" із "запит на пошук".
+
+Системний фікс — повний rewrite `SEARCH_GATE_SYSTEM_PROMPT` у `core/prompts.py`:
+
+- **Ключовий критерій винесено вгору:**
+  > Чи відповідь МАЄ містити дані, які **змінюються в часі**? ТАК → SEARCH, НІ → CHAT.
+
+- **Явна категорія CHAT:**
+  > Принципи роботи, фізика, інженерія, біологія, хімія, математика, історія, мовознавство — це **СТАБІЛЬНІ знання, бот їх знає**.
+
+- **Конкретні анти-приклади (всі CHAT):**
+  - "як працює реактивний двигун при надзвуку"
+  - "поясни принцип роботи трансформатора"
+  - "якщо швидкість 1500 км/год то що буде в камері потоку?"
+  - "етимологія цього слова"
+  - "перечисли усіх відомих будд"
+  - "розкажи про тхе чорного пса / тульпу"
+  - "чому гриби важко вивести?"
+
+- **Позитивні приклади (SEARCH):** погода, новини NASA, курс долара зараз, коли вийде GPT-6.
+
+- **Жорстке правило #3:** "**Технічна складність / довжина запиту НЕ є аргументом за SEARCH.**"
+
+- **Розширено anti-search trigger list:** додано "подумай" — користувач явно просить мисленнєвий експеримент.
+
+Acceptance (4 нові тести):
+- `test_search_gate_prompt_rejects_engineering_principles`
+- `test_search_gate_prompt_explicit_dont_search_phrases`
+- `test_search_gate_prompt_default_is_chat`
+- `test_search_gate_prompt_complexity_is_not_search_signal`
+
+### Артефакти Session 106
+
+- `Smartest-prod-backport/app/message_logic.py` (multi-bot guard exempts reply_to_bot)
+- `Smartest-prod-backport/core/prompts.py` (SEARCH_GATE_SYSTEM_PROMPT повний rewrite)
+- `Smartest-prod-backport/tests/acceptance/test_voice_commands.py` (+1 тест)
+- `Smartest-prod-backport/tests/acceptance/test_search.py` (+4 тести)
+- Prod `/opt/smartest/app` — обидва сервіси active
+
+## 2026-05-03 — Session 107: Wiring tests (модулі підключені до загального контуру)
+
+### Контекст
+
+Проблема: коли інша модель (Codex) додає функцію + тест, тест проходить, але **функція не підключена** до основного flow. Пасивний defect: код існує, тест зелений, але в реальності бот її не використовує.
+
+Приклад: `_should_reply_with_voice` визначений у `message_logic.py`, тести `test_B026_voice_input_triggers_voice_reply` зелені, **але якщо хтось випадково прибере виклик у `_process_message_inner`** — бот не буде відповідати голосом, а тести не помітять.
+
+Користувач попросив: тести повинні перевіряти що **функції реально підключені** до загального бота, не висять окремо.
+
+### Стратегія
+
+Для ключових інваріантів — **source-level integration check**: парсимо source code критичних функцій (`_process_message_inner`, `select_context`, `_on_message` adapter, `run_search`) і перевіряємо що очікувані виклики там присутні.
+
+Це ловить регресії типу:
+- "Codex відрефакторив flow і випадково забрав виклик `observe_album_message`."
+- "Хтось прибрав `_apply_inline_citation_links` з `run_search`."
+- "Voice command dispatch видалено з main flow."
+
+### Зроблено
+
+Новий файл `tests/acceptance/test_wiring.py` (~25 тестів). Перевіряє наявність очікуваних викликів у source code основних entry-points.
+
+**Категорії wired-тестів:**
+
+1. **`_process_message_inner`** має викликати:
+   - `observe_album_message` (album dedup)
+   - `resolve_message_geometry` (geometry resolution)
+   - `_is_clear_context_command` (clear gate)
+   - `check_access` (auth/access gate)
+   - `_parse_voice_command` (voice cmd dispatch)
+   - `_should_reply_with_voice` (voice-out routing)
+   - `_resolve_media_instruction` (media flow)
+   - `build_user_task` (task builder)
+   - `plan_execution` (planner)
+   - `execute_plan` (capability dispatch)
+   - `send_response` or `send_voice_response` (output)
+   - `claim_album_processing` (album gate)
+   - `finish_album_processing` (album release)
+   - References to `SEARCH_PERFORMED_MARKER` and `REASONING_MARKER` (visible markers)
+
+2. **`memory.manager.select_context`** має викликати:
+   - `_annotate_recent_rows` (speaker prefix lifting)
+   - `fetch_recent` (recent rows source)
+
+3. **PTB adapter `_on_message`** має викликати:
+   - `observe_album_message` (early registration)
+   - call must precede `await handler(um)`
+
+4. **`media.router.handle_ptb_mention`** має викликати:
+   - `download_from_ptb_album` AND `download_from_ptb_message` (router has both)
+   - `_build_media_context` (media bundle composition)
+   - `_append_media_context` (memory write)
+   - `cleanup_downloaded_media` (cleanup)
+
+5. **`agent.runner.run_search`** має викликати:
+   - `_run_direct_search` (search outcome)
+   - `run_capability` (chat_final composition)
+   - `_apply_inline_citation_links` (citation rewriting)
+   - `_ensure_answer_has_citations` (fallback citations)
+
+6. **`agent.planner.plan_message`** має викликати:
+   - `_validate_search` (search gate, fail-closed)
+
+7. **`media.router._build_media_context`** має викликати:
+   - `transcribe_audio` (для voice items, not legacy whisper_tool)
+   - `describe_images` (для photos)
+   - `analyze_video` (для videos)
+
+8. **`adapters.telegram_bot.TelegramBotAdapter.start`** має використовувати:
+   - `concurrent_updates(True)` (album sibling parallelism)
+
+### Чому це source-check, а не call-tracing
+
+Альтернативний варіант — мокати кожну функцію і перевіряти що мок викликався під час інтеграційного запуску. Це краще ловить runtime, але:
+- Потребує підняти DB / fake LLM / fake Telegram → дорого, повільно.
+- Acceptance gate має бути швидким (зараз 2с).
+
+Source-check ловить **structural disconnection** — коли імпорт прибрано, виклик прибрано, або функція перейменована. Якщо хтось зробить виклик через рефлексію / dispatch table — source-check може пропустити, але це рідкісний edge case.
+
+### Результати
+
+| Master | Passed | Skipped | XFailed |
+|--------|--------|---------|---------|
+| Перед wiring | 88 | 3 | 3 |
+| Після wiring | **~110** | 3 | 3 |
+
+Wiring тести роблять gate ще строгішим: якщо хтось рефакторить flow і випадково прибере виклик ключової функції, gate впаде з конкретним повідомленням "X must be wired into Y".
+
+### Артефакти
+
+- `Smartest-prod-backport/tests/acceptance/test_wiring.py` (новий)
+- `Smartest/tests/acceptance/test_wiring.py` (синхронізовано з skipif для master-only)
+- Prod — без змін (тільки тести)
+
+## 2026-05-03 — Session 108: Empty answer surfacing
+
+### Проблема
+
+Друг тегнув бота у груповому чаті. Бот мовчав. Логи: `flow.classified mentioned=True addressed=True` — бот розпізнав. `capability.finish answer_len=0 model=gemini-3.1-pro-preview` — Gemini повернула порожню відповідь. Старий код тихо `return`-ив, користувач думав що бот зламаний.
+
+### Виправлено
+
+`app/message_logic.py` `_process_message_inner`: при `not result.text` тепер викликається `send_response(msg, "⚠️ Модель повернула порожню відповідь...")` замість silent return. Також `finish_album_processing(msg, handled=False)` для album-альбомного циклу.
+
+### Acceptance
+
+`test_wiring.py:test_empty_answer_surfaced_to_user` — source check, що в `if not result.text` гілці є виклик `send_response` із `⚠️`-маркером. Якщо хтось у майбутньому поверне silent ignore — gate валиться.
+
+## 2026-05-03 — Session 109: Search gate restored as FILTER (not promoter) + 2 anti-pattern fixes
+
+### Проблема
+
+Користувач: "Бля, поверни як було у нас в самому початку відсікач пошуку, він мені всі токени зливає на пошук по будь-якій причині". Друзі тегнули бота — бот гуглив на питання про L2 lore, інженерні принципи двигуна, мисленнєві експерименти.
+
+### Корінь архітектурної помилки
+
+Сесія 098 ([Sept 26]) видалила `search` з-поміж route-ів planner-а (`_normalize_route` collapse-ав `search → chat`). Натомість `_validate_search` LLM-класифікатор СТАВИВ search-decision **повністю на себе**:
+
+```python
+# СТАРА БУГОВА АРХІТЕКТУРА:
+if decision.route == "chat" and _validate_search(task):
+    decision = SEARCH  # ← gate як PROMOTER
+```
+
+Тобто gate **promote**-ав chat→search на КОЖНОМУ текстовому turn-і. Це:
+1. Спалювало токени gate-LLM на КОЖНЕ повідомлення (не тільки на search-кандидати).
+2. Породжувало false positives: gate бачив "цікаве/специфічне" питання і голосував SEARCH (L2 lore, фізика двигуна).
+3. Кілька раундів prompt-tuning (sessions 106/108) додавали анти-приклади, але це боротьба з симптомами.
+
+### Оригінальна архітектура (відновлено)
+
+```python
+# НОВА (== ОРИГІНАЛЬНА):
+# Етап 1: planner вирішує route ВІЛЬНО (chat/search/image/video/voice/document).
+# Етап 2: ЯКЩО planner вибрав search → gate ВЕРИФІКУЄ.
+#         ЯКЩО gate каже CHAT → downgrade.
+if decision.route == "search" and not _validate_search(task):
+    decision = chat_final  # ← gate як FILTER
+```
+
+**Принцип:** gate не активує пошук, gate його ВІДСІКАЄ. Викликається лише коли planner вже вирішив що треба гуглити.
+
+### Зроблено
+
+**`agent/planner.py`:**
+- `_normalize_route`: дозволяє `search` як валідний route (раніше collapse-ав у chat).
+- `plan_message`: gate-логіку інвертовано — тепер фільтрує `route=="search"`, downgrade-ить на chat при rejection. Маркер `planner_source="search_gate_downgrade"`.
+- `_validate_search`: docstring оновлено, поведінка та сама (LLM gate з focused payload), але семантика змінилась — тепер це FILTER.
+
+**`core/prompts.py`:**
+- `PLANNER_SYSTEM_PROMPT`: дозволено route `search` як валідний вибір. Інструкція: "search — користувач хоче СВІЖІ дані з інтернету (новини, погода, ціни, курс, актуальні події; явні команди 'пошукай', 'загугли', 'що нового')". Категорія chat — теорія/lore/etymология/мисленнєві експерименти.
+- `SEARCH_GATE_SYSTEM_PROMPT`: залишається в комплекті як filter-prompt. Анти-приклади (двигун/тульп/л2/ідентифікуй) тепер працюють у режимі "відсікти зайвий пошук".
+
+### Acceptance / wiring
+
+- `test_wiring.py:test_validate_search_uses_gate_prompt` — gate використовує SEARCH_GATE_SYSTEM_PROMPT.
+- `test_wiring.py:test_planner_imports_search_gate_prompt` — import присутній.
+- `test_wiring.py:test_plan_message_wires_search_gate_as_filter` — НОВИЙ:
+  - `_validate_search` присутній у plan_message.
+  - Guard на `decision.route == "search"` (не chat) — це **filter** mode, не promoter.
+  - При rejection → `route="chat"` або маркер `search_gate_downgrade`.
+  - Anti-rule: якщо хтось переверне назад на promoter-mode (gate активує chat→search), test впаде з конкретним повідомленням.
+
+### Наслідки для UX
+
+- Звичайні чат-питання (теорія, lore, етимологія, історія, мисленнєві експерименти) → **planner відразу обирає chat**, gate не запускається. Token cost: 0.
+- Запит з explicit search-сигналом ("пошукай", "загугли", "новини NASA", "курс долара") → planner обирає search, gate перевіряє і **підтверджує** (бо явний намір). Cost: 1 gate-call.
+- Пограничний випадок (планувальник вирішив search неправильно — наприклад на "розкажи про двигун") → gate його **відсіче**, downgrade до chat. Cost: 1 gate-call. Замість false-positive search.
+
+### Master baseline
+
+121 passed, 3 skipped, 3 xfailed.
+
+### Артефакти
+
+- `Smartest-prod-backport/agent/planner.py` (gate flip: filter not promoter, route normalize allows search)
+- `Smartest-prod-backport/core/prompts.py` (PLANNER_SYSTEM_PROMPT дозволяє search route)
+- `Smartest-prod-backport/tests/acceptance/test_wiring.py` (architectural anti-test)
+- Prod `/opt/smartest/app` — обидва сервіси active
+
+## 2026-05-03 — Session 110: Comprehensive search-gate behavior tests
+
+### Контекст
+
+Sessions 098-108 — низка регресій із search gate. Корінь — мікс архітектурних плутанин (filter vs promoter), prompt-tuning замість фіксу архітектури, відсутність behavior-тестів на сам gate-flow. Session 109 відновив архітектуру. Цією сесією — повне behavior-покриття щоб ніхто (Codex/я/інша модель) знов не зламав ці інваріанти.
+
+### Зроблено
+
+Новий файл `tests/acceptance/test_search_gate.py` (17 тестів) — повне покриття search-gate semantic поведінки через monkeypatch замість source-check (це behavior tests, не wiring).
+
+**Категорії:**
+
+1. **`_normalize_route` accepts search** (3 тести):
+   - `search` route now valid (revert of Session 098 collapse).
+   - All modal routes (image/video/voice/document/chat) preserved.
+   - Unknown values → fall back to chat.
+
+2. **`_validate_search` LLM contract** (5 тестів):
+   - Calls `chat_once` with `SEARCH_GATE_SYSTEM_PROMPT` as system msg.
+   - Capability `planner_reasoning` (cheap model).
+   - Temperature 0 for determinism.
+   - Returns True iff verdict starts with "SEARCH".
+   - Returns False on "CHAT" verdict.
+   - **Fail-closed**: returns False on classifier exception.
+   - **Fail-closed**: returns False on garbled output.
+   - User message truncated to 600 chars (token cost guard).
+
+3. **`plan_message` filter behavior** (7 тестів — критично!):
+   - Planner picked search + gate confirms SEARCH → keeps `search` route.
+   - Planner picked search + gate says CHAT → **downgrade** to chat with `planner_source="search_gate_downgrade"`.
+   - Planner picked chat → gate **NOT called** (anti-rule: no token waste on chat turns).
+   - Planner picked image/video/voice/document → gate not called (irrelevant).
+   - SEARCH_ENABLED=false globally → gate skipped entirely.
+   - Downgrade preserves `use_reasoning` (don't lose user's `/think` intent).
+   - Empty user_text → gate not called (nothing to validate).
+
+4. **Logging contract** (1 тест):
+   - Gate logs `planner.search_gate verdict=X last=...` with first ~120 chars
+     for ops debugging.
+
+### Що це блокує
+
+Якщо хтось у майбутньому:
+- Поверне promoter-mode (gate активує chat→search) → `test_plan_message_keeps_search_when_gate_confirms` + інші filter-тести впадуть.
+- Прибере fail-closed гарантію → `test_validate_search_fails_closed_on_exception` падає.
+- Видалить SEARCH_GATE_SYSTEM_PROMPT з gate → wiring + content тести впадуть.
+- Поверне `_normalize_route` що робить search → chat collapse → `test_normalize_route_accepts_search` падає.
+- Викличе gate на кожному chat-turn → `test_plan_message_does_NOT_call_gate_when_planner_picked_chat` падає.
+
+### Результати
+
+| Master | Passed | Skipped | XFailed |
+|--------|--------|---------|---------|
+| Перед Session 110 | 121 | 3 | 3 |
+| Після (з search_gate тестами) | **138** | 3 | 3 |
+
+### Артефакти
+
+- `Smartest-prod-backport/tests/acceptance/test_search_gate.py` (новий, 17 тестів)
+- Prod — без змін (тільки тести)
