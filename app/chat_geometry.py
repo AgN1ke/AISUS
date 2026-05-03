@@ -46,6 +46,12 @@ def _strip_bot_mention(text: str, bot_username: Optional[str]) -> str:
 
 
 def _has_mention_ptb(update: Any, bot_username: str) -> bool:
+    """Detect @bot mention. Handles three cases:
+    1. Literal @username text (most common, especially mobile typing).
+    2. 'mention' entity (Telegram-formatted mention with literal text present).
+    3. 'text_mention' entity (UI click → entity carries hidden user link, no
+       literal text). For text_mention we match by bot.id or entity.user.username.
+    """
     msg = getattr(update, "effective_message", None)
     if msg is None:
         return False
@@ -53,11 +59,24 @@ def _has_mention_ptb(update: Any, bot_username: str) -> bool:
         getattr(msg, "caption_entities", None) or []
     )
     needle = f"@{bot_username}".lower()
-    if any(getattr(e, "type", None) in ("mention", "text_mention") for e in ents):
-        text = _message_text(msg)
-        if needle in text.lower():
+    context = getattr(update, "_bot", None)
+    bot = getattr(context, "bot", None)
+    bot_id = getattr(bot, "id", None)
+    text = _message_text(msg)
+    lowered = text.lower()
+    for entity in ents:
+        entity_type = getattr(entity, "type", None)
+        if entity_type == "text_mention":
+            user = getattr(entity, "user", None)
+            entity_user_id = getattr(user, "id", None)
+            entity_username = (getattr(user, "username", None) or "").lower()
+            if bot_id is not None and entity_user_id is not None and bot_id == entity_user_id:
+                return True
+            if bot_username and entity_username == bot_username.lower():
+                return True
+        if entity_type == "mention" and needle in lowered:
             return True
-    return needle in _message_text(msg).lower()
+    return needle in lowered
 
 
 def _has_mention_text(text: str, bot_username: str) -> bool:

@@ -2573,3 +2573,90 @@ Admin UI (`smartest.klawa.top`) — каша: ключі всіх провайд
 **Навігація:**
 - Кнопка "Промпти" в toolbar головної сторінки
 - Посилання "← Назад до конфігурації" на сторінці промптів
+## 2026-04-25 - Session 046
+
+### Problem / Goal
+
+Production `smartest.klawa.top` runs the old master-compatible schema, not the multitenant schema. The token calculator must therefore work without `transactions`, `pricing`, `accounts`, or any other multitenant tables. A previous multitenant deploy attempt exposed this mismatch and was rolled back.
+
+### What Changed
+
+- Added a production-compatible token usage ledger in `core/token_usage.py`. It writes append-only JSONL rows for future LLM calls and groups them by provider, model, and capability.
+- Wired `agent/llm.py::chat_once()` to record successful and failed LLM calls without changing the existing provider routing path.
+- Added a `Token calculator` panel to `app/admin_ui.py`. It shows tracked LLM input/output totals by model and the current stored memory context from existing `memory_recent`, `memory_long`, and `memory_core` tables.
+- Kept the implementation independent from multitenant billing tables so the production bot can start against the current production database.
+- The admin memory-token query closes its temporary DB pool explicitly because this backport runs the async DB query from a synchronous admin request handler.
+
+### Verification
+
+- `python -m pytest tests/test_071_admin_ui.py tests/test_087_token_usage.py -q` -> 13 passed.
+- `python -m compileall agent/llm.py core/token_usage.py app/admin_ui.py` -> OK.
+
+### Notes
+
+- Historical per-model LLM usage does not exist on old production, so the model breakdown starts filling after deployment.
+- Existing memory-token totals are visible immediately because they come from already deployed memory tables.
+## 2026-04-25 — Session 101-P: Prod memory participant guardrail
+
+Prod-backport отримав той самий memory hardening, що й multitenant staging, без переносу multitenant billing/portal runtime у prod.
+
+Зроблено:
+- у memory block перед user-повідомленням пишеться `[CHAT-TURN]` зі stable Telegram identity: sender id/username і reply-target author id/username;
+- `participant.*` core-факти записуються тільки якщо stable id присутній у поточному compressed block;
+- `chat.*` факти лишаються дозволеними для пам'яті самого чату;
+- memory prompt geometry виставлено під 10k reserve: 5k working, 4k long, 1k core;
+- organic long-term summary parser підтримує `MEMORY/QUOTES/TERMS/IMPORTANCE`;
+- локальні і prod env-ліміти мають бути: `MEMORY_CONTEXT_BUDGET=10000`, `MEMORY_WORKING_CONTEXT_BUDGET=5000`, `MEMORY_LONG_CONTEXT_BUDGET=4000`, `MEMORY_CORE_CONTEXT_BUDGET=1000`, `MEMORY_RECENT_BUDGET=5000`.
+
+Перевірка:
+- `python -m pytest -q` у `C:\Python_projects\Smartest-prod-backport` зелений.
+
+## 2026-05-02 — Session 102-P: Search marker/citation/weather guard
+
+Після live-кейсу `яка погода в києві буде у вівторок?` виявлено три окремі проблеми у prod-backport search path.
+
+Зроблено:
+- прибрано дублювання видимого search-marker: `execute_plan()` уже додає `⚠️УВАГА! ВІДБУВСЯ ПОШУК!⚠️`, а фінальний send-layer тепер не додає його вдруге;
+- повернуто citation post-processing для нового flow, де search evidence передається у `chat_final` як `[SEARCH-RESULT]`: голі `[1]`/`[2]` після відповіді знову конвертуються у domain-links;
+- додано захист для погодних запитів по Києву: weather task отримує українські weather-domain hints, UA/uk локаль, extract/retry hints на `sinoptik.ua/pohoda/kyiv`, а evidence по іншому місту не вважається sufficient.
+- search cache key піднято до `v4` і включено `preferred_domains`, deny-list, country/language та recency, щоб старий cached результат без weather hints не міг підсунутись у новий guarded retrieval.
+
+Перевірка:
+- `python -m py_compile app/message_logic.py agent/runner.py agent/search_task.py tests/test_032_search_task.py tests/test_106_search_flow.py tests/acceptance/test_search.py` -> OK;
+- `python -m pytest -q --noconftest tests/test_032_search_task.py tests/test_034_web_search.py tests/test_106_search_flow.py tests/acceptance/test_search.py` -> target green;
+- `python -m pytest -q --noconftest tests/test_060_message_logic.py::test_authed_group_explicit_search_uses_agent_route tests/test_061_message_logic_layers.py::test_execute_plan_routes_to_search` -> `2 passed`;
+- звичайний pytest без `--noconftest` локально не стартує, бо на цій машині зараз не піднята MariaDB на `127.0.0.1:3306`.
+- deploy на `/opt/smartest/app` через `deploy/deploy.cjs`: acceptance gate пройшов, `smartest-bot` і `smartest-admin` після restart мають `active`.
+
+### Round 2: загальна причина поганого retrieval
+
+Після ревʼю стало ясно, що weather guard був лише симптоматичним. Загальна причина: retrieval/evaluator могли прийняти evidence як sufficient через provider score, preferred domain або кілька доменів, навіть якщо результат не покривав ключові anchor-терміни з sub-query.
+
+Додано загальний guard:
+- `agent/tools/web_search.py` тепер рахує required query anchors і не пропускає result/ranking, якщо в title/snippet/url/full_content немає мінімального покриття цих anchors;
+- preferred domain більше не обходить anchor coverage: авторитетний домен без теми запиту не вважається релевантним;
+- `_match_count` враховує URL, бо точний slug часто містить сутність краще за title;
+- `agent/search_task.py` переоцінює sub-query coverage через той самий anchor принцип перед plan-level `sufficient`;
+- evaluator reason тепер може явно показати `query_anchor_mismatch`, а не маскувати це як generic low relevance;
+- додані регресії на generic mismatch: NASA Moon mission не має приймати Mars rover evidence, навіть якщо це `nasa.gov` і високий provider score.
+
+Перевірка:
+- `python -m py_compile agent/tools/web_search.py agent/search_task.py tests/test_034_web_search.py tests/test_038_search_evaluator.py` -> OK;
+- `python -m pytest -q --noconftest tests/test_032_search_task.py tests/test_034_web_search.py tests/test_038_search_evaluator.py tests/test_106_search_flow.py tests/acceptance/test_search.py tests/test_060_message_logic.py::test_authed_group_explicit_search_uses_agent_route tests/test_061_message_logic_layers.py::test_execute_plan_routes_to_search` -> target green (`44 passed, 1 xfailed`).
+
+### Round 3: regression audit після search fix
+
+Після питання про можливі побічні поломки прогнано ширший target suite по суміжних модулях.
+
+Знайдено й виправлено:
+- `media.router` після album changes повертає tuple `(instruction, media_kind_hint)`, але старі моки/старий контракт могли повертати просто string. `_resolve_media_instruction()` тепер приймає обидва формати, щоб не ламати старі media-route callsites;
+- тест clear command приведено до поточної безпечної multi-bot семантики: у групі очищення через `/c@bot_username`, bare `/c` лишається тільки для private;
+- тест search cache key оновлено під `v4`: hints `recency/preferred_domains/deny/country/language` тепер навмисно роблять різні cache keys.
+
+Перевірка:
+- `python -m pytest -q --noconftest tests/test_030_agent.py tests/test_031_planner.py tests/test_032_search_task.py tests/test_034_web_search.py tests/test_035_search_provider.py tests/test_038_search_evaluator.py tests/test_041_search_repository.py tests/test_042_search_memory.py tests/test_060_message_logic.py tests/test_061_message_logic_layers.py tests/test_071_admin_ui.py tests/test_106_search_flow.py tests/acceptance` -> green.
+
+Фінальна перевірка перед деплоєм:
+- `python -m py_compile agent/tools/web_search.py agent/search_task.py agent/runner.py app/message_logic.py agent/planner.py core/prompts.py app/admin_ui.py media/router.py media/downloader.py memory/manager.py memory/summarizer.py` -> OK;
+- той самий широкий target suite по search/planner/message/media/admin/acceptance -> green;
+- deploy через `deploy/deploy.cjs` пройшов acceptance gate, `smartest-bot` і `smartest-admin` після restart мають статус `active`.

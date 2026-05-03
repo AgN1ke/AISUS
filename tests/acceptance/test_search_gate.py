@@ -1,0 +1,337 @@
+"""Search-gate behavior tests (Session 109 architecture).
+
+Two-stage architecture:
+  1. Primary planner (heuristic / LLM) picks a route — including `search`.
+  2. IF planner picked `search` → focused gate-LLM verifies.
+     - Gate confirms (SEARCH) → keep `search` route.
+     - Gate rejects (CHAT) → downgrade to `chat`.
+     - Gate exception → fail-closed → downgrade to `chat`.
+
+Anti-rule: gate must NOT be called on chat-decisions (zero token cost on
+ordinary turns). Anti-rule: gate must NOT promote chat → search.
+"""
+from __future__ import annotations
+
+from types import SimpleNamespace
+
+import pytest
+
+import agent.planner as planner_mod
+from agent.planner import PlanDecision, PlannerInput
+
+
+def _make_task(text: str = "якесь питання") -> PlannerInput:
+    return PlannerInput(
+        user_text=text,
+        is_private=False,
+        addressed_via_mention=True,
+        reply_to_bot=False,
+        has_media_context=False,
+        media_kind=None,
+        dialogue_context=(),
+    )
+
+
+def _fake_response(content: str):
+    """Build a minimal openai-like response with .choices[0].message.content."""
+    msg = SimpleNamespace(content=content)
+    choice = SimpleNamespace(message=msg)
+    return SimpleNamespace(choices=[choice])
+
+
+# ===== _normalize_route accepts search =====
+
+
+def test_normalize_route_accepts_search():
+    """Session 109: search is now a valid planner route (was collapsed to chat)."""
+    assert planner_mod._normalize_route("search") == "search"
+    assert planner_mod._normalize_route("SEARCH") == "search"
+
+
+def test_normalize_route_accepts_modal_routes():
+    for route in ("image", "video", "voice", "document", "chat"):
+        assert planner_mod._normalize_route(route) == route
+
+
+def test_normalize_route_unknown_falls_back_to_chat():
+    assert planner_mod._normalize_route("foobar") == "chat"
+    assert planner_mod._normalize_route(None) == "chat"
+    assert planner_mod._normalize_route("") == "chat"
+
+
+# ===== _validate_search uses focused payload =====
+
+
+def test_validate_search_calls_chat_once_with_gate_prompt(monkeypatch):
+    """Gate sends focused payload (today_date + last_user_message +
+    recent_exchange) and reads the verdict from chat_once."""
+    captured = {}
+
+    def fake_chat_once(messages, **kwargs):
+        captured["messages"] = messages
+        captured["kwargs"] = kwargs
+        return _fake_response("SEARCH")
+
+    monkeypatch.setattr(planner_mod, "chat_once", fake_chat_once)
+
+    task = _make_task("яка погода в Києві зараз?")
+    result = planner_mod._validate_search(task)
+
+    assert result is True
+    # The system prompt MUST be the gate prompt
+    sys_msgs = [m for m in captured["messages"] if m["role"] == "system"]
+    assert sys_msgs, "gate must inject SEARCH_GATE_SYSTEM_PROMPT as system msg"
+    assert "детектор" in sys_msgs[0]["content"].lower() or "search" in sys_msgs[0]["content"].lower()
+    # Capability is planner_reasoning (cheap model)
+    assert captured["kwargs"].get("capability") == "planner_reasoning"
+    # Temperature 0 for deterministic verdict
+    assert captured["kwargs"].get("temperature") == 0
+
+
+def test_validate_search_returns_true_on_search_verdict(monkeypatch):
+    monkeypatch.setattr(
+        planner_mod, "chat_once", lambda *a, **kw: _fake_response("SEARCH")
+    )
+    assert planner_mod._validate_search(_make_task()) is True
+
+
+def test_validate_search_returns_false_on_chat_verdict(monkeypatch):
+    monkeypatch.setattr(
+        planner_mod, "chat_once", lambda *a, **kw: _fake_response("CHAT")
+    )
+    assert planner_mod._validate_search(_make_task()) is False
+
+
+def test_validate_search_fails_closed_on_exception(monkeypatch):
+    """If gate-LLM throws, _validate_search returns False (downgrade to chat).
+    Anti-rule: never default to SEARCH on classifier failure."""
+    def explode(*a, **kw):
+        raise RuntimeError("OpenAI 500")
+    monkeypatch.setattr(planner_mod, "chat_once", explode)
+    assert planner_mod._validate_search(_make_task()) is False
+
+
+def test_validate_search_treats_garbled_verdict_as_chat(monkeypatch):
+    """If the gate model returns junk (not 'SEARCH'/'CHAT'), default to chat."""
+    monkeypatch.setattr(
+        planner_mod, "chat_once",
+        lambda *a, **kw: _fake_response("ну якось так, мабуть"),
+    )
+    assert planner_mod._validate_search(_make_task()) is False
+
+
+def test_validate_search_strips_user_message_to_600_chars(monkeypatch):
+    """Gate payload truncates user_message to 600 chars to avoid token waste."""
+    captured = {}
+
+    def fake_chat_once(messages, **kwargs):
+        captured["messages"] = messages
+        return _fake_response("CHAT")
+
+    monkeypatch.setattr(planner_mod, "chat_once", fake_chat_once)
+    long_text = "x" * 5000
+    planner_mod._validate_search(_make_task(long_text))
+
+    user_payload = captured["messages"][-1]["content"]
+    # The truncated text must appear in payload, but not the full 5000-char input
+    assert "x" * 600 in user_payload
+    assert "x" * 5000 not in user_payload
+
+
+# ===== plan_message: gate as filter (search→chat downgrade) =====
+
+
+def test_plan_message_keeps_search_when_gate_confirms(monkeypatch):
+    """Planner picked search, gate says SEARCH → keep search route."""
+    monkeypatch.setattr(
+        planner_mod, "_planner_enabled", lambda: True
+    )
+    monkeypatch.setattr(
+        planner_mod, "_plan_with_model",
+        lambda task: PlanDecision(
+            route="search",
+            capability="search_web",
+            use_reasoning=False,
+            planner_source="llm",
+            notes="planner picked search",
+        ),
+    )
+    monkeypatch.setattr(
+        planner_mod, "chat_once",
+        lambda *a, **kw: _fake_response("SEARCH"),
+    )
+
+    decision = planner_mod.plan_message(_make_task("пошукай новини про NASA"))
+    assert decision.route == "search"
+    assert decision.capability == "search_web"
+
+
+def test_plan_message_downgrades_search_when_gate_rejects(monkeypatch):
+    """Planner picked search, gate says CHAT → downgrade to chat.
+
+    This is the core fix of Session 109: false-positive search picks
+    (game lore, theory, principles) get cut off by the gate."""
+    monkeypatch.setattr(planner_mod, "_planner_enabled", lambda: True)
+    monkeypatch.setattr(
+        planner_mod, "_plan_with_model",
+        lambda task: PlanDecision(
+            route="search",
+            capability="search_web",
+            use_reasoning=False,
+            planner_source="llm",
+            notes="planner picked search",
+        ),
+    )
+    monkeypatch.setattr(
+        planner_mod, "chat_once",
+        lambda *a, **kw: _fake_response("CHAT"),
+    )
+
+    decision = planner_mod.plan_message(_make_task("розкажи про танок хуман містіка в л2"))
+    assert decision.route == "chat"
+    assert decision.capability == "chat_final"
+    assert decision.planner_source == "search_gate_downgrade"
+
+
+def test_plan_message_does_NOT_call_gate_when_planner_picked_chat(monkeypatch):
+    """Anti-rule (Session 098-108 bug): gate must NOT fire on every chat turn.
+
+    Cost matters — gate-LLM call per chat-message was burning tokens."""
+    monkeypatch.setattr(planner_mod, "_planner_enabled", lambda: True)
+    monkeypatch.setattr(
+        planner_mod, "_plan_with_model",
+        lambda task: PlanDecision(
+            route="chat",
+            capability="chat_final",
+            use_reasoning=False,
+            planner_source="llm",
+            notes="planner picked chat",
+        ),
+    )
+    gate_calls = []
+    monkeypatch.setattr(
+        planner_mod, "_validate_search",
+        lambda task: gate_calls.append(task) or False,
+    )
+
+    decision = planner_mod.plan_message(_make_task("привіт як справи"))
+    assert decision.route == "chat"
+    assert len(gate_calls) == 0, (
+        "search gate must NOT be called when planner picked chat — "
+        "that was the old buggy promoter-mode burning tokens"
+    )
+
+
+def test_plan_message_does_NOT_call_gate_for_media_routes(monkeypatch):
+    """Gate is only relevant to text turns. Image/video/voice/document
+    routes never touch the gate."""
+    media_task = PlannerInput(
+        user_text="опиши",
+        is_private=False,
+        addressed_via_mention=True,
+        reply_to_bot=False,
+        has_media_context=True,
+        media_kind="image",
+        dialogue_context=(),
+    )
+    gate_calls = []
+    monkeypatch.setattr(
+        planner_mod, "_validate_search",
+        lambda task: gate_calls.append(task) or False,
+    )
+
+    decision = planner_mod.plan_message(media_task)
+    assert decision.route == "image"
+    assert len(gate_calls) == 0
+
+
+def test_plan_message_does_NOT_call_gate_when_search_disabled(monkeypatch):
+    """SEARCH_ENABLED=false → gate skipped, planner's search stays as search
+    (admin manually disabled feature; gate would be no-op anyway)."""
+    monkeypatch.setattr(planner_mod, "_planner_enabled", lambda: True)
+    monkeypatch.setattr(planner_mod, "_search_enabled", lambda: False)
+    monkeypatch.setattr(
+        planner_mod, "_plan_with_model",
+        lambda task: PlanDecision(
+            route="search",
+            capability="search_web",
+            use_reasoning=False,
+            planner_source="llm",
+            notes="planner picked search",
+        ),
+    )
+    gate_calls = []
+    monkeypatch.setattr(
+        planner_mod, "_validate_search",
+        lambda task: gate_calls.append(task) or True,
+    )
+
+    decision = planner_mod.plan_message(_make_task("пошукай"))
+    # When SEARCH disabled globally, gate is skipped entirely
+    assert len(gate_calls) == 0
+
+
+def test_plan_message_gate_downgrade_preserves_use_reasoning(monkeypatch):
+    """When gate downgrades search→chat, use_reasoning from original
+    decision is preserved (user's /think intent shouldn't be lost)."""
+    monkeypatch.setattr(planner_mod, "_planner_enabled", lambda: True)
+    monkeypatch.setattr(
+        planner_mod, "_plan_with_model",
+        lambda task: PlanDecision(
+            route="search",
+            capability="search_web",
+            use_reasoning=True,  # /think prefix
+            planner_source="llm",
+            notes="planner picked search",
+        ),
+    )
+    monkeypatch.setattr(
+        planner_mod, "chat_once",
+        lambda *a, **kw: _fake_response("CHAT"),
+    )
+
+    decision = planner_mod.plan_message(_make_task("/think чому небо синє"))
+    assert decision.route == "chat"
+    assert decision.use_reasoning is True  # preserved through downgrade
+
+
+def test_plan_message_does_NOT_call_gate_on_empty_user_text(monkeypatch):
+    """Empty user_text → no gate call (nothing to validate)."""
+    monkeypatch.setattr(planner_mod, "_planner_enabled", lambda: True)
+    monkeypatch.setattr(
+        planner_mod, "_plan_with_model",
+        lambda task: PlanDecision(
+            route="search",
+            capability="search_web",
+            use_reasoning=False,
+            planner_source="llm",
+            notes="",
+        ),
+    )
+    gate_calls = []
+    monkeypatch.setattr(
+        planner_mod, "_validate_search",
+        lambda task: gate_calls.append(task) or False,
+    )
+
+    decision = planner_mod.plan_message(_make_task(""))
+    # Empty text: gate skipped via guard `(task.user_text or "").strip()`
+    assert len(gate_calls) == 0
+
+
+# ===== logging: verdict + truncated user message =====
+
+
+def test_validate_search_logs_verdict_and_short_excerpt(monkeypatch, caplog):
+    """Gate must log verdict + first ~120 chars of user_msg for ops debugging."""
+    import logging
+    monkeypatch.setattr(
+        planner_mod, "chat_once",
+        lambda *a, **kw: _fake_response("SEARCH"),
+    )
+    with caplog.at_level(logging.INFO, logger="agent.planner"):
+        planner_mod._validate_search(_make_task("пошукай новини NASA Artemis"))
+    record_text = " ".join(r.getMessage() for r in caplog.records)
+    assert "planner.search_gate" in record_text
+    assert "verdict=SEARCH" in record_text
+    assert "пошукай" in record_text

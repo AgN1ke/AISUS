@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import hmac
@@ -18,6 +19,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Iterable
 from urllib.parse import parse_qs, urlencode, urlparse
+
+from memory import memory_manager
 
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(
@@ -579,6 +582,110 @@ def restart_service(service_name: str) -> tuple[bool, str]:
     ok = service_status(service_name) == "active"
     return ok, output
 
+
+def clear_bot_memory() -> tuple[bool, str]:
+    try:
+        asyncio.run(memory_manager.clear_global())
+    except Exception as exc:
+        logger.exception("admin.clear_memory_failed error=%s", exc)
+        return False, str(exc)
+    logger.info("admin.clear_memory_ok")
+    return True, "ok"
+
+
+def _fmt_int(value: object) -> str:
+    try:
+        return f"{int(value or 0):,}".replace(",", " ")
+    except Exception:
+        return "0"
+
+
+async def _fetch_memory_token_dashboard() -> dict[str, object]:
+    from db.connection import close_db, fetchall, fetchone
+
+    async def total(table: str) -> dict:
+        return await fetchone(
+            f"SELECT COUNT(*) AS rows_count, COALESCE(SUM(tokens), 0) AS tokens FROM {table}"
+        ) or {"rows_count": 0, "tokens": 0}
+
+    try:
+        recent = await total("memory_recent")
+        long = await total("memory_long")
+        core = await total("memory_core")
+        chats = await fetchall(
+            """
+            SELECT
+              ids.chat_id,
+              COALESCE(r.rows_count, 0) AS recent_rows,
+              COALESCE(r.tokens, 0) AS recent_tokens,
+              COALESCE(l.rows_count, 0) AS long_rows,
+              COALESCE(l.tokens, 0) AS long_tokens,
+              COALESCE(c.rows_count, 0) AS core_rows,
+              COALESCE(c.tokens, 0) AS core_tokens,
+              COALESCE(r.tokens, 0) + COALESCE(l.tokens, 0) + COALESCE(c.tokens, 0) AS total_tokens
+            FROM (
+              SELECT chat_id FROM memory_recent
+              UNION
+              SELECT chat_id FROM memory_long
+              UNION
+              SELECT chat_id FROM memory_core
+            ) ids
+            LEFT JOIN (
+              SELECT chat_id, COUNT(*) AS rows_count, COALESCE(SUM(tokens), 0) AS tokens
+              FROM memory_recent
+              GROUP BY chat_id
+            ) r ON r.chat_id = ids.chat_id
+            LEFT JOIN (
+              SELECT chat_id, COUNT(*) AS rows_count, COALESCE(SUM(tokens), 0) AS tokens
+              FROM memory_long
+              GROUP BY chat_id
+            ) l ON l.chat_id = ids.chat_id
+            LEFT JOIN (
+              SELECT chat_id, COUNT(*) AS rows_count, COALESCE(SUM(tokens), 0) AS tokens
+              FROM memory_core
+              GROUP BY chat_id
+            ) c ON c.chat_id = ids.chat_id
+            ORDER BY total_tokens DESC
+            LIMIT 20
+            """
+        ) or []
+        return {
+            "recent": recent,
+            "long": long,
+            "core": core,
+            "chats": chats,
+            "total_tokens": int(recent.get("tokens") or 0)
+            + int(long.get("tokens") or 0)
+            + int(core.get("tokens") or 0),
+        }
+    finally:
+        await close_db()
+
+
+def token_dashboard_data() -> dict[str, object]:
+    from core.token_usage import read_usage_events, summarize_usage_events, token_usage_log_path
+
+    usage = summarize_usage_events(read_usage_events())
+    try:
+        memory = asyncio.run(_fetch_memory_token_dashboard())
+        memory_error = ""
+    except Exception as exc:
+        memory = {
+            "recent": {"rows_count": 0, "tokens": 0},
+            "long": {"rows_count": 0, "tokens": 0},
+            "core": {"rows_count": 0, "tokens": 0},
+            "chats": [],
+            "total_tokens": 0,
+        }
+        memory_error = str(exc)
+    return {
+        "usage": usage,
+        "memory": memory,
+        "memory_error": memory_error,
+        "log_path": str(token_usage_log_path()),
+    }
+
+
 def read_current_config() -> dict[str, str]:
     return env_map_from_lines(read_env_lines(ENV_PATH))
 
@@ -623,6 +730,83 @@ def render_dashboard(values: dict[str, str], flash: str = "", flash_kind: str = 
         f'<div class="flash flash-{html.escape(flash_kind)}">{html.escape(flash)}</div>'
         if flash else ""
     )
+    token_data = token_dashboard_data()
+    usage = token_data.get("usage") or {}
+    memory = token_data.get("memory") or {}
+    log_path = html.escape(str(token_data.get("log_path") or ""))
+
+    usage_rows = ""
+    for row in usage.get("by_model") or []:
+        usage_rows += f"""<tr>
+          <td>{html.escape(str(row.get("provider") or "unknown"))}</td>
+          <td>{html.escape(str(row.get("model") or "unknown"))}</td>
+          <td>{html.escape(str(row.get("capability") or "unknown"))}</td>
+          <td>{_fmt_int(row.get("calls"))}</td>
+          <td>{_fmt_int(row.get("failed"))}</td>
+          <td>{_fmt_int(row.get("tokens_in"))}</td>
+          <td>{_fmt_int(row.get("tokens_out"))}</td>
+          <td>{_fmt_int(row.get("tokens_total"))}</td>
+        </tr>"""
+    if not usage_rows:
+        usage_rows = '<tr><td colspan="8" class="muted-cell">No tracked LLM calls yet. The table starts filling after the next bot responses.</td></tr>'
+
+    chat_rows = ""
+    for row in memory.get("chats") or []:
+        chat_rows += f"""<tr>
+          <td>{html.escape(str(row.get("chat_id") or ""))}</td>
+          <td>{_fmt_int(row.get("recent_tokens"))}</td>
+          <td>{_fmt_int(row.get("long_tokens"))}</td>
+          <td>{_fmt_int(row.get("core_tokens"))}</td>
+          <td>{_fmt_int(row.get("total_tokens"))}</td>
+        </tr>"""
+    if not chat_rows:
+        chat_rows = '<tr><td colspan="5" class="muted-cell">No memory rows found yet.</td></tr>'
+
+    recent = memory.get("recent") or {}
+    long = memory.get("long") or {}
+    core = memory.get("core") or {}
+    memory_error = str(token_data.get("memory_error") or "")
+    memory_error_html = (
+        f'<p class="token-warning">Memory token query failed: {html.escape(memory_error)}</p>'
+        if memory_error else ""
+    )
+    token_panel_html = f"""<section class="panel token-panel">
+      <div class="token-head">
+        <div>
+          <h2>Token calculator</h2>
+          <p class="panel-desc">Tracks all future LLM calls by provider/model/capability and shows the current memory context already stored in the production DB.</p>
+        </div>
+        <div class="token-log">Usage log: <code>{log_path}</code></div>
+      </div>
+      <div class="token-grid">
+        <div class="token-stat"><span>LLM calls</span><strong>{_fmt_int(usage.get("calls"))}</strong></div>
+        <div class="token-stat"><span>Failed calls</span><strong>{_fmt_int(usage.get("failed"))}</strong></div>
+        <div class="token-stat"><span>Input tokens</span><strong>{_fmt_int(usage.get("tokens_in"))}</strong></div>
+        <div class="token-stat"><span>Output tokens</span><strong>{_fmt_int(usage.get("tokens_out"))}</strong></div>
+        <div class="token-stat"><span>Total tracked</span><strong>{_fmt_int(usage.get("tokens_total"))}</strong></div>
+      </div>
+      <div class="token-table-wrap">
+        <h3>Tracked LLM calls by model</h3>
+        <table class="usage-table">
+          <thead><tr><th>Provider</th><th>Model</th><th>Capability</th><th>Calls</th><th>Failed</th><th>Input</th><th>Output</th><th>Total</th></tr></thead>
+          <tbody>{usage_rows}</tbody>
+        </table>
+      </div>
+      <div class="token-grid memory-grid">
+        <div class="token-stat"><span>Recent memory</span><strong>{_fmt_int(recent.get("tokens"))}</strong><em>{_fmt_int(recent.get("rows_count"))} rows</em></div>
+        <div class="token-stat"><span>Long memory</span><strong>{_fmt_int(long.get("tokens"))}</strong><em>{_fmt_int(long.get("rows_count"))} rows</em></div>
+        <div class="token-stat"><span>Core memory</span><strong>{_fmt_int(core.get("tokens"))}</strong><em>{_fmt_int(core.get("rows_count"))} rows</em></div>
+        <div class="token-stat"><span>Stored context total</span><strong>{_fmt_int(memory.get("total_tokens"))}</strong></div>
+      </div>
+      {memory_error_html}
+      <div class="token-table-wrap">
+        <h3>Working memory context by chat</h3>
+        <table class="usage-table">
+          <thead><tr><th>Chat</th><th>Recent</th><th>Long</th><th>Core</th><th>Total</th></tr></thead>
+          <tbody>{chat_rows}</tbody>
+        </table>
+      </div>
+    </section>"""
 
     # Which providers have keys?
     providers_with_keys: set[str] = set()
@@ -817,6 +1001,23 @@ body{{ margin:0; min-height:100vh; font-family:"IBM Plex Sans","Segoe UI",sans-s
 .panel h2{{ margin:0 0 8px; font-size:1.15rem; }}
 .panel-desc{{ margin:0 0 16px; color:var(--muted); line-height:1.5; }}
 
+/* Token calculator */
+.token-head{{ display:flex; justify-content:space-between; gap:16px; align-items:flex-start; flex-wrap:wrap; }}
+.token-log{{ color:var(--muted); font-size:.82rem; max-width:560px; word-break:break-all; }}
+.token-grid{{ display:grid; gap:12px; grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); margin:14px 0 18px; }}
+.token-stat{{ border:1px solid var(--line); border-radius:18px; background:rgba(255,255,255,.54); padding:14px; }}
+.token-stat span{{ display:block; color:var(--muted); font-size:.82rem; margin-bottom:6px; }}
+.token-stat strong{{ display:block; font-size:1.42rem; line-height:1.1; }}
+.token-stat em{{ display:block; color:var(--muted); font-size:.8rem; margin-top:4px; font-style:normal; }}
+.memory-grid{{ margin-top:20px; }}
+.token-table-wrap{{ overflow:auto; margin-top:12px; }}
+.token-table-wrap h3{{ margin:0 0 10px; font-size:1rem; }}
+.usage-table{{ width:100%; border-collapse:collapse; min-width:760px; font-size:.9rem; }}
+.usage-table th,.usage-table td{{ border-bottom:1px solid var(--line); padding:10px 9px; text-align:left; white-space:nowrap; }}
+.usage-table th{{ color:var(--muted); font-size:.78rem; text-transform:uppercase; letter-spacing:.04em; }}
+.muted-cell{{ color:var(--muted); }}
+.token-warning{{ color:var(--warn); margin:10px 0 0; }}
+
 /* Provider cards */
 .prov-grid{{ display:grid; gap:14px; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); }}
 .prov-card{{ padding:16px; border-radius:20px; }}
@@ -906,6 +1107,7 @@ option.no-key{{ color:#bbb; }}
     </div>
   </section>
   {flash_html}
+  {token_panel_html}
   <form method="post" action="/save">
     <div class="toolbar">
       <div class="toolbar-left">
@@ -916,6 +1118,7 @@ option.no-key{{ color:#bbb; }}
         <a class="btn btn-sec" href="/prompts">Промпти</a>
         <a class="btn btn-sec" href="/logs">Логи</a>
         <button class="btn btn-sec" type="submit" formaction="/logout" formmethod="post">Вийти</button>
+        <button class="btn btn-sec" type="submit" formaction="/clear-memory" formmethod="post" onclick="return confirm('Очистити всю пам\\'ять бота? Це видалить recent, long-term і core пам\\'ять для всіх чатів.');">Очистити пам'ять</button>
       </div>
     </div>
 
@@ -1035,7 +1238,7 @@ function refreshSearchDefault() {{
   Array.from(sel.options).forEach(opt => {{
     if (opt.value === 'auto') return;
     opt.disabled = !active.has(opt.value);
-    opt.textContent = opt.textContent.replace(/ \(немає ключа\)$/, '');
+    opt.textContent = opt.textContent.replace(/ \\(немає ключа\\)$/, '');
     if (opt.disabled) opt.textContent += ' (немає ключа)';
   }});
 }}
@@ -1440,6 +1643,10 @@ class SmartestAdminHandler(BaseHTTPRequestHandler):
             if not self._current_session():
                 self._redirect("/login?" + urlencode({"message": "Потрібен повторний вхід."})); return
             self._handle_save(); return
+        if parsed.path == "/clear-memory":
+            if not self._current_session():
+                self._redirect("/login?" + urlencode({"message": "Потрібен повторний вхід."})); return
+            self._handle_clear_memory(); return
         if parsed.path == "/save-prompts":
             if not self._current_session():
                 self._redirect("/login?" + urlencode({"message": "Потрібен повторний вхід."})); return
@@ -1576,6 +1783,17 @@ class SmartestAdminHandler(BaseHTTPRequestHandler):
         self._redirect("/prompts?" + urlencode({
             "flash": "Промпти збережено. Перезапустіть бота на головній сторінці для застосування.",
             "kind": "info",
+        }))
+
+    def _handle_clear_memory(self) -> None:
+        ok, _ = clear_bot_memory()
+        self._redirect("/?" + urlencode({
+            "flash": (
+                "Пам'ять бота очищено для всіх чатів."
+                if ok
+                else "Не вдалося очистити пам'ять бота."
+            ),
+            "kind": "info" if ok else "error",
         }))
 
     def _redirect(self, location: str) -> None:

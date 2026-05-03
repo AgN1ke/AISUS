@@ -197,3 +197,32 @@ def telegram_bot_token() -> str:
 
 def chat_join_password() -> str:
     return env_first("CHAT_JOIN_PASSWORD", "PASSWORD", default="")
+
+
+# ── Voice / TTS / STT ──────────────────────────────────────────────
+def openai_tts_api_key() -> str:
+    return env_first("OPENAI_TTS_API_KEY", "OPENAI_API_KEY", default="") or ""
+
+
+def openai_stt_api_key() -> str:
+    return env_first("OPENAI_STT_API_KEY", "OPENAI_API_KEY", default="") or ""
+
+
+def tts_base_url() -> str | None:
+    return env_url("OPENAI_TTS_BASE_URL", "OPENAI_BASE_URL")
+
+
+def stt_base_url() -> str | None:
+    return env_url("OPENAI_STT_BASE_URL", "OPENAI_BASE_URL")
+
+
+def tts_model() -> str:
+    return env_first("OPENAI_TTS_MODEL", default="gpt-4o-mini-tts") or "gpt-4o-mini-tts"
+
+
+def vocalizer_voice() -> str:
+    return env_first("OPENAI_VOCALIZER_VOICE", default="alloy") or "alloy"
+
+
+def whisper_model() -> str:
+    return env_first("OPENAI_WHISPER_MODEL", default="whisper-1") or "whisper-1"

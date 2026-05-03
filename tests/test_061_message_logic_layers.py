@@ -198,7 +198,7 @@ async def test_execute_plan_routes_to_search(monkeypatch):
 
     result = await message_logic.execute_plan(99950, task, plan)
 
-    assert result.text == "SEARCH: OK"
+    assert result.text == "SEARCH: OK\n\n⚠️УВАГА! ВІДБУВСЯ ПОШУК!⚠️"
     assert called["chat_id"] == 99950
     assert called["user_text"] == "пошукай новини"
     assert called["kwargs"]["turn_context_msgs"] == task.turn_context_msgs

@@ -22,3 +22,7 @@ tmp/
 *_analysis/
 logs/
 .env
+
+# Build artifacts (Session 110)
+deploy/node_modules/
+deploy/*.tar.gz

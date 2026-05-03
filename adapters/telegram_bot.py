@@ -9,6 +9,7 @@ from telegram.ext import MessageHandler as PTBMessageHandler
 
 from adapters.base import AbstractAdapter, UnifiedMessage
 from adapters.base import MessageHandler as UMH
+from media.album_registry import observe_album_message
 
 logger = logging.getLogger(__name__)
 
@@ -22,7 +23,13 @@ class TelegramBotAdapter(AbstractAdapter):
 
     async def start(self, handler: UMH) -> None:
         self._handler = handler
-        self.app = Application.builder().token(self.token).build()
+        # concurrent_updates=True is essential for albums: while item-1's handler
+        # is in settle/download, items 2..N must arrive in parallel so they can
+        # be observed in the registry before settle ends. Without this, PTB
+        # serializes handlers and album collection always sees only 1 item.
+        self.app = (
+            Application.builder().token(self.token).concurrent_updates(True).build()
+        )
         logger.info("telegram_bot.start name=%s", self.name)
 
         async def _on_message(update, context):
@@ -45,14 +52,21 @@ class TelegramBotAdapter(AbstractAdapter):
                     msg.reply_to_message.message_id if msg.reply_to_message else None
                 ),
                 has_photo=bool(msg.photo),
-                has_voice=bool(msg.voice),
+                has_voice=bool(msg.voice or msg.audio),
                 has_video=bool(msg.video),
                 has_document=bool(msg.document),
                 raw_update=update,
                 bot_username=context.bot.username,
+                has_video_note=bool(getattr(msg, "video_note", None)),
+                media_group_id=(str(msg.media_group_id) if msg.media_group_id else None),
             )
+            # Register album items as early as possible — before any heavy
+            # handler work — so siblings always end up in the registry
+            # regardless of processing order.
+            if um.media_group_id:
+                observe_album_message(um)
             logger.info(
-                "telegram_bot.update name=%s chat_id=%s message_id=%s private=%s text_len=%s photo=%s voice=%s video=%s document=%s",
+                "telegram_bot.update name=%s chat_id=%s message_id=%s private=%s text_len=%s photo=%s voice=%s video=%s document=%s media_group_id=%s",
                 self.name,
                 um.chat_id,
                 um.message_id,
@@ -62,6 +76,7 @@ class TelegramBotAdapter(AbstractAdapter):
                 um.has_voice,
                 um.has_video,
                 um.has_document,
+                um.media_group_id or "",
             )
             await handler(um)
 

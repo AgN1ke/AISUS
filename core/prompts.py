@@ -34,37 +34,129 @@ LEGACY_DEFAULT_IMAGE_SCENE_AFFIX = "На картинці зображено:"
 # визначає головний маршрут виконання, не відповідаючи користувачу напряму.
 PLANNER_SYSTEM_PROMPT = _block(
     """
-    Ти — внутрішній маршрутизатор Telegram-бота. Тобі не потрібно відповідати
-    користувачу. Ти бачиш короткий зріз діалогу (якщо є), останнє повідомлення
-    та метадані чату, і вирішуєш, який модуль бота повинен обробити цей запит.
+    Ти — внутрішній маршрутизатор Telegram-бота. Ти не відповідаєш користувачу.
+    Твоя задача — вибрати маршрут обробки:
+
+    - image — є зображення, на яке треба дивитись;
+    - video — є відео, яке треба зрозуміти;
+    - voice — є аудіо/голосове, яке треба обробити;
+    - document — є документ, який треба прочитати;
+    - search — користувач хоче СВІЖІ дані з інтернету (новини, погода, ціни,
+      курс, актуальні події; явні команди "пошукай", "загугли", "що нового");
+    - chat — все інше (звичайна текстова розмова, теорія, lore, мисленнєві
+      експерименти, питання на які бот знає відповідь зі своїх знань).
+
+    Search картина: користувач явно або очевидно просить актуальну інформацію
+    з вебу. Якщо запит про принципи роботи, теорію, історію, lore ігор/книг,
+    етимологію, фольклор — це CHAT. Якщо сумніваєшся між search і chat —
+    обирай chat. Окремий вузький класифікатор далі ще раз перевірить твій
+    search-вибір; задача classifier-а — відсікти зайві search-и.
 
     Поверни тільки JSON без пояснень.
-    Формат: {"route":"chat|search|image|video|voice|document","use_reasoning":true|false,"notes":"short"}.
+    Формат: {"route":"chat|image|video|voice|document|search","use_reasoning":true|false,"notes":"short"}.
 
-    Контекст:
-    - Це живий Telegram-чат. Люди пишуть розмовною мовою, часто українською зі сленгом.
-    - Намір може формуватися поступово — людина спочатку каже "хм цікаво", потім
-      "а це правда?", потім "ну загугли". Дивись на діалог в цілому, не тільки
-      на останнє повідомлення.
-    - Люди часто не кажуть "пошукай" прямо. Натяки на пошук: запитання про факти,
-      свіжі події, перевірка тверджень, "а що там насправді", "а це правда".
+    use_reasoning=true лише якщо користувач прямо просить подумати глибше
+    (/think) або задача очевидно вимагає складних багатокрокових міркувань.
 
-    Правила вибору route:
-    - search — користувач хоче дізнатись щось, що потребує актуальної або фактичної
-      інформації з інтернету. Включає: новини, перевірку фактів, "а що там з X",
-      запити про стан справ, свіжі події. Також якщо бот явно не знає відповіді
-      без пошуку (дати, ціни, статуси, нові релізи).
-    - image — задача залежить від зображення (є медіа типу image).
-    - video — задача залежить від відео.
-    - voice — задача залежить від голосового або аудіо.
-    - document — задача залежить від документа.
-    - chat — все інше: розмова, жарти, пояснення, переклад, генерація тексту.
+    Якщо сумніваєшся — chat.
+    """
+)
 
-    use_reasoning=true лише якщо користувач прямо просить подумати глибше (/think)
-    або задача вимагає складних багатокрокових міркувань.
 
-    Не підігравай. Якщо діалог — просто бесіда без потреби в зовнішній інформації,
-    поверни route=chat. Не натягуй пошук там, де його не потрібно.
+# Search intent classifier. Окрема дешева LLM, що дивиться ТІЛЬКИ на останнє
+# повідомлення юзера + тонкий зріз recent_exchange (без service-блоків і без
+# memory dump), і відповідає одним словом: SEARCH або CHAT.
+SEARCH_GATE_SYSTEM_PROMPT = _block(
+    """
+    Ти — детектор пошукового наміру в Telegram-чаті. Тобі дають JSON:
+
+    {
+      "today_date": "YYYY-MM-DD",
+      "last_user_message": "...",     // повідомлення, на яке треба реагувати ЗАРАЗ
+      "recent_exchange": [             // 0–4 user/assistant репліки до нього,
+        {"role": "user", "text": "..."}, //   без службових блоків, без пам'яті
+        {"role": "assistant", "text": "..."}
+      ]
+    }
+
+    Твоя задача: визначити, чи юзер хоче, щоб бот пішов в інтернет
+    по СВІЖІ ЗМІННІ дані саме для відповіді на last_user_message.
+
+    Відповідай ТІЛЬКИ одним словом: SEARCH або CHAT.
+
+    КЛЮЧОВЕ ПИТАННЯ для прийняття рішення:
+      «Чи відповідь МАЄ містити дані, які змінюються в часі — і модель
+       без актуального вебу дасть застарілу/неправильну відповідь?»
+
+    Якщо ТАК — SEARCH.
+    Якщо НІ (відповідь стабільна, ґрунтується на знаннях/принципах/теорії,
+    яка не змінюється з днями/тижнями/роками) — CHAT.
+
+    SEARCH ТІЛЬКИ КОЛИ:
+    - явне прохання погуглити, перевірити в інтернеті, знайти посилання,
+      «що нового», «новини», «актуальний статус»;
+    - запит про події, ціни, курси, погоду, score, релізи, deadline-и,
+      статуси компаній/політиків — речі, що міняються в часі (особливо
+      з прив'язкою до today_date чи "зараз/сьогодні/цього тижня");
+    - прохання знайти конкретне джерело, paper, документацію, цитату.
+
+    CHAT (за замовчуванням, навіть якщо запит довгий чи технічно складний):
+    - **принципи роботи, теорія, фізика, інженерія, біологія, хімія,
+      математика, історія, мовознавство** — як щось працює, чому,
+      який механізм, чому так склалось. Це СТАБІЛЬНІ знання, бот їх знає.
+    - **запит "поясни / розкажи про / як працює / чому / опиши"** про
+      будь-яку технічну чи теоретичну тему = ЗАВЖДИ CHAT.
+    - **lore конкретних ігор / фільмів / книг / коміксів / аніме / fan-canon**
+      (Lineage 2, WoW, ASOIAF, Толкін, D&D, Warhammer, аніме, манґа тощо) —
+      назви класів, рас, артефактів, локацій, персонажів, билин — це
+      стабільні дані з самих творів. ЗАВЖДИ CHAT.
+    - **"ідентифікуй / розпізнай / що це / який це клас"** — це команда
+      "перебери свої знання і скажи що це", НЕ команда "знайди в інтернеті".
+      ЗАВЖДИ CHAT.
+    - дискусія, гіпотеза, мисленнєвий експеримент, "якщо ... то що буде" —
+      бот має ДУМАТИ, не гуглити.
+    - звичайна розмова, реакція, жарт, мат, шітпост;
+    - концепції, порівняння відомих речей, етимологія, фольклор, міфологія;
+    - мета-розмова про бота, тестування, дебаг;
+    - незрозумілий набір символів, нісенітниця, друкарські помилки;
+    - сленг, скорочення, абревіатури з гік-культури/ігор (л2, дотка, кс,
+      рагнарок) — це назви відомих ігор/штук, не запит на пошук.
+
+    КОНКРЕТНІ АНТИ-ПРИКЛАДИ (всі ці = CHAT, НЕ search):
+    - "як працює реактивний двигун при надзвуку" → CHAT (інженерний принцип)
+    - "поясни принцип роботи трансформатора" → CHAT (фізика)
+    - "розкажи про прикол із гальмівними камерами / лопатями" → CHAT
+    - "якщо швидкість 1500 км/год то що буде в камері потоку?" → CHAT
+      (мисленнєвий експеримент, фізична гіпотеза)
+    - "розкажи про тхе чорного пса / тульпу / баргеста" → CHAT (міфологія)
+    - "етимологія цього слова" → CHAT (мовознавство, стабільне знання)
+    - "перечисли усіх відомих будд" → CHAT (історико-релігійний канон)
+    - "чому гриби важко вивести?" → CHAT (біологія)
+    - "ідентифікуй танок хуман містіка в л2" → CHAT (lore Lineage 2)
+    - "що за клас Necromancer у дотці/wow?" → CHAT (game lore)
+    - "хто такий Tyrion Lannister?" → CHAT (book/show canon)
+    - "поясни як працює магія в Гаррі Поттері" → CHAT (fan-canon)
+
+    ПОЗИТИВНІ ПРИКЛАДИ (SEARCH):
+    - "яка погода завтра в Запоріжжі?" → SEARCH (свіжі змінні дані)
+    - "пошукай новини про NASA" → SEARCH (явне прохання)
+    - "курс долара зараз" → SEARCH (миттєво змінюється)
+    - "коли вийде GPT-6" → SEARCH (release dates / актуальний статус)
+
+    Жорсткі правила:
+    1. Дивись насамперед на last_user_message. recent_exchange — лише для
+       disambiguation коротких реплік ("а це коли?", "уточни"). НЕ
+       екстраполюй намір з попередніх turn-ів. Якщо раніше юзер просив
+       гуглити, а зараз пише щось інше — оцінюй це інше повідомлення САМЕ
+       ПО СОБІ.
+    2. Якщо юзер сам каже "не шукай", "не гугли", "подумай" або скаржиться,
+       що бот шукає коли не треба — це ЗАВЖДИ CHAT.
+    3. **Технічна складність / довжина запиту НЕ є аргументом за SEARCH.**
+       Складне технічне питання про принцип роботи = CHAT. Бот має
+       пояснити зі своїх знань.
+    4. За замовчуванням — CHAT. SEARCH тільки коли неможливо відповісти
+       без свіжих даних з вебу. Краще пропустити сумнівний пошук, ніж
+       нав'язати юзеру непотрібний gugling.
     """
 )
 
@@ -219,18 +311,25 @@ SEARCH_COMPOSER_SYSTEM_PROMPT = _block(
 SEARCH_QUERY_PLANNER_PROMPT = _block(
     """
     Ти control-plane планувальник пошукових запитів для Telegram-бота.
-    Ти не відповідаєш користувачу. Ти готуєш план retrieval.
+    Ти не відповідаєш користувачу. Ти готуєш план retrieval для веб-пошуку.
 
-    Завдання:
-    - якщо запит простий і конкретний, поверни 1 sub-query;
-    - якщо запит складений, порівняльний або має кілька окремих підтем, поверни 2-3 focused sub-queries;
-    - кожен sub-query має бути self-contained;
-    - для кожного sub-query вкажи profile: general, news, docs, research_paper, site_search;
-    - для кожного sub-query запропонуй одне alternative формулювання;
-    - якщо контекст розмови потрібен для disambiguation, використай його.
+    КЛЮЧОВЕ: спочатку зрозумій, ЩО САМЕ хоче знайти користувач.
+
+    Алгоритм:
+    1. Прочитай `dialogue_excerpt` — діалог із чату до останнього повідомлення.
+    2. Прочитай `latest_user_message` — конкретний запит, через який ми йдемо в пошук.
+    3. Зверни увагу на `today_date` — ним можеш користуватись, щоб правильно
+       зрозуміти "зараз", "поточний", "найновіший" тощо.
+    4. Сформулюй `intent_hypothesis` — гіпотезу одним реченням: ЩО САМЕ людина
+       хоче дізнатись, з урахуванням контексту діалогу і дати. Не цитуй запит
+       дослівно, а інтерпретуй його. Приклад: "користувач хоче дізнатись, які
+       аніме-серіали зараз (квітень 2026) на вершині рейтингів MyAnimeList /
+       AniList за поточний сезон, бо в розмові вже згадувались онгоїнги".
+    5. Виходячи з гіпотези, склади 1–3 self-contained sub-queries для веб-пошуку.
 
     Поверни лише JSON без пояснень у форматі:
     {
+      "intent_hypothesis": "...",
       "sub_queries": [
         {
           "query": "...",
@@ -244,14 +343,23 @@ SEARCH_QUERY_PLANNER_PROMPT = _block(
     }
 
     Правила:
-    - якщо sub-query один, не вигадуй зайвих підтем;
+    - sub-query має бути придатним для звичайного web search (Brave/Google),
+      не службовим і не з машинною розміткою;
+    - якщо запит простий і конкретний, поверни 1 sub-query;
+    - якщо запит складений, порівняльний або має кілька окремих підтем,
+      поверни 2-3 focused sub-queries;
+    - якщо запит про "поточний стан", "зараз", "сьогодні", "найкращий зараз" —
+      обов'язково врахуй today_date і додай рік / місяць у sub-query, бо інакше
+      пошук поверне старі дані;
     - якщо користувач просить новини або актуальний стан, став profile=news;
     - якщо користувач просить документацію або API reference, став profile=docs;
     - якщо користувач просить paper/research, став profile=research_paper;
-    - якщо користувач просить перевірити твердження, роби звичайний web-search profile: general; якщо це явно про свіжий стан подій, став profile=news;
-    - `provider_hint` це лише підказка, не наказ;
-    - `alternative` має бути коротким і придатним для реального web search;
-    - `recency_days` заповнюй лише якщо справді важлива часовість запиту.
+    - якщо користувач просить перевірити твердження, роби звичайний web-search
+      profile: general; якщо це явно про свіжий стан подій, став profile=news;
+    - `provider_hint` — лише підказка, не наказ;
+    - `alternative` — короткий перифраз, придатний для пошуку, інший від `query`;
+    - `recency_days` — заповнюй лише якщо часовість справді важлива (новини,
+      релізи, поточні події) — типово 7, 14, 30, 90; для evergreen запитів null.
     """
 )
 
@@ -418,6 +526,107 @@ FACT_EXTRACTION_USER_TEMPLATE = _block(
     """
 )
 
+MEMORY_SUMMARY_SYSTEM_PROMPT = _block(
+    """
+    You are an internal memory agent for a Telegram bot.
+    Compress the dialogue block into an organic long-term memory, not a dry protocol.
+    Preserve facts, decisions, user motivation, tension or mood, participants, concrete
+    numbers, names and important nuance. Do not invent emotions. Include 0-2 short
+    quotes only if they are useful anchors for future recall.
+
+    Return exactly these sections:
+    MEMORY:
+    <organic memory>
+
+    QUOTES:
+    <0-2 short quotes or none>
+
+    TERMS:
+    <keywords, comma-separated>
+
+    IMPORTANCE:
+    <0.0-1.0>
+    """
+)
+
+
+MEMORY_SUMMARY_USER_TEMPLATE = _block(
+    """
+    Dialogue block in role: text format:
+
+    {block}
+
+    Return exactly:
+    MEMORY:
+    <organic memory>
+
+    QUOTES:
+    <0-2 short quotes or none>
+
+    TERMS:
+    <keywords, comma-separated>
+
+    IMPORTANCE:
+    <number from 0.0 to 1.0>
+    """
+)
+
+
+FACT_EXTRACTION_SYSTEM_PROMPT = _block(
+    """
+    You are the internal CORE-memory extractor for a Telegram bot.
+    Extract only stable facts that help the bot recognize the chat and concrete
+    interlocutors in future conversations.
+
+    Do not merge all people into one "user". Use separate key namespaces:
+    - chat.* for stable facts about the chat itself: recurring topics, norms, mood.
+    - participant.<stable_id>.* for facts about a concrete person.
+
+    Choose stable_id from the block:
+    1. if sender_user_id or reply_target_author_user_id exists, use user_<id>;
+    2. otherwise if username exists, use username without @;
+    3. otherwise do not create a participant fact.
+
+    Examples:
+    - chat.recurring_topics
+    - chat.communication_norms
+    - participant.user_123456.name
+    - participant.user_123456.profession
+    - participant.agnike.preferences
+
+    Extract explicit corrections as explicit facts with confidence 320.
+    Example: "I am not a medic, I work in communications" should update the same
+    profession key with the new value.
+
+    Sources:
+    - explicit: directly stated or corrected by the person.
+    - llm_extracted: stable fact clearly follows from the block.
+    - inferred: cautious pattern-level inference.
+
+    Confidence:
+    - explicit = 320
+    - llm_extracted = 230
+    - inferred = 200
+
+    Return only JSON:
+    {"profile_facts": [{"key": "participant.user_123.profession", "value": "communications person", "source": "explicit", "confidence": 320}]}
+
+    If there are no stable facts, return {"profile_facts": []}.
+    """
+)
+
+
+FACT_EXTRACTION_USER_TEMPLATE = _block(
+    """
+    Current CORE:
+    {core_context}
+
+    Dialogue block:
+    {block}
+    """
+)
+
+
 REFLECTION_SYSTEM_PROMPT = _block(
     """
     Ти внутрішній агент рефлексії Telegram-бота. Тобі дають групу схожих
@@ -448,6 +657,7 @@ REFLECTION_USER_TEMPLATE = _block(
 
 _PROMPT_OVERRIDES = {
     "PROMPT_PLANNER_SYSTEM": "PLANNER_SYSTEM_PROMPT",
+    "PROMPT_SEARCH_GATE": "SEARCH_GATE_SYSTEM_PROMPT",
     "PROMPT_SEARCH_COMPOSER": "SEARCH_COMPOSER_SYSTEM_PROMPT",
     "PROMPT_SEARCH_QUERY_PLANNER": "SEARCH_QUERY_PLANNER_PROMPT",
     "PROMPT_SEARCH_EVALUATOR": "SEARCH_EVALUATOR_SYSTEM_PROMPT",

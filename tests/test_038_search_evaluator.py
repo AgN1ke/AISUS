@@ -156,4 +156,67 @@ def test_evaluate_evidence_rejects_low_relevance_hits(monkeypatch):
     evaluation = search_task.evaluate_evidence(plan, evidence, attempt=1)
 
     assert evaluation.sufficient is False
-    assert evaluation.reason == "low_relevance_results"
+    assert evaluation.reason in {"low_relevance_results", "query_anchor_mismatch"}
+
+
+def test_evaluate_search_step_rejects_high_score_topic_mismatch(monkeypatch):
+    def fake_chat_once(*_args, **_kwargs):
+        raise RuntimeError("llm unavailable")
+
+    monkeypatch.setattr(search_task, "chat_once", fake_chat_once)
+
+    evaluation = search_task.evaluate_search_step(
+        "що нового про місію NASA на Місяць",
+        "NASA Moon mission latest news",
+        [
+            {
+                "title": "NASA Mars rover update",
+                "url": "https://www.nasa.gov/missions/mars-rover/",
+                "snippet": "NASA shares a Mars rover update.",
+                "relevance_score": 0.95,
+                "source_provider": "brave_search",
+            },
+            {
+                "title": "NASA ISS update",
+                "url": "https://www.nasa.gov/international-space-station/",
+                "snippet": "NASA reports an ISS crew update.",
+                "relevance_score": 0.9,
+                "source_provider": "brave_search",
+            },
+        ],
+        [],
+    )
+
+    assert evaluation.sufficient is False
+    assert evaluation.reason == "query_anchor_mismatch"
+
+
+def test_evaluate_search_step_accepts_required_anchors_in_url(monkeypatch):
+    def fake_chat_once(*_args, **_kwargs):
+        raise RuntimeError("llm unavailable")
+
+    monkeypatch.setattr(search_task, "chat_once", fake_chat_once)
+
+    evaluation = search_task.evaluate_search_step(
+        "яка погода в києві буде у вівторок?",
+        "погода Київ 2026-05-05",
+        [
+            {
+                "title": "Погода на 5 травня",
+                "url": "https://sinoptik.ua/pohoda/kyiv/2026-05-05",
+                "snippet": "Прогноз без опадів.",
+                "relevance_score": 0.8,
+                "source_provider": "brave_search",
+            },
+            {
+                "title": "Погода Київ",
+                "url": "https://meteofor.com.ua/weather-kyiv/",
+                "snippet": "Прогноз погоди для Києва.",
+                "relevance_score": 0.7,
+                "source_provider": "brave_search",
+            },
+        ],
+        [],
+    )
+
+    assert evaluation.sufficient is True

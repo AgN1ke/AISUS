@@ -33,22 +33,22 @@ def test_filter_and_rank_results_drops_known_junk_domains():
             "random forum text",
         ),
         _result(
-            "NASA Artemis",
-            "https://www.nasa.gov/missions/artemis/",
-            "NASA updates on Moon missions and Artemis program",
+            "NASA Apollo 11",
+            "https://www.nasa.gov/mission/apollo-11/",
+            "NASA archive about the Apollo 11 Moon landing mission.",
         ),
         _result(
-            "Reuters moon mission",
-            "https://www.reuters.com/world/us/nasa-update",
-            "Reuters reports on NASA and moon program",
+            "Reuters Apollo 11 anniversary",
+            "https://www.reuters.com/world/us/apollo-11-moon-landing/",
+            "Reuters reports on Apollo 11 and the Moon landing.",
         ),
     ]
 
     ranked = _filter_and_rank_results("Apollo 11 moon landing", items, 5)
 
     assert [item.title for item in ranked] == [
-        "NASA Artemis",
-        "Reuters moon mission",
+        "NASA Apollo 11",
+        "Reuters Apollo 11 anniversary",
     ]
 
 
@@ -71,6 +71,66 @@ def test_filter_and_rank_results_rejects_low_overlap_results():
     ranked = _filter_and_rank_results("USA flew to the Moon latest news", items, 5)
 
     assert ranked == []
+
+
+def test_filter_and_rank_results_requires_topic_anchors_on_preferred_domains():
+    items = [
+        _result(
+            "NASA Mars rover update",
+            "https://www.nasa.gov/missions/mars-rover/",
+            "NASA shares a Mars rover engineering update.",
+            relevance=0.95,
+        )
+    ]
+
+    ranked = _filter_and_rank_results("NASA Moon mission latest news", items, 5)
+
+    assert ranked == []
+
+
+def test_filter_and_rank_results_accepts_url_anchor_match():
+    items = [
+        _result(
+            "Погода на 5 травня",
+            "https://sinoptik.ua/pohoda/kyiv/2026-05-05",
+            "Прогноз без опадів.",
+            relevance=0.75,
+        )
+    ]
+
+    ranked = _filter_and_rank_results("погода Київ 2026-05-05", items, 5)
+
+    assert [item.url for item in ranked] == [
+        "https://sinoptik.ua/pohoda/kyiv/2026-05-05"
+    ]
+
+
+def test_search_cache_key_includes_domain_and_locale_hints():
+    plain = web_search._search_cache_query(
+        "погода Київ 2026-05-05",
+        "general",
+        "general",
+        None,
+        (),
+        (),
+        None,
+        (),
+    )
+    hinted = web_search._search_cache_query(
+        "погода Київ 2026-05-05",
+        "general",
+        "general",
+        None,
+        ("sinoptik.ua",),
+        (),
+        "UA",
+        ("uk",),
+    )
+
+    assert plain != hinted
+    assert "allow=sinoptik.ua" in hinted
+    assert "country=UA" in hinted
+    assert "lang=uk" in hinted
 
 
 @pytest.mark.asyncio

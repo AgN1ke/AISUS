@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import logging
 import re
 import time
 from functools import lru_cache
@@ -8,6 +10,8 @@ from typing import Any, Dict, List, Optional
 
 import requests
 from openai import OpenAI
+
+logger = logging.getLogger(__name__)
 
 from core.env import (
     GEMINI_DEFAULT_BASE_URL,
@@ -299,31 +303,20 @@ def _chat_once_gemini(
         "x-goog-api-key": binding.api_key,
         "Content-Type": "application/json",
     }
-    last_exc: Exception | None = None
-    for attempt in range(3):
-        if attempt:
-            time.sleep(3)
+    response = requests.post(url, headers=headers, json=payload, timeout=60)
+    try:
+        response.raise_for_status()
+    except requests.HTTPError as exc:
+        detail = ""
         try:
-            response = requests.post(url, headers=headers, json=payload, timeout=60)
-        except requests.exceptions.Timeout as exc:
-            last_exc = exc
-            continue
-        try:
-            response.raise_for_status()
-        except requests.HTTPError as exc:
+            detail = response.text[:1000]
+        except Exception:
             detail = ""
-            try:
-                detail = response.text[:1000]
-            except Exception:
-                detail = ""
-            raise RuntimeError(
-                f"Gemini request failed with status {response.status_code}: {detail or exc}"
-            ) from exc
-        data = response.json()
-        return _response_with_content(_gemini_extract_text(data))
-    raise requests.exceptions.Timeout(
-        f"Gemini timed out after 3 attempts (model={model})"
-    ) from last_exc
+        raise RuntimeError(
+            f"Gemini request failed with status {response.status_code}: {detail or exc}"
+        ) from exc
+    data = response.json()
+    return _response_with_content(_gemini_extract_text(data))
 
 
 def tool_spec() -> List[Dict[str, Any]]:
@@ -373,17 +366,40 @@ def make_messages(
     return messages
 
 
-def chat_once(
+_DEFAULT_RETRY_ATTEMPTS = 3
+_DEFAULT_RETRY_BASE_DELAY = 2.0  # 2s, 4s, 8s exponential backoff
+
+
+def _is_transient_timeout_error(exc: BaseException) -> bool:
+    """Return True if the exception looks like a transient timeout/connection issue worth retrying."""
+    if isinstance(exc, (requests.exceptions.Timeout, requests.exceptions.ConnectionError)):
+        return True
+    if isinstance(exc, (asyncio.TimeoutError, TimeoutError)):
+        return True
+    try:
+        from openai import APITimeoutError, APIConnectionError  # type: ignore
+        if isinstance(exc, (APITimeoutError, APIConnectionError)):
+            return True
+    except Exception:
+        pass
+    name = type(exc).__name__.lower()
+    if "timeout" in name or "connectionerror" in name:
+        return True
+    return False
+
+
+def _dispatch_chat_once(
+    *,
+    binding: ProviderBinding,
+    model_name: str,
     messages: List[Dict[str, Any]],
-    tools: Optional[List[Dict[str, Any]]] = None,
-    use_reasoning: bool = False,
-    model: Optional[str] = None,
-    temperature: float = 0.3,
-    capability: str = "chat_final",
-    **extra_kwargs: Any,
+    tools: Optional[List[Dict[str, Any]]],
+    use_reasoning: bool,
+    temperature: float,
+    capability: str,
+    extra_kwargs: Dict[str, Any],
 ):
-    binding = _resolve_binding(capability, model_override=model)
-    model_name = _pick_model(binding, use_reasoning, model_override=model)
+    """Single-attempt dispatch — no retries."""
     if is_gemini_native(binding):
         return _chat_once_gemini(
             binding,
@@ -406,3 +422,106 @@ def chat_once(
         kwargs.update(_maybe_reasoning_args(capability, use_reasoning))
     kwargs.update(extra_kwargs)
     return _get_client(binding).chat.completions.create(**kwargs)
+
+
+def _dispatch_with_retry(
+    *,
+    binding: ProviderBinding,
+    model_name: str,
+    messages: List[Dict[str, Any]],
+    tools: Optional[List[Dict[str, Any]]],
+    use_reasoning: bool,
+    temperature: float,
+    capability: str,
+    extra_kwargs: Dict[str, Any],
+    attempts: int = _DEFAULT_RETRY_ATTEMPTS,
+    base_delay: float = _DEFAULT_RETRY_BASE_DELAY,
+):
+    """Call _dispatch_chat_once with exponential-backoff retry on transient timeouts."""
+    last_exc: BaseException | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            return _dispatch_chat_once(
+                binding=binding,
+                model_name=model_name,
+                messages=messages,
+                tools=tools,
+                use_reasoning=use_reasoning,
+                temperature=temperature,
+                capability=capability,
+                extra_kwargs=extra_kwargs,
+            )
+        except Exception as exc:
+            last_exc = exc
+            if not _is_transient_timeout_error(exc) or attempt >= attempts:
+                raise
+            delay = base_delay * (2 ** (attempt - 1))
+            logger.warning(
+                "llm.retry attempt=%s/%s delay=%.1fs provider=%s model=%s error_type=%s error=%s",
+                attempt,
+                attempts,
+                delay,
+                binding.provider,
+                model_name,
+                type(exc).__name__,
+                str(exc)[:200],
+            )
+            time.sleep(delay)
+    if last_exc is not None:
+        raise last_exc  # pragma: no cover
+    raise RuntimeError("llm.retry exhausted without result")  # pragma: no cover
+
+
+def chat_once(
+    messages: List[Dict[str, Any]],
+    tools: Optional[List[Dict[str, Any]]] = None,
+    use_reasoning: bool = False,
+    model: Optional[str] = None,
+    temperature: float = 0.3,
+    capability: str = "chat_final",
+    **extra_kwargs: Any,
+):
+    binding = _resolve_binding(capability, model_override=model)
+    model_name = _pick_model(binding, use_reasoning, model_override=model)
+    started_at = time.monotonic()
+    try:
+        response = _dispatch_with_retry(
+            binding=binding,
+            model_name=model_name,
+            messages=messages,
+            tools=tools,
+            use_reasoning=use_reasoning,
+            temperature=temperature,
+            capability=capability,
+            extra_kwargs=extra_kwargs,
+        )
+    except Exception as exc:
+        try:
+            from core.token_usage import record_llm_usage
+
+            record_llm_usage(
+                provider=binding.provider,
+                model=model_name,
+                capability=capability,
+                messages=messages,
+                status="failed",
+                latency_ms=int((time.monotonic() - started_at) * 1000),
+                error_text=str(exc),
+            )
+        except Exception:
+            pass
+        raise
+    try:
+        from core.token_usage import record_llm_usage
+
+        record_llm_usage(
+            provider=binding.provider,
+            model=model_name,
+            capability=capability,
+            messages=messages,
+            response=response,
+            latency_ms=int((time.monotonic() - started_at) * 1000),
+        )
+    except Exception:
+        pass
+    return response

@@ -52,6 +52,8 @@ class UnifiedMessage:
     # Допоміжне
     bot_username: Optional[str] = None
     geometry: MessageGeometry = field(default_factory=MessageGeometry)
+    has_video_note: bool = False
+    media_group_id: Optional[str] = None
 
 class AbstractAdapter:
     name: str

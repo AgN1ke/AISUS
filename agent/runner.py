@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import datetime as _dt
 import json
 import logging
 import re
 import urllib.parse
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 
 from agent.llm import chat_once, make_messages, tool_spec
 from agent.search_task import (
@@ -86,6 +87,33 @@ def _is_explicit_search_intent(user_text: str) -> bool:
     return is_explicit_search_request(user_text)
 
 
+@dataclass
+class SearchOutcome:
+    """Result of running web search before composition by chat_final.
+
+    The evidence_block is plain text formatted for inclusion as a system
+    [SEARCH-RESULT] message in chat_final's context. Status reflects what
+    actually happened so chat_final can phrase the answer (or refusal)
+    naturally.
+    """
+    status: str  # "ok" | "best_effort" | "no_results" | "insufficient_evidence"
+    evidence_block: str
+    queries: list[str] = field(default_factory=list)
+    citation_map: dict[int, str] = field(default_factory=dict)
+    intent_hypothesis: str = ""
+
+
+def _today_iso() -> str:
+    return _dt.datetime.utcnow().date().isoformat()
+
+
+def _now_system_msg() -> dict:
+    return {
+        "role": "system",
+        "content": f"[NOW]\ntoday_date_utc: {_today_iso()}",
+    }
+
+
 def _should_use_agent(user_text: str) -> bool:
     strict = env_bool("THINKING_STRICT", default=True)
     text = (user_text or "").strip().lower()
@@ -97,13 +125,15 @@ def _should_use_agent(user_text: str) -> bool:
 
 
 def _needs_reasoning(user_text: str) -> bool:
+    """Reasoning trigger: only explicit '/think' prefix.
+
+    Per audit (Session 101 round 2, B-004/B-005 → DROP):
+    - 🧠 emoji removed (could appear in normal text by accident)
+    - 'роздумай' / 'step-by-step' / 'use reasoning' phrases removed (too fuzzy,
+      hard to verify, unintended activations)
+    """
     text = (user_text or "").strip().lower()
-    return (
-        text.startswith("/think")
-        or "🧠" in (user_text or "")
-        or "роздумай" in text
-        or "step-by-step" in text
-    )
+    return text.startswith("/think")
 
 
 def _normalize_query(user_text: str) -> str:
@@ -278,6 +308,7 @@ class SynthesisInput:
 
 _INLINE_CITATION_RE = re.compile(r"(?<!\[)\[(\d{1,2})\](?!\()")
 _LINKED_CITATION_RE = re.compile(r"\[\[(\d{1,2})\]\]\((https?://[^\s)]+)\)")
+_MARKDOWN_LINK_RE = re.compile(r"\[[^\]]+\]\(https?://[^\s)]+\)")
 
 
 def _truncate_evidence_text(text: str | None, limit: int) -> str:
@@ -443,37 +474,86 @@ def _build_synthesis_user_message(
     return "\n\n".join(part for part in parts if part.strip()), citation_map
 
 
+def _domain_label_from_url(url: str) -> str:
+    """Extract a clean domain label like 'nasa.gov' for citation rendering."""
+    try:
+        netloc = urllib.parse.urlparse((url or "").strip()).netloc
+    except Exception:
+        return ""
+    netloc = (netloc or "").lower()
+    if netloc.startswith("www."):
+        netloc = netloc[4:]
+    return netloc or ""
+
+
 def _apply_inline_citation_links(
     answer: str,
     citation_map: dict[int, str],
 ) -> str:
+    """Replace `[N]` and `[[N]](url)` with `[domain.com](url)`.
+
+    B-070: switched from `[[N]](url)` numeric format (where the number was
+    often wrong/duplicated) to domain-based labels — readers see the source
+    immediately.
+    """
     if not citation_map:
         return answer
 
-    def replace(match: re.Match[str]) -> str:
+    # First pass: convert already-linked [[N]](url) directly to [domain](url)
+    def replace_linked(match: re.Match[str]) -> str:
+        url = (match.group(2) or "").strip()
+        domain = _domain_label_from_url(url)
+        if not domain:
+            return match.group(0)
+        return f"[{domain}]({url})"
+
+    answer = _LINKED_CITATION_RE.sub(replace_linked, answer)
+
+    # Second pass: bare [N] → [domain](url) using citation_map
+    def replace_bare(match: re.Match[str]) -> str:
         index = int(match.group(1))
         url = (citation_map.get(index) or "").strip()
         if not url:
             return match.group(0)
-        return f"[[{index}]]({url})"
+        domain = _domain_label_from_url(url)
+        if not domain:
+            return match.group(0)
+        return f"[{domain}]({url})"
 
-    return _INLINE_CITATION_RE.sub(replace, answer)
+    return _INLINE_CITATION_RE.sub(replace_bare, answer)
 
 
 def _ensure_answer_has_citations(
     answer: str,
     citation_map: dict[int, str],
 ) -> str:
+    """Append `[domain](url)` references to the end if model produced no citations."""
     if not citation_map:
         return answer
-    if _LINKED_CITATION_RE.search(answer) or _INLINE_CITATION_RE.search(answer):
+    if (
+        _MARKDOWN_LINK_RE.search(answer)
+        or _LINKED_CITATION_RE.search(answer)
+        or _INLINE_CITATION_RE.search(answer)
+    ):
         return answer
-    fallback = " ".join(
-        f"[[{index}]]({url})" for index, url in list(citation_map.items())[:2] if url
-    )
-    if not fallback:
+    parts: list[str] = []
+    for _index, url in list(citation_map.items())[:2]:
+        if not url:
+            continue
+        domain = _domain_label_from_url(url)
+        if domain:
+            parts.append(f"[{domain}]({url})")
+    if not parts:
         return answer
-    return f"{answer.rstrip()} {fallback}".strip()
+    return f"{answer.rstrip()} {' '.join(parts)}".strip()
+
+
+def _citation_map_from_results(results: list[NormalizedResult]) -> dict[int, str]:
+    return {
+        index: item.url
+        for index, item in enumerate(results[:8], start=1)
+        if (item.url or "").strip()
+    }
 
 
 async def _collect_search_evidence(
@@ -732,7 +812,7 @@ async def _run_direct_search(
     use_reasoning: bool,
     *,
     turn_context_msgs: list[dict] | None = None,
-) -> str:
+) -> SearchOutcome:
     tasks = await build_search_tasks(
         chat_id,
         user_text,
@@ -750,7 +830,15 @@ async def _run_direct_search(
 
     if not tasks:
         logger.warning("search.empty_query chat_id=%s", chat_id)
-        return await run_simple(chat_id, user_text)
+        return SearchOutcome(
+            status="no_results",
+            evidence_block=(
+                "status: no_results\n"
+                "details: пошуковий планувальник не повернув жодного валідного "
+                "запиту для цього повідомлення."
+            ),
+            queries=[],
+        )
 
     context = await memory_manager.select_context(
         chat_id=chat_id, user_query=user_text, system_prompt=None
@@ -931,8 +1019,9 @@ async def _run_direct_search(
 
     if not aggregated_results:
         failure_text = (
-            "Не знайшов надійних результатів за цим запитом. "
-            "Спробуй уточнити формулювання або часовий період."
+            "status: no_results\n"
+            "details: пошук відпрацював, але провайдери не повернули нічого "
+            "придатного для відповіді на цей запит."
         )
         await _append_search_memory_event(
             chat_id,
@@ -948,7 +1037,11 @@ async def _run_direct_search(
             [query[:120] for query in executed_queries],
             total_attempts,
         )
-        return failure_text
+        return SearchOutcome(
+            status="no_results",
+            evidence_block=failure_text,
+            queries=planned_queries,
+        )
 
     final_sufficient = bool(evaluation and evaluation.sufficient)
     if not final_sufficient and _search_evidence_is_actionable(
@@ -958,16 +1051,23 @@ async def _run_direct_search(
         final_sufficient = True
 
     if not final_sufficient:
-        failure_text = (
-            "Не зміг зібрати достатньо надійних джерел для нормальної відповіді. "
-            "Спробуй уточнити тему, подію або часовий період."
+        partial_block = _build_evidence_block(
+            user_text=user_text,
+            planned_queries=planned_queries,
+            aggregated_results=aggregated_results,
+            aggregated_pages=aggregated_pages,
+            status_label="insufficient_evidence",
+            note=(
+                "Зібрані результати неповні. Не вигадуй того, чого тут немає; "
+                "якщо для відповіді на запит даних мало — прямо скажи це юзеру."
+            ),
         )
         await _append_search_memory_event(
             chat_id,
             user_text,
             planned_queries,
             aggregated_results,
-            failure_text,
+            partial_block,
             status="insufficient_evidence",
         )
         logger.warning(
@@ -979,76 +1079,83 @@ async def _run_direct_search(
             len(aggregated_pages),
             aggregated_coverage,
         )
-        return failure_text
+        return SearchOutcome(
+            status="insufficient_evidence",
+            evidence_block=partial_block,
+            queries=planned_queries,
+            citation_map=_citation_map_from_results(aggregated_results),
+        )
 
-    evidence_parts = [
-        f"Початковий запит користувача:\n{user_text}",
-        "Заплановані пошукові підзапити:\n"
-        + "\n".join(f"- {query}" for query in planned_queries),
-        f"Результати пошуку:\n{_format_search_hits(aggregated_results)}",
-    ]
-    page_block = _format_page_evidence(aggregated_pages)
-    if page_block:
-        evidence_parts.append(f"Тексти сторінок:\n{page_block}")
-
-    synthesis_input = _build_synthesis_input(
-        user_text,
-        EvidencePack(
-            results=aggregated_results,
-            sub_query_coverage=aggregated_coverage,
-            total_providers_used=len(provider_names),
-            total_results_before_filter=total_results_before_filter,
-            extraction_attempted=extraction_attempted,
-            pages=aggregated_pages,
-            retry_queries=aggregated_retry_queries,
-        ),
-        context,
+    status_label = "ok"
+    evidence_block = _build_evidence_block(
+        user_text=user_text,
+        planned_queries=planned_queries,
+        aggregated_results=aggregated_results,
+        aggregated_pages=aggregated_pages,
+        status_label=status_label,
     )
-    synthesis_user_message, citation_map = _build_synthesis_user_message(
-        synthesis_input
-    )
-    messages = make_messages(
-        search_synthesis_system_prompt(),
-        synthesis_input.dialogue_context,
-        synthesis_user_message,
-    )
-    response = chat_once(
-        messages,
-        tools=None,
-        use_reasoning=use_reasoning,
-        model=model,
-        capability="search_synthesis",
-        temperature=0,
-    )
-    answer = (response.choices[0].message.content or "").strip()
-    if not answer:
-        answer = "Не вдалося зібрати нормальну відповідь із результатів пошуку."
-    sources_block = _format_sources(aggregated_results)
-    if sources_block:
-        answer = f"{answer}\n\nДжерела:\n{sources_block}".strip()
-    answer = _strip_sources_block(answer)
-    answer = _apply_inline_citation_links(answer, citation_map)
-    answer = _ensure_answer_has_citations(answer, citation_map)
     await _append_search_memory_event(
         chat_id,
         user_text,
         planned_queries,
         aggregated_results,
-        answer,
-        status="success",
+        evidence_block,
+        status=status_label,
     )
     logger.info(
-        "search.finish chat_id=%s answer_len=%s sources=%s model=%s attempts=%s sufficient=%s tasks=%s coverage=%s",
+        "search.finish chat_id=%s status=%s sources=%s pages=%s attempts=%s tasks=%s coverage=%s",
         chat_id,
-        len(answer),
+        status_label,
         len(aggregated_results),
-        model,
+        len(aggregated_pages),
         total_attempts,
-        final_sufficient,
         len(tasks),
         aggregated_coverage,
     )
-    return answer
+    return SearchOutcome(
+        status=status_label,
+        evidence_block=evidence_block,
+        queries=planned_queries,
+        citation_map=_citation_map_from_results(aggregated_results),
+    )
+
+
+def _build_evidence_block(
+    *,
+    user_text: str,
+    planned_queries: list[str],
+    aggregated_results: list[NormalizedResult],
+    aggregated_pages: list[NormalizedResult],
+    status_label: str,
+    note: str | None = None,
+) -> str:
+    """Format the [SEARCH-RESULT] payload that chat_final will read."""
+    parts: list[str] = []
+    parts.append(f"status: {status_label}")
+    parts.append(f"original_query:\n  {user_text.strip()}")
+    if planned_queries:
+        parts.append(
+            "sub_queries:\n"
+            + "\n".join(f"  - {query}" for query in planned_queries)
+        )
+    if note:
+        parts.append(f"note: {note}")
+    if aggregated_results:
+        parts.append("results:\n" + _format_search_hits(aggregated_results))
+    page_block = _format_page_evidence(aggregated_pages)
+    if page_block:
+        parts.append("pages:\n" + page_block)
+    parts.append(
+        "instructions:\n"
+        "  - Це результати веб-пошуку, виконані за рішенням планувальника.\n"
+        "  - Відповідай юзеру СВОЇМИ словами в стилі бесіди, спираючись на ці результати.\n"
+        "  - Можеш цитувати конкретні факти інлайн через [N] — посилання беруться з results.\n"
+        "  - Не додавай окремий блок 'Джерела' з URL, не дампи URL текстом.\n"
+        "  - Якщо в results нема нічого по темі — чесно скажи юзеру, що в інтернеті\n"
+        "    конкретно по цьому запиту нічого надійного не знайшлось, і запропонуй\n"
+        "    переформулювати або уточнити (без копіпасти службового тексту)."
+    )
+    return "\n\n".join(parts)
 
 
 async def run_search(
@@ -1058,12 +1165,37 @@ async def run_search(
     *,
     turn_context_msgs: list[dict] | None = None,
 ) -> str:
-    return await _run_direct_search(
+    """Run web search, then ask chat_final to compose the user-facing reply.
+
+    The search planner picks queries and runs retrieval. The full evidence is
+    handed to the main chat_final model as a [SEARCH-RESULT] system message
+    in its context, alongside dialogue history. chat_final composes the reply
+    naturally — adapted to Telegram, in its own voice — instead of relying on
+    a separate synthesis model.
+    """
+    outcome = await _run_direct_search(
         chat_id,
         user_text,
         use_reasoning,
         turn_context_msgs=turn_context_msgs,
     )
+
+    search_msg = {
+        "role": "system",
+        "content": f"[SEARCH-RESULT]\n{outcome.evidence_block}",
+    }
+    augmented_ctx = list(turn_context_msgs or []) + [search_msg]
+    answer = await run_capability(
+        chat_id,
+        user_text,
+        capability="chat_final",
+        use_reasoning=use_reasoning,
+        turn_context_msgs=augmented_ctx,
+    )
+    answer = (answer or "").strip()
+    answer = _apply_inline_citation_links(answer, outcome.citation_map)
+    answer = _ensure_answer_has_citations(answer, outcome.citation_map)
+    return answer
 
 
 async def run_capability(
@@ -1086,6 +1218,9 @@ async def run_capability(
     )
     context = _merge_turn_context(context, turn_context_msgs)
     context = trim_terminal_user_duplicate(context, user_text)
+    # Inject current date so the model can reason about "now", "today", and
+    # the freshness of any [SEARCH-RESULT] block in the same context.
+    context = [_now_system_msg(), *context]
     system_prompt = _system_prompt_for_capability(capability)
     model = capability_model(capability)
     messages = make_messages(system_prompt, context, user_text)
@@ -1172,7 +1307,7 @@ async def run_agent(chat_id: int, user_text: str) -> str:
         return await run_simple(chat_id, user_text)
 
     if search_enabled and _is_explicit_search_intent(user_text):
-        return await _run_direct_search(chat_id, user_text, use_reasoning)
+        return await run_search(chat_id, user_text, use_reasoning)
 
     context = await memory_manager.select_context(
         chat_id=chat_id, user_query=query, system_prompt=None

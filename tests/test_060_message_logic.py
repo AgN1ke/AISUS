@@ -198,8 +198,50 @@ async def test_authed_group_reply_to_bot_is_allowed(monkeypatch):
     assert msg._sent == ["OK: відповідь без @mention"]
     assert msg._sent_kwargs[-1]["parse_mode"] == "HTML"
     assert msg._sent_kwargs[-1]["disable_web_page_preview"] is True
-    assert appended[0] == (99909, "user", "відповідь без @mention")
+    assert appended[0][0] == 99909
+    assert appended[0][1] == "system"
+    assert "[CHAT-TURN]" in appended[0][2]
+    assert appended[1] == (99909, "user", "відповідь без @mention")
     assert appended[-1] == (99909, "assistant", "OK: відповідь без @mention")
+
+
+@pytest.mark.asyncio
+async def test_clear_context_command_clears_chat_memory(monkeypatch):
+    async def fake_get_settings(_chat_id):
+        return {"auth_ok": True}
+
+    cleared = {}
+
+    async def fake_clear_all(chat_id):
+        cleared["chat_id"] = chat_id
+
+    async def fail_run_simple(*_args, **_kwargs):
+        raise AssertionError("run_simple should not be called for /c")
+
+    async def fail_run_search(*_args, **_kwargs):
+        raise AssertionError("run_search should not be called for /c")
+
+    async def fail_append(*_args, **_kwargs):
+        raise AssertionError("memory append should not be called for /c")
+
+    async def fail_budget(*_args, **_kwargs):
+        raise AssertionError("memory budget should not be called for /c")
+
+    monkeypatch.setattr(message_logic, "get_settings", fake_get_settings)
+    monkeypatch.setattr(message_logic, "run_simple", fail_run_simple)
+    monkeypatch.setattr(message_logic, "run_search", fail_run_search)
+    monkeypatch.setattr(message_logic.memory_manager, "clear_all", fake_clear_all)
+    monkeypatch.setattr(message_logic.memory_manager, "append_message", fail_append)
+    monkeypatch.setattr(message_logic.memory_manager, "ensure_budget", fail_budget)
+
+    msg = DummyPTBMessage(text="/c@botx")
+    upd = make_update(999091, msg)
+    um = make_unified_message(999091, 40, upd, "/c@botx")
+
+    await message_logic.process_message(um)
+
+    assert cleared["chat_id"] == 999091
+    assert any("очищено" in m.lower() for m in msg._sent)
 
 
 @pytest.mark.asyncio
@@ -260,10 +302,12 @@ async def test_authed_group_explicit_search_uses_agent_route(monkeypatch):
 
     assert called["user_text"] == "пошукай новини про OpenAI"
     assert called["use_reasoning"] is False
-    assert msg._sent == ["SEARCH: OK"]
+    assert msg._sent == ["SEARCH: OK\n\n⚠️УВАГА! ВІДБУВСЯ ПОШУК!⚠️"]
     assert msg._sent_kwargs[-1]["parse_mode"] == "HTML"
-    assert appended[0][1] == "user"
-    assert appended[-1] == (99910, "assistant", "SEARCH: OK")
+    assert appended[0][1] == "system"
+    assert "[CHAT-TURN]" in appended[0][2]
+    assert appended[1][1] == "user"
+    assert appended[-1] == (99910, "assistant", "SEARCH: OK\n\n⚠️УВАГА! ВІДБУВСЯ ПОШУК!⚠️")
 
 
 @pytest.mark.asyncio

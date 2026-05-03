@@ -101,3 +101,78 @@ def test_model_options_cover_media_types():
     assert set(admin_ui.MODELS["video"].keys()) == {"gemini"}
     # STT only has openai
     assert set(admin_ui.MODELS["stt"].keys()) == {"openai"}
+
+
+def test_render_dashboard_includes_token_calculator(tmp_path, monkeypatch):
+    env_path = tmp_path / ".env"
+    env_path.write_text("SMARTEST_ADMIN_USERNAME=korol\n", encoding="utf-8")
+    monkeypatch.setattr(admin_ui, "ENV_PATH", env_path)
+    monkeypatch.setattr(admin_ui, "service_status", lambda _name: "active")
+    monkeypatch.setattr(
+        admin_ui,
+        "token_dashboard_data",
+        lambda: {
+            "log_path": str(tmp_path / "token_usage.jsonl"),
+            "memory_error": "",
+            "usage": {
+                "calls": 2,
+                "failed": 1,
+                "tokens_in": 1200,
+                "tokens_out": 345,
+                "tokens_total": 1545,
+                "by_model": [
+                    {
+                        "provider": "openai",
+                        "model": "gpt-test",
+                        "capability": "chat_final",
+                        "calls": 2,
+                        "failed": 1,
+                        "tokens_in": 1200,
+                        "tokens_out": 345,
+                        "tokens_total": 1545,
+                    }
+                ],
+            },
+            "memory": {
+                "recent": {"rows_count": 3, "tokens": 900},
+                "long": {"rows_count": 2, "tokens": 500},
+                "core": {"rows_count": 1, "tokens": 100},
+                "total_tokens": 1500,
+                "chats": [
+                    {
+                        "chat_id": "-10042",
+                        "recent_tokens": 900,
+                        "long_tokens": 500,
+                        "core_tokens": 100,
+                        "total_tokens": 1500,
+                    }
+                ],
+            },
+        },
+    )
+
+    rendered = admin_ui.render_dashboard({})
+
+    assert "Token calculator" in rendered
+    assert "Tracked LLM calls by model" in rendered
+    assert "Working memory context by chat" in rendered
+    assert "gpt-test" in rendered
+    assert "chat_final" in rendered
+    assert "-10042" in rendered
+    assert "1 545" in rendered
+    assert "/clear-memory" in rendered
+
+
+def test_clear_bot_memory_calls_global_clear(monkeypatch):
+    called = {}
+
+    async def fake_clear_global():
+        called["ok"] = True
+
+    monkeypatch.setattr(admin_ui.memory_manager, "clear_global", fake_clear_global)
+
+    ok, detail = admin_ui.clear_bot_memory()
+
+    assert ok is True
+    assert detail == "ok"
+    assert called["ok"] is True

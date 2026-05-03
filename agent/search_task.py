@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import datetime as _dt
 import json
 import logging
 import re
@@ -31,6 +32,95 @@ ALLOWED_SEARCH_PROFILES = {
     "docs",
     "research_paper",
     "site_search",
+}
+
+WEATHER_DOMAIN_HINTS = (
+    "sinoptik.ua",
+    "meteofor.com.ua",
+    "meteo.ua",
+    "weather.com",
+    "accuweather.com",
+)
+
+_WEATHER_TERMS_RE = re.compile(
+    r"\b(погода|погоди|погодн\w*|прогноз|температура|опади)\b",
+    flags=re.I,
+)
+_WEATHER_CITY_ALIASES = {
+    "kyiv": (
+        "київ",
+        "києві",
+        "києва",
+        "києву",
+        "киев",
+        "киеве",
+        "kiev",
+        "kyiv",
+    ),
+}
+_WEATHER_CITY_DISPLAY = {
+    "kyiv": "Київ",
+}
+_WEEKDAY_FORMS = {
+    "понеділок": 0,
+    "понеділка": 0,
+    "вівторок": 1,
+    "вівторка": 1,
+    "середу": 2,
+    "середа": 2,
+    "четвер": 3,
+    "четверга": 3,
+    "п'ятницю": 4,
+    "пятницю": 4,
+    "п'ятниця": 4,
+    "пятниця": 4,
+    "суботу": 5,
+    "субота": 5,
+    "неділю": 6,
+    "неділя": 6,
+}
+
+LOW_VALUE_QUERY_TERMS = {
+    "актуально",
+    "актуальні",
+    "буде",
+    "вівторок",
+    "вівторка",
+    "для",
+    "зараз",
+    "найкраще",
+    "нового",
+    "новини",
+    "опади",
+    "погода",
+    "погоди",
+    "прогноз",
+    "свіжі",
+    "сьогодні",
+    "температура",
+    "this",
+    "today",
+    "tomorrow",
+    "latest",
+    "news",
+    "forecast",
+    "weather",
+    "best",
+    "what",
+    "new",
+    "top",
+    "site",
+    "www",
+    "com",
+    "org",
+    "net",
+    "ua",
+}
+
+QUERY_TERM_ALIASES = {
+    "київ": ("київ", "києві", "києва", "києву", "kyiv", "kiev"),
+    "kyiv": ("київ", "києві", "києва", "києву", "kyiv", "kiev"),
+    "kiev": ("київ", "києві", "києва", "києву", "kyiv", "kiev"),
 }
 
 
@@ -190,6 +280,184 @@ def _sanitize_query_text(text: str) -> str:
     cleaned = _collapse_spaces(text)
     cleaned = re.sub(r"@\w+", "", cleaned)
     return cleaned.strip(" \t\r\n,.;:!?-")
+
+
+def _looks_like_weather_query(text: str) -> bool:
+    return bool(_WEATHER_TERMS_RE.search(text or ""))
+
+
+def _weather_city_key(text: str) -> str | None:
+    lowered = (text or "").lower()
+    for city_key, aliases in _WEATHER_CITY_ALIASES.items():
+        if any(alias in lowered for alias in aliases):
+            return city_key
+    return None
+
+
+def _weather_city_aliases(text: str) -> tuple[str, ...]:
+    city_key = _weather_city_key(text)
+    if not city_key:
+        return ()
+    return _WEATHER_CITY_ALIASES[city_key]
+
+
+def _next_weekday_iso(text: str, *, today: _dt.date | None = None) -> str:
+    lowered = (text or "").lower()
+    target_weekday = None
+    for form, weekday in _WEEKDAY_FORMS.items():
+        if form in lowered:
+            target_weekday = weekday
+            break
+    if target_weekday is None:
+        return ""
+    base = today or _dt.datetime.utcnow().date()
+    days_ahead = (target_weekday - base.weekday()) % 7
+    if days_ahead == 0:
+        days_ahead = 7
+    return (base + _dt.timedelta(days=days_ahead)).isoformat()
+
+
+def _append_unique(values: tuple[str, ...], *extra: str) -> tuple[str, ...]:
+    result: list[str] = []
+    for value in (*values, *extra):
+        cleaned = (value or "").strip()
+        if cleaned and cleaned not in result:
+            result.append(cleaned)
+    return tuple(result)
+
+
+def _weather_retry_queries(text: str, city_key: str) -> tuple[str, ...]:
+    city = _WEATHER_CITY_DISPLAY.get(city_key, city_key)
+    date_iso = _next_weekday_iso(text)
+    date_part = f" {date_iso}" if date_iso else ""
+    return (
+        f"site:sinoptik.ua/pohoda/{city_key} погода {city}{date_part}".strip(),
+        f"погода {city}{date_part} sinoptik.ua".strip(),
+    )
+
+
+def _enrich_weather_task(task: SearchTask) -> SearchTask:
+    text = f"{task.original_request} {task.query}"
+    if not _looks_like_weather_query(text):
+        return task
+    city_key = _weather_city_key(text)
+    if not city_key:
+        return task
+    return replace(
+        task,
+        preferred_domains=_append_unique(task.preferred_domains, *WEATHER_DOMAIN_HINTS),
+        country=task.country or "UA",
+        languages=task.languages or ("uk",),
+        need_extract=True,
+        alternative_queries=_append_unique(
+            task.alternative_queries,
+            *_weather_retry_queries(text, city_key),
+        ),
+        reason=f"{task.reason};weather_location_guard".strip(";"),
+    )
+
+
+def _text_has_any_alias(text: str, aliases: tuple[str, ...]) -> bool:
+    lowered = (text or "").lower()
+    return any(alias in lowered for alias in aliases)
+
+
+def _query_terms(text: str) -> list[str]:
+    terms: list[str] = []
+    for term in re.findall(r"[\w-]+", urllib.parse.unquote_plus(text or "").lower()):
+        cleaned = "".join(ch for ch in term if ch.isalnum() or ch in {"-", "_"})
+        if len(cleaned) >= 3:
+            terms.append(cleaned)
+    return terms
+
+
+def _required_query_terms(text: str) -> list[str]:
+    required: list[str] = []
+    for term in _query_terms(text):
+        if term in LOW_VALUE_QUERY_TERMS:
+            continue
+        if term.isdigit():
+            continue
+        if re.fullmatch(r"\d{4}[-_]\d{2}[-_]\d{2}", term):
+            continue
+        if term not in required:
+            required.append(term)
+    return required[:8]
+
+
+def _evidence_haystack(
+    results: list[NormalizedResult],
+    pages: list[NormalizedResult],
+) -> str:
+    chunks: list[str] = []
+    for item in [*results, *pages]:
+        chunks.extend(
+            [
+                item.title or "",
+                item.snippet or "",
+                item.domain or "",
+                item.url or "",
+                item.full_content or "",
+            ]
+        )
+    return " ".join(chunks).lower()
+
+
+def _term_in_haystack(term: str, haystack: str) -> bool:
+    aliases = QUERY_TERM_ALIASES.get(term, (term,))
+    return any(alias in haystack for alias in aliases)
+
+
+def _minimum_required_matches(text: str) -> int:
+    required = _required_query_terms(text)
+    if not required:
+        return 0
+    if len(required) == 1:
+        return 1
+    if len(required) <= 3:
+        return len(required)
+    return max(2, min(4, (len(required) + 1) // 2))
+
+
+def _has_query_anchor_coverage(
+    query: str,
+    results: list[NormalizedResult],
+    pages: list[NormalizedResult],
+) -> bool:
+    required = _required_query_terms(query)
+    minimum = _minimum_required_matches(query)
+    if not required or not minimum:
+        return True
+    haystack = _evidence_haystack(results, pages)
+    matches = sum(1 for term in required if _term_in_haystack(term, haystack))
+    return matches >= minimum
+
+
+def _has_weather_location_coverage(
+    original_request: str,
+    query: str,
+    results: list[NormalizedResult],
+    pages: list[NormalizedResult],
+) -> bool:
+    text = f"{original_request} {query}"
+    if not _looks_like_weather_query(text):
+        return True
+    aliases = _weather_city_aliases(text)
+    if not aliases:
+        return True
+    for item in [*results, *pages]:
+        haystack = " ".join(
+            [
+                item.title or "",
+                item.snippet or "",
+                item.domain or "",
+                item.url or "",
+                item.full_content or "",
+            ]
+        )
+        if _text_has_any_alias(haystack, aliases):
+            return True
+    return False
 
 
 def strip_search_command(user_text: str) -> str:
@@ -388,7 +656,9 @@ def _plan_with_model(
     *,
     mode_hint: str | None = None,
 ) -> SearchPlan | None:
+    today = _dt.datetime.utcnow().date().isoformat()
     payload = {
+        "today_date": today,
         "latest_user_message": (user_text or "")[:800],
         "dialogue_excerpt": _context_excerpt(dialogue_excerpt),
         "mode_hint": (mode_hint or "").strip() or None,
@@ -410,6 +680,14 @@ def _plan_with_model(
     if not parsed:
         logger.warning("search_plan.parse_failed content=%s", content[:400])
         return None
+
+    intent_hypothesis = str(parsed.get("intent_hypothesis") or "").strip()
+    if intent_hypothesis:
+        logger.info(
+            "search_plan.intent_hypothesis user=%s hypothesis=%s",
+            (user_text or "")[:120],
+            intent_hypothesis[:240],
+        )
 
     raw_sub_queries = parsed.get("sub_queries")
     if not isinstance(raw_sub_queries, list):
@@ -504,7 +782,7 @@ def _build_single_search_task_from_context(
 
 def _tasks_from_plan(base_task: SearchTask, plan: SearchPlan) -> list[SearchTask]:
     if not plan.sub_queries:
-        return [base_task]
+        return [_enrich_weather_task(base_task)]
 
     if len(plan.sub_queries) == 1:
         only = plan.sub_queries[0]
@@ -524,7 +802,7 @@ def _tasks_from_plan(base_task: SearchTask, plan: SearchPlan) -> list[SearchTask
             and (not plan.needs_extract or base_task.need_extract)
         )
         if same_query and same_profile and no_override:
-            return [base_task]
+            return [_enrich_weather_task(base_task)]
 
     tasks: list[SearchTask] = []
     for sub_query in plan.sub_queries[:3]:
@@ -566,9 +844,9 @@ def _tasks_from_plan(base_task: SearchTask, plan: SearchPlan) -> list[SearchTask
                 or profile in {"docs", "research_paper", "site_search"}
             ),
         )
-        tasks.append(task)
+        tasks.append(_enrich_weather_task(task))
 
-    return tasks or [base_task]
+    return tasks or [_enrich_weather_task(base_task)]
 
 
 # ---------------------------------------------------------------------------
@@ -680,9 +958,30 @@ def _heuristic_search_evaluation(
     results: list[NormalizedResult],
     pages: list[NormalizedResult],
 ) -> SearchEvaluation:
-    coverage = {query: has_search_coverage(results, pages)}
-    high_relevance = [result for result in results if result.relevance_score >= 0.5]
+    basic_coverage = has_search_coverage(results, pages)
+    anchor_coverage = _has_query_anchor_coverage(query, results, pages)
+    weather_coverage = _has_weather_location_coverage(
+        original_request, query, results, pages
+    )
+    coverage = {query: bool(basic_coverage and anchor_coverage and weather_coverage)}
     retry_query = suggest_retry_query(original_request, query)
+    if basic_coverage and not anchor_coverage:
+        return SearchEvaluation(
+            sufficient=False,
+            should_retry=bool(retry_query),
+            retry_query=retry_query,
+            reason="query_anchor_mismatch",
+            coverage={query: False},
+        )
+    if basic_coverage and not weather_coverage:
+        return SearchEvaluation(
+            sufficient=False,
+            should_retry=True,
+            retry_query=retry_query,
+            reason="weather_location_mismatch",
+            coverage={query: False},
+        )
+    high_relevance = [result for result in results if result.relevance_score >= 0.5]
     distinct_domains = {
         (result.domain or "").lower() for result in results if result.url
     }
@@ -860,10 +1159,41 @@ def _heuristic_evidence_evaluation(
     plan: SearchPlan,
     evidence: EvidencePack,
 ) -> SearchEvaluation:
+    anchor_mismatch: set[str] = set()
+    weather_mismatch: set[str] = set()
     coverage = {
-        sub_query.query: bool(evidence.sub_query_coverage.get(sub_query.query, False))
+        sub_query.query: bool(
+            evidence.sub_query_coverage.get(sub_query.query, False)
+            and _has_query_anchor_coverage(
+                sub_query.query,
+                evidence.results,
+                evidence.pages,
+            )
+            and _has_weather_location_coverage(
+                plan.original_request,
+                sub_query.query,
+                evidence.results,
+                evidence.pages,
+            )
+        )
         for sub_query in plan.sub_queries
     }
+    for sub_query in plan.sub_queries:
+        if not evidence.sub_query_coverage.get(sub_query.query, False):
+            continue
+        if not _has_query_anchor_coverage(
+            sub_query.query,
+            evidence.results,
+            evidence.pages,
+        ):
+            anchor_mismatch.add(sub_query.query)
+        if not _has_weather_location_coverage(
+            plan.original_request,
+            sub_query.query,
+            evidence.results,
+            evidence.pages,
+        ):
+            weather_mismatch.add(sub_query.query)
     missing = [
         sub_query for sub_query in plan.sub_queries if not coverage[sub_query.query]
     ]
@@ -882,7 +1212,13 @@ def _heuristic_evidence_evaluation(
             sufficient=False,
             should_retry=bool(retry_query),
             retry_query=retry_query,
-            reason="missing_sub_query_coverage",
+            reason=(
+                "weather_location_mismatch"
+                if retry_sub_query.query in weather_mismatch
+                else "query_anchor_mismatch"
+                if retry_sub_query.query in anchor_mismatch
+                else "missing_sub_query_coverage"
+            ),
             retry_sub_query=retry_sub_query,
             coverage=coverage,
         )
@@ -1067,7 +1403,9 @@ async def build_search_task(
         user_text,
         turn_context_msgs=turn_context_msgs,
     )
-    return _build_single_search_task_from_context(user_text, context)
+    return _enrich_weather_task(
+        _build_single_search_task_from_context(user_text, context)
+    )
 
 
 async def plan_search_queries(

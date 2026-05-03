@@ -64,11 +64,12 @@ def _tool_response(name: str, arguments: str):
 @pytest.mark.asyncio
 async def test_should_use_agent_strict():
     os.environ["THINKING_STRICT"] = "1"
-    assert _should_use_agent("що нового") is True
+    assert _should_use_agent("/think що нового") is True
     assert _should_use_agent("звичайне питання") is False
 
 
 @pytest.mark.asyncio
+@pytest.mark.skip(reason="search_synthesis layer removed in session 099 redesign")
 async def test_explicit_search_pipeline(monkeypatch):
     called: dict[str, object] = {}
 
@@ -139,6 +140,7 @@ async def test_explicit_search_pipeline(monkeypatch):
 
 
 @pytest.mark.asyncio
+@pytest.mark.skip(reason="search_synthesis layer removed in session 099 redesign")
 async def test_explicit_search_retry_pipeline(monkeypatch):
     queries: list[tuple[str, int | None, int | None]] = []
     fetched: list[str] = []
@@ -219,6 +221,7 @@ async def test_explicit_search_retry_pipeline(monkeypatch):
 
 
 @pytest.mark.asyncio
+@pytest.mark.skip(reason="search_synthesis layer removed in session 099 redesign")
 async def test_explicit_search_decomposition_runs_all_planned_queries(monkeypatch):
     queries: list[str] = []
 
@@ -297,6 +300,7 @@ async def test_explicit_search_decomposition_runs_all_planned_queries(monkeypatc
 
 
 @pytest.mark.asyncio
+@pytest.mark.skip(reason="search_synthesis layer removed in session 099 redesign")
 async def test_explicit_search_runs_sub_queries_in_parallel(monkeypatch):
     in_flight = 0
     max_in_flight = 0
@@ -365,6 +369,7 @@ async def test_explicit_search_runs_sub_queries_in_parallel(monkeypatch):
 
 
 @pytest.mark.asyncio
+@pytest.mark.skip(reason="search_synthesis layer removed in session 099 redesign")
 async def test_explicit_search_returns_clean_failure_on_junk_evidence(monkeypatch):
     async def fake_build_search_tasks(_chat_id, user_text, **_kwargs):
         return [

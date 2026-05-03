@@ -42,7 +42,7 @@ def _run_summary_model(prompt_user: str):
         model=None,
         temperature=0.2,
         capability="memory_summary",
-        max_tokens=400,
+        max_tokens=650,
     )
 
 
@@ -66,6 +66,35 @@ async def summarize_block(messages: List[Dict[str, str]]) -> dict:
         }
 
     text = resp.choices[0].message.content.strip()
+
+    organic_match = re.search(
+        r"(?:РЎРџРћР“РђР”|MEMORY|РџР†Р”РЎРЈРњРћРљ|SUMMARY):\s*(.+?)(?:\n+(?:Р¦РРўРђРўР|QUOTES|РўР•Р РњР†РќР|TERMS|Р’РђР–Р›РР’Р†РЎРўР¬|IMPORTANCE):|$)",
+        text,
+        flags=re.S,
+    )
+    if organic_match:
+        summary = organic_match.group(1).strip()
+        quotes_match = re.search(
+            r"(?:Р¦РРўРђРўР|QUOTES):\s*(.+?)(?:\n+(?:РўР•Р РњР†РќР|TERMS|Р’РђР–Р›РР’Р†РЎРўР¬|IMPORTANCE):|$)",
+            text,
+            flags=re.S,
+        )
+        quotes = (quotes_match.group(1).strip() if quotes_match else "").strip()
+        if quotes and quotes.lower() not in {"none", "no", "немає"}:
+            summary = f"{summary}\nQuotes: {quotes}".strip()
+        imp_match_new = re.search(
+            r"(?:Р’РђР–Р›РР’Р†РЎРўР¬|IMPORTANCE):\s*([0-1](?:\.\d+)?)",
+            text,
+        )
+        try:
+            importance = float(imp_match_new.group(1)) if imp_match_new else 0.5
+        except Exception:
+            importance = 0.5
+        return {
+            "summary": summary,
+            "importance": max(0.0, min(1.0, importance)),
+            "tokens": count_tokens_text(summary, _SUM_MODEL),
+        }
 
     sum_match = re.search(
         r"(?:ПІДСУМОК|SUMMARY):\s*(.+?)(?:\n+\w+:|$)", text, flags=re.S

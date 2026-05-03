@@ -8,6 +8,13 @@ from agent.search_task import NormalizedResult, SearchEvaluation, SearchTask
 
 CHAT = 99943
 
+# Session 099 redesign: search_synthesis layer removed. Web search now hands its
+# evidence to chat_final via a [SEARCH-RESULT] system message; chat_final composes
+# the user-facing reply. The two tests below exercised the obsolete synthesis prompt
+# and citation pipeline, so they are skipped rather than rewritten in place — the
+# new flow is covered by test_106_search_flow.
+pytestmark = pytest.mark.skip(reason="search_synthesis layer removed in session 099 redesign")
+
 
 def _result(
     title: str,

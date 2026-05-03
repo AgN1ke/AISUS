@@ -6,9 +6,13 @@ const fs = require('fs');
 const path = require('path');
 
 // Always deploy from Smartest project, regardless of where this script runs
-const PROJECT_DIR = 'C:/Python_projects/Smartest';
+// Deploy from the directory containing this script's parent. Use --source to override.
+const argSource = (process.argv.find(a => a.startsWith('--source=')) || '').split('=')[1];
+const PROJECT_DIR = argSource || path.resolve(__dirname, '..');
 const REMOTE_APP = '/opt/smartest/app';
 const REMOTE_VENV = '/opt/smartest/venv';
+const IS_WIN = process.platform === 'win32';
+const EXEC_SHELL = IS_WIN ? undefined : 'bash';
 
 const excludes = [
   '.git',
@@ -23,13 +27,32 @@ const excludes = [
   'sessions',
   'tmp',
   'Audio',
+  'deploy/node_modules',
   'deploy/*.tar.gz',
 ].map(e => `--exclude="${e}"`).join(' ');
 
 const tarFile = path.join(PROJECT_DIR, 'deploy', 'smartest.tar.gz');
 
+// ── Acceptance gate ──────────────────────────────────────────────
+// See docs/project/testing-protocol.md and docs/project/behavior-audit.md.
+// Skip with SKIP_ACCEPTANCE=1 only when you know what you're doing.
+if (!process.env.SKIP_ACCEPTANCE) {
+  console.log('[deploy] Running acceptance tests (gate)...');
+  try {
+    execSync('python -m pytest --noconftest tests/acceptance/ -x --tb=short -q', {
+      stdio: 'inherit', cwd: PROJECT_DIR, shell: EXEC_SHELL,
+    });
+  } catch (e) {
+    console.error('[deploy] Acceptance gate FAILED. Deploy blocked.');
+    console.error('[deploy] Fix the failing invariants or set SKIP_ACCEPTANCE=1 to bypass.');
+    process.exit(1);
+  }
+}
+
 console.log('[deploy] Creating archive...');
 try {
+  // Always use POSIX paths + bash for tar (Git Bash on Windows handles it).
+  // cmd.exe + tar interprets C:\ as a remote host ("Cannot connect to C: resolve failed").
   const tarPosix = tarFile.replace(/\\/g, '/').replace(/^([A-Z]):/i, '/$1');
   const projPosix = PROJECT_DIR.replace(/\\/g, '/').replace(/^([A-Z]):/i, '/$1');
   execSync(`tar czf "${tarPosix}" ${excludes} -C "${projPosix}" .`, {

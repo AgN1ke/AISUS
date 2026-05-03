@@ -85,7 +85,7 @@ def test_chat_once_gemini_text_request(monkeypatch):
         "maxOutputTokens": 77,
         "thinkingConfig": {"thinkingBudget": 0},
     }
-    assert captured["timeout"] == 45
+    assert captured["timeout"] == 60
     assert response.choices[0].message.content == "Все добре."
 
 
@@ -192,7 +192,7 @@ def test_describe_images_uses_capability_binding_without_model_override(
     assert captured["model"] is None
     assert captured["capability"] == "vision_image"
     assert captured["temperature"] == 0.2
-    assert captured["kwargs"]["max_tokens"] == 400
+    assert captured["kwargs"]["max_tokens"] == 1200
     assert captured["messages"][0] == {"role": "system", "content": "Поясни мем"}
     user_parts = captured["messages"][1]["content"]
     assert user_parts[0]["type"] == "text"

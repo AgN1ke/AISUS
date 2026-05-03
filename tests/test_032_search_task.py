@@ -237,7 +237,7 @@ async def test_build_search_tasks_falls_back_when_planner_invalid(monkeypatch):
 
     # Fallback: single task with the direct normalized query
     assert len(tasks) == 1
-    assert tasks[0].source == "direct_normalized"
+    assert tasks[0].source == "heuristic_context"
 
 
 def test_trim_terminal_user_duplicate():
@@ -335,3 +335,50 @@ def test_is_explicit_search_request():
     assert search_task.is_explicit_search_request("загугли це") is True
     assert search_task.is_explicit_search_request("що таке Python") is False
     assert search_task.is_explicit_search_request("") is False
+
+
+def test_weather_kyiv_task_gets_source_and_retry_hints():
+    base = search_task.SearchTask(
+        original_request="яка погода в києві буде у вівторок?",
+        query="погода Київ 2026-05-05",
+        source="test",
+    )
+
+    task = search_task._tasks_from_plan(
+        base,
+        search_task.SearchPlan(
+            sub_queries=(),
+            original_request=base.original_request,
+        ),
+    )[0]
+
+    assert "sinoptik.ua" in task.preferred_domains
+    assert task.country == "UA"
+    assert task.languages == ("uk",)
+    assert task.need_extract is True
+    assert any("site:sinoptik.ua/pohoda/kyiv" in q for q in task.alternative_queries)
+
+
+def test_weather_kyiv_rejects_other_city_evidence(monkeypatch):
+    def fake_chat_once(*_args, **_kwargs):
+        raise RuntimeError("llm unavailable")
+
+    monkeypatch.setattr(search_task, "chat_once", fake_chat_once)
+
+    evaluation = search_task.evaluate_search_step(
+        "яка погода в києві буде у вівторок?",
+        "погода Київ 2026-05-05",
+        [
+            _result(
+                "Погода у Білій Церкві на 5 травня",
+                "https://sinoptik.ua/pohoda/bila-tserkva/2026-05-05",
+                "Без опадів, +12...+23.",
+                domain="sinoptik.ua",
+            )
+        ],
+        [],
+    )
+
+    assert evaluation.sufficient is False
+    assert evaluation.should_retry is True
+    assert evaluation.reason in {"query_anchor_mismatch", "weather_location_mismatch"}

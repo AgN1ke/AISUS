@@ -255,7 +255,17 @@ def _search_cache_query(
 ) -> str:
     normalized_profile = (profile or "general").strip().lower() or "general"
     normalized_query = normalize_cache_query(query)
-    return f"v3|{normalized_profile}|{normalized_query}"
+    allow = ",".join(sorted(preferred_domains_allow))
+    deny = ",".join(sorted(preferred_domains_deny))
+    langs = ",".join(languages)
+    return (
+        f"v4|{normalized_profile}|{normalized_query}"
+        f"|recency={recency_days or ''}"
+        f"|allow={allow}"
+        f"|deny={deny}"
+        f"|country={(country or '').upper()}"
+        f"|lang={langs}"
+    )
 
 
 def _domain_matches(candidate: str, patterns: tuple[str, ...]) -> bool:
@@ -340,6 +350,80 @@ def _query_terms(query: str) -> list[str]:
     return terms
 
 
+LOW_VALUE_QUERY_TERMS = {
+    "актуально",
+    "актуальні",
+    "буде",
+    "вівторок",
+    "вівторка",
+    "для",
+    "зараз",
+    "найкраще",
+    "новини",
+    "опади",
+    "погода",
+    "погоди",
+    "прогноз",
+    "свіжі",
+    "сьогодні",
+    "температура",
+    "this",
+    "today",
+    "tomorrow",
+    "latest",
+    "news",
+    "forecast",
+    "weather",
+    "best",
+    "what",
+    "new",
+    "top",
+    "site",
+    "www",
+    "com",
+    "org",
+    "net",
+    "ua",
+}
+
+QUERY_TERM_ALIASES = {
+    "київ": ("київ", "києві", "києва", "києву", "kyiv", "kiev"),
+    "kyiv": ("київ", "києві", "києва", "києву", "kyiv", "kiev"),
+    "kiev": ("київ", "києві", "києва", "києву", "kyiv", "kiev"),
+}
+
+
+def _required_query_terms(query: str) -> list[str]:
+    required: list[str] = []
+    for term in _query_terms(query):
+        if term in LOW_VALUE_QUERY_TERMS:
+            continue
+        if term.isdigit():
+            continue
+        if re.fullmatch(r"\d{4}[-_]\d{2}[-_]\d{2}", term):
+            continue
+        if term not in required:
+            required.append(term)
+    return required[:8]
+
+
+def _item_search_haystack(item: NormalizedResult) -> str:
+    return " ".join(
+        [
+            item.title or "",
+            item.snippet or "",
+            item.domain or "",
+            item.url or "",
+            item.full_content or "",
+        ]
+    ).lower()
+
+
+def _term_in_haystack(term: str, haystack: str) -> bool:
+    aliases = QUERY_TERM_ALIASES.get(term, (term,))
+    return any(alias in haystack for alias in aliases)
+
+
 def _snippet_length_score(snippet: str) -> float:
     length = len((snippet or "").strip())
     if length >= 220:
@@ -416,8 +500,26 @@ def _compute_relevance(
 
 
 def _match_count(query: str, item: NormalizedResult) -> int:
-    haystack = " ".join([item.title, item.snippet, item.domain]).lower()
-    return sum(1 for term in _query_terms(query) if term in haystack)
+    haystack = _item_search_haystack(item)
+    return sum(1 for term in _query_terms(query) if _term_in_haystack(term, haystack))
+
+
+def _required_match_count(query: str, item: NormalizedResult) -> int:
+    haystack = _item_search_haystack(item)
+    return sum(
+        1 for term in _required_query_terms(query) if _term_in_haystack(term, haystack)
+    )
+
+
+def _minimum_required_matches(query: str) -> int:
+    required = _required_query_terms(query)
+    if not required:
+        return 0
+    if len(required) == 1:
+        return 1
+    if len(required) <= 3:
+        return len(required)
+    return max(2, min(4, (len(required) + 1) // 2))
 
 
 def _normalize_result(
@@ -570,6 +672,7 @@ def _filter_and_rank_results(
 ) -> List[NormalizedResult]:
     prepared = []
     seen = set()
+    minimum_required_matches = _minimum_required_matches(query)
     filtered_items = _apply_domain_filters(
         items,
         preferred_domains_allow,
@@ -585,19 +688,33 @@ def _filter_and_rank_results(
                 item,
                 item.relevance_score,
                 _match_count(query, item),
+                _required_match_count(query, item),
             )
         )
 
     if not prepared:
         return []
 
-    sorted_items = sorted(prepared, key=lambda pair: (pair[1], pair[2]), reverse=True)
-    ranked = [item for item, _score, _matches in sorted_items]
+    if minimum_required_matches:
+        prepared = [
+            pair for pair in prepared if pair[3] >= minimum_required_matches
+        ]
+        if not prepared:
+            return []
+
+    sorted_items = sorted(
+        prepared,
+        key=lambda pair: (pair[3], pair[1], pair[2]),
+        reverse=True,
+    )
+    ranked = [item for item, _score, _matches, _required_matches in sorted_items]
 
     minimum_matches = 2 if len(_query_terms(query)) >= 3 else 1
     strong = []
-    for item, _score, matches in sorted_items:
+    for item, _score, matches, required_matches in sorted_items:
         domain = item.domain
+        if minimum_required_matches and required_matches < minimum_required_matches:
+            continue
         if matches >= minimum_matches:
             strong.append(item)
             continue

@@ -133,8 +133,13 @@ def test_search_cache_query_normalizes_case_and_punctuation():
         ("uk",),
     )
 
-    assert first == "v3|news|apple новини"
-    assert first == second
+    assert first == "v4|news|apple новини|recency=|allow=|deny=|country=|lang="
+    assert first != second
+    assert "recency=7" in second
+    assert "allow=apple.com" in second
+    assert "deny=example.com" in second
+    assert "country=UA" in second
+    assert "lang=uk" in second
 
 
 @pytest.mark.asyncio

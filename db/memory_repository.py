@@ -12,9 +12,25 @@ async def insert_recent(chat_id: int, role: str, content: str, tokens: int):
     await execute(sql, (chat_id, role, content, tokens))
 
 async def fetch_recent(chat_id: int, limit: int | None = None) -> list[dict]:
-    base = "SELECT pos, role, content, tokens, created_at FROM memory_recent WHERE chat_id=%s ORDER BY pos ASC"
     if limit:
-        base += f" LIMIT {int(limit)}"
+        base = f"""
+        SELECT pos, role, content, tokens, created_at
+        FROM (
+            SELECT pos, role, content, tokens, created_at
+            FROM memory_recent
+            WHERE chat_id=%s
+            ORDER BY pos DESC
+            LIMIT {int(limit)}
+        ) AS recent_window
+        ORDER BY pos ASC
+        """
+    else:
+        base = """
+        SELECT pos, role, content, tokens, created_at
+        FROM memory_recent
+        WHERE chat_id=%s
+        ORDER BY pos ASC
+        """
     rows = await fetchall(base, (chat_id,))
     return rows or []
 
@@ -24,6 +40,14 @@ async def recent_total_tokens(chat_id: int) -> int:
 
 async def delete_recent_upto_pos(chat_id: int, upto_pos: int):
     await execute("DELETE FROM memory_recent WHERE chat_id=%s AND pos<=%s", (chat_id, upto_pos))
+
+
+async def delete_recent_chat(chat_id: int):
+    await execute("DELETE FROM memory_recent WHERE chat_id=%s", (chat_id,))
+
+
+async def delete_recent_all():
+    await execute("DELETE FROM memory_recent")
 
 # LONG
 
@@ -89,6 +113,10 @@ async def delete_long_by_ids(ids: list[int]):
     )
 
 
+async def delete_long_all():
+    await execute("DELETE FROM memory_long")
+
+
 async def update_long_entry(entry_id: int, summary: str, importance: float, tokens: int):
     await execute(
         "UPDATE memory_long SET summary=%s, importance=%s, tokens=%s WHERE id=%s",
@@ -134,6 +162,10 @@ async def upsert_core_fact(
 
 async def delete_core_facts(chat_id: int):
     await execute("DELETE FROM memory_core WHERE chat_id=%s", (chat_id,))
+
+
+async def delete_core_all():
+    await execute("DELETE FROM memory_core")
 
 
 async def fetch_core_fact(chat_id: int, fact_key: str) -> Optional[dict]:
