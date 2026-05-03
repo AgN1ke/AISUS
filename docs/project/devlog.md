@@ -7728,3 +7728,52 @@ Sessions 098-108 — низка регресій із search gate. Корінь 
 
 - `Smartest-prod-backport/tests/acceptance/test_search_gate.py` (новий, 17 тестів)
 - Prod — без змін (тільки тести)
+
+## 2026-05-03 — Session 111: Fix "Чого двічі питаєш" hallucination
+
+### Проблема
+
+Друг тегнув бота один раз: `@saintaibot який твій улюблений рівень іронії?`. Бот відповів `Чого двічі питаєш, я і з першого разу зрозумів)` — модель вважала що питання було задане двічі.
+
+### Корінь — регресія від Session 105 (speaker prefix)
+
+`trim_terminal_user_duplicate` (з `agent/search_task.py`) робив **strict equality** між last user message у context і `user_text`:
+
+```python
+last.get("content").strip() == user_text.strip()
+```
+
+Сесія 105 додала `_annotate_recent_rows` що перетворює recent context: user-turn тепер виглядає так:
+```
+[Speaker: Євген Іванов (@yourivanov)]
+addressed_via_mention: true
+
+який твій улюблений рівень іронії?
+```
+
+Strict equality `[Speaker:...] addressed... який твій улюблений?` ≠ `який твій улюблений?` → trim не спрацьовує → дублікат залишається.
+
+`make_messages(system, context, user_text)` додає bare `user_text` як останнє повідомлення. Підсумок: модель бачить ТЕ САМЕ питання двічі — раз із speaker-prefix із recent, раз як свіже user_text. Результат: галюцинація "ти двічі питаєш".
+
+### Виправлено
+
+`agent/search_task.py:trim_terminal_user_duplicate`:
+- Strict equality (legacy bare turns) — лишається.
+- Якщо last_content містить `\n\n` — пробуємо співставити **suffix** (text після першого `\n\n`) із `user_text`. Це покриває speaker-prefixed turn-и.
+
+### Acceptance тести (4 нові у test_speaker_prefix.py)
+
+- `test_trim_terminal_duplicate_handles_speaker_prefixed_message` — новий case.
+- `test_trim_terminal_duplicate_strict_equality_still_works` — legacy не зламано.
+- `test_trim_terminal_duplicate_does_not_trim_different_text` — anti-rule: різний текст НЕ обрізається.
+- `test_trim_terminal_duplicate_does_not_trim_when_last_is_assistant` — anti-rule: assistant-турн не торкається.
+
+### Master baseline
+
+142 passed, 3 skipped, 3 xfailed (було 138).
+
+### Артефакти
+
+- `Smartest-prod-backport/agent/search_task.py` (trim_terminal_user_duplicate)
+- `Smartest-prod-backport/tests/acceptance/test_speaker_prefix.py` (+4 тести)
+- Prod `/opt/smartest/app` — обидва сервіси active
