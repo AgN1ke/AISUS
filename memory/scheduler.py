@@ -40,14 +40,35 @@ async def nightly_consolidation():
     logger.info("scheduler.nightly_consolidation finished chats=%d", len(chat_ids))
 
 
+async def periodic_media_tmp_purge():
+    """Remove stale media tmp files (default TTL: 24h, see MEDIA_TMP_MAX_AGE_HOURS).
+
+    Without this, voice/photo/video downloads accumulate indefinitely between
+    bot restarts. Per-turn `cleanup_downloaded_media` handles successful
+    turns, but failed turns (exceptions, lost references, transcribe-only
+    paths) leave orphans. Startup-only purge in run.py wasn't enough — bot
+    can run for days/weeks between restarts.
+    """
+    try:
+        from media.downloader import purge_stale_media_tmp
+        removed = await purge_stale_media_tmp()
+        logger.info("scheduler.media_tmp_purged removed=%s", removed)
+    except Exception as exc:
+        logger.error("scheduler.media_tmp_purge_failed: %s", exc, exc_info=True)
+
+
 def start_scheduler():
-    """Start the APScheduler with nightly consolidation job at 02:00 UTC."""
+    """Start the APScheduler:
+    - nightly_consolidation at 02:00 UTC (memory budget rollover)
+    - periodic_media_tmp_purge every 6 hours (orphan tmp cleanup)
+    """
     global _scheduler
     try:
         from apscheduler.schedulers.asyncio import AsyncIOScheduler
         from apscheduler.triggers.cron import CronTrigger
+        from apscheduler.triggers.interval import IntervalTrigger
     except ImportError:
-        logger.warning("scheduler: apscheduler not installed, nightly consolidation disabled")
+        logger.warning("scheduler: apscheduler not installed, jobs disabled")
         return
 
     _scheduler = AsyncIOScheduler()
@@ -57,8 +78,16 @@ def start_scheduler():
         id="nightly_consolidation",
         replace_existing=True,
     )
+    _scheduler.add_job(
+        periodic_media_tmp_purge,
+        IntervalTrigger(hours=6),
+        id="media_tmp_purge",
+        replace_existing=True,
+    )
     _scheduler.start()
-    logger.info("scheduler.started job=nightly_consolidation at 02:00 UTC")
+    logger.info(
+        "scheduler.started jobs=nightly_consolidation@02:00,media_tmp_purge@6h"
+    )
 
 
 def stop_scheduler():
