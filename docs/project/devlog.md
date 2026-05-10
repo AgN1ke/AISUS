@@ -2682,3 +2682,22 @@ Prod-backport отримав той самий memory hardening, що й multite
 - `deploy/deploy.cjs` acceptance gate passed; `smartest-bot` and `smartest-admin` restarted and are `active`;
 - server-side smoke in `/opt/smartest/app` confirms dashboard contains `Voice & STT`, `Memory & Albums`, `PROMPT_SEARCH_GATE`, and `stt_voice` is `group=smart`, `model_type=text`;
 - `https://smartest.klawa.top/login` returns HTTP 200.
+
+## 2026-05-10 — Session 114-P: Token usage calendar in admin dashboard
+
+Мета: у token calculator додати перегляд витрат по днях і місяцях, щоб адміністратор бачив не тільки all-time суму, а й конкретний період з breakdown по моделях.
+
+Зроблено:
+- відновлено у `master` модуль `core/token_usage.py`, який уже був на prod-сервері і використовувався `agent/llm.py` та `app/admin_ui.py`, але був відсутній у локальному git стані;
+- token usage event тепер пише `ts` і читабельний `created_at_utc`; старі записи з `ts` залишаються сумісними;
+- додано `summarize_usage_calendar(...)`: групування JSONL ledger по локальних днях і місяцях у timezone `Europe/Kiev` за замовчуванням;
+- у dashboard `Token calculator` додано календар місяця, вибір місяця/дня через query params `token_month` і `token_day`, period totals і таблицю `Selected period by model`;
+- all-time таблиця `Tracked LLM calls by model` лишилась без змін, щоб не втратити загальний огляд;
+- додано unit-тести для запису/агрегації token ledger і acceptance-тест, що dashboard містить token calendar.
+
+Перевірка:
+- `python -m py_compile app/admin_ui.py core/token_usage.py agent/llm.py core/tokens.py` -> OK;
+- `python -m pytest -q --noconftest tests/test_030_agent.py tests/test_031_planner.py tests/test_032_search_task.py tests/test_034_web_search.py tests/test_035_search_provider.py tests/test_038_search_evaluator.py tests/test_041_search_repository.py tests/test_042_search_memory.py tests/test_060_message_logic.py tests/test_061_message_logic_layers.py tests/test_071_admin_ui.py tests/test_087_token_usage.py tests/test_106_search_flow.py tests/acceptance` -> green.
+- deploy через `deploy/deploy.cjs`: acceptance gate пройшов, `smartest-bot` і `smartest-admin` після restart мають `active`;
+- server-side smoke у `/opt/smartest/app`: `Token calendar`, `Selected period by model`, `token_month/token_day` query і calendar aggregation працюють;
+- `https://smartest.klawa.top/login` повертає HTTP 200.

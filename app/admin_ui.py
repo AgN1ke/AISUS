@@ -751,10 +751,21 @@ async def _fetch_memory_token_dashboard() -> dict[str, object]:
         await close_db()
 
 
-def token_dashboard_data() -> dict[str, object]:
-    from core.token_usage import read_usage_events, summarize_usage_events, token_usage_log_path
+def token_dashboard_data(token_month: str = "", token_day: str = "") -> dict[str, object]:
+    from core.token_usage import (
+        read_usage_events,
+        summarize_usage_calendar,
+        summarize_usage_events,
+        token_usage_log_path,
+    )
 
-    usage = summarize_usage_events(read_usage_events())
+    events = read_usage_events()
+    usage = summarize_usage_events(events)
+    calendar = summarize_usage_calendar(
+        events,
+        selected_month=token_month,
+        selected_day=token_day,
+    )
     try:
         memory = asyncio.run(_fetch_memory_token_dashboard())
         memory_error = ""
@@ -769,6 +780,7 @@ def token_dashboard_data() -> dict[str, object]:
         memory_error = str(exc)
     return {
         "usage": usage,
+        "calendar": calendar,
         "memory": memory,
         "memory_error": memory_error,
         "log_path": str(token_usage_log_path()),
@@ -823,7 +835,13 @@ def _render_field_grid(fields: list[FieldDef], values: dict[str, str], *, item_c
     return out
 
 
-def render_dashboard(values: dict[str, str], flash: str = "", flash_kind: str = "info") -> str:
+def render_dashboard(
+    values: dict[str, str],
+    flash: str = "",
+    flash_kind: str = "info",
+    token_month: str = "",
+    token_day: str = "",
+) -> str:
     bot_status = service_status(MANAGED_BOT_SERVICE)
     admin_status = service_status(SELF_SERVICE_NAME)
     env_mtime = (
@@ -834,8 +852,10 @@ def render_dashboard(values: dict[str, str], flash: str = "", flash_kind: str = 
         f'<div class="flash flash-{html.escape(flash_kind)}">{html.escape(flash)}</div>'
         if flash else ""
     )
-    token_data = token_dashboard_data()
+    token_data = token_dashboard_data(token_month=token_month, token_day=token_day)
     usage = token_data.get("usage") or {}
+    calendar_data = token_data.get("calendar") or {}
+    period_usage = calendar_data.get("period_usage") or {}
     memory = token_data.get("memory") or {}
     log_path = html.escape(str(token_data.get("log_path") or ""))
 
@@ -853,6 +873,58 @@ def render_dashboard(values: dict[str, str], flash: str = "", flash_kind: str = 
         </tr>"""
     if not usage_rows:
         usage_rows = '<tr><td colspan="8" class="muted-cell">No tracked LLM calls yet. The table starts filling after the next bot responses.</td></tr>'
+
+    period_rows = ""
+    for row in period_usage.get("by_model") or []:
+        period_rows += f"""<tr>
+          <td>{html.escape(str(row.get("provider") or "unknown"))}</td>
+          <td>{html.escape(str(row.get("model") or "unknown"))}</td>
+          <td>{html.escape(str(row.get("capability") or "unknown"))}</td>
+          <td>{_fmt_int(row.get("calls"))}</td>
+          <td>{_fmt_int(row.get("failed"))}</td>
+          <td>{_fmt_int(row.get("tokens_in"))}</td>
+          <td>{_fmt_int(row.get("tokens_out"))}</td>
+          <td>{_fmt_int(row.get("tokens_total"))}</td>
+        </tr>"""
+    if not period_rows:
+        period_rows = '<tr><td colspan="8" class="muted-cell">No LLM calls in the selected period.</td></tr>'
+
+    selected_month = str(calendar_data.get("selected_month") or "")
+    selected_day = str(calendar_data.get("selected_day") or "")
+    period_label = str(calendar_data.get("period_label") or selected_month or "all")
+    period_kind = str(calendar_data.get("period_kind") or "month")
+    timezone_label = html.escape(str(calendar_data.get("timezone") or "Europe/Kiev"))
+    month_options = ""
+    months = calendar_data.get("months") or []
+    if not months and selected_month:
+        months = [{"month": selected_month, "tokens_total": 0, "calls": 0}]
+    for row in months:
+        month_value = str(row.get("month") or "")
+        if not month_value:
+            continue
+        selected = " selected" if month_value == selected_month else ""
+        label = f"{month_value} · {_fmt_int(row.get('tokens_total'))} ток. · {_fmt_int(row.get('calls'))} викл."
+        month_options += f'<option value="{html.escape(month_value)}"{selected}>{html.escape(label)}</option>'
+
+    calendar_days = ""
+    for row in calendar_data.get("days") or []:
+        date_value = str(row.get("date") or "")
+        day_num = str(row.get("day") or "")
+        tokens = int(row.get("tokens_total") or 0)
+        calls = int(row.get("calls") or 0)
+        selected_cls = " is-selected" if row.get("selected") else ""
+        empty_cls = " is-empty" if tokens <= 0 and calls <= 0 else ""
+        href = "/?" + urlencode({"token_month": selected_month, "token_day": date_value})
+        calendar_days += f'''<a class="token-day{selected_cls}{empty_cls}" href="{html.escape(href)}">
+          <strong>{html.escape(day_num)}</strong>
+          <span>{_fmt_int(tokens)} ток.</span>
+          <em>{_fmt_int(calls)} викл.</em>
+        </a>'''
+
+    all_time_href = "/"
+    month_href = "/?" + urlencode({"token_month": selected_month})
+    selected_date_value = html.escape(selected_day)
+    period_title = "День" if period_kind == "day" else "Місяць"
 
     chat_rows = ""
     for row in memory.get("chats") or []:
@@ -888,6 +960,42 @@ def render_dashboard(values: dict[str, str], flash: str = "", flash_kind: str = 
         <div class="token-stat"><span>Input tokens</span><strong>{_fmt_int(usage.get("tokens_in"))}</strong></div>
         <div class="token-stat"><span>Output tokens</span><strong>{_fmt_int(usage.get("tokens_out"))}</strong></div>
         <div class="token-stat"><span>Total tracked</span><strong>{_fmt_int(usage.get("tokens_total"))}</strong></div>
+      </div>
+      <div class="token-calendar">
+        <div class="token-calendar-head">
+          <div>
+            <h3>Token calendar</h3>
+            <p class="panel-desc">Перегляд витрат по днях і місяцях. Часова зона: {timezone_label}.</p>
+          </div>
+          <form class="token-filter" method="get" action="/">
+            <label>Місяць
+              <select name="token_month">
+                {month_options}
+              </select>
+            </label>
+            <label>День
+              <input type="date" name="token_day" value="{selected_date_value}">
+            </label>
+            <button type="submit">Показати</button>
+            <a class="token-reset" href="{html.escape(month_href)}">Весь місяць</a>
+            <a class="token-reset" href="{html.escape(all_time_href)}">Останній місяць</a>
+          </form>
+        </div>
+        <div class="token-days">{calendar_days}</div>
+        <div class="token-grid">
+          <div class="token-stat"><span>{html.escape(period_title)}</span><strong>{html.escape(period_label)}</strong></div>
+          <div class="token-stat"><span>Period calls</span><strong>{_fmt_int(period_usage.get("calls"))}</strong></div>
+          <div class="token-stat"><span>Period input</span><strong>{_fmt_int(period_usage.get("tokens_in"))}</strong></div>
+          <div class="token-stat"><span>Period output</span><strong>{_fmt_int(period_usage.get("tokens_out"))}</strong></div>
+          <div class="token-stat"><span>Period total</span><strong>{_fmt_int(period_usage.get("tokens_total"))}</strong></div>
+        </div>
+        <div class="token-table-wrap">
+          <h3>Selected period by model</h3>
+          <table class="usage-table">
+            <thead><tr><th>Provider</th><th>Model</th><th>Capability</th><th>Calls</th><th>Failed</th><th>Input</th><th>Output</th><th>Total</th></tr></thead>
+            <tbody>{period_rows}</tbody>
+          </table>
+        </div>
       </div>
       <div class="token-table-wrap">
         <h3>Tracked LLM calls by model</h3>
@@ -1113,6 +1221,20 @@ body{{ margin:0; min-height:100vh; font-family:"IBM Plex Sans","Segoe UI",sans-s
 .token-stat strong{{ display:block; font-size:1.42rem; line-height:1.1; }}
 .token-stat em{{ display:block; color:var(--muted); font-size:.8rem; margin-top:4px; font-style:normal; }}
 .memory-grid{{ margin-top:20px; }}
+.token-calendar{{ margin:20px 0; padding:16px; border:1px solid var(--line); border-radius:20px; background:rgba(255,255,255,.34); }}
+.token-calendar-head{{ display:flex; justify-content:space-between; gap:16px; flex-wrap:wrap; align-items:flex-start; }}
+.token-calendar-head h3{{ margin:0 0 8px; font-size:1rem; }}
+.token-filter{{ display:flex; gap:10px; align-items:end; flex-wrap:wrap; }}
+.token-filter label{{ display:flex; flex-direction:column; gap:5px; color:var(--muted); font-size:.78rem; font-weight:700; }}
+.token-filter select,.token-filter input{{ border:1px solid rgba(59,45,30,.18); border-radius:12px; background:rgba(255,255,255,.82); padding:9px 10px; font:inherit; color:var(--ink); min-width:150px; }}
+.token-filter button,.token-reset{{ border:1px solid var(--line); border-radius:999px; background:rgba(255,255,255,.72); color:var(--ink); padding:10px 13px; font:inherit; font-weight:700; text-decoration:none; }}
+.token-days{{ display:grid; gap:8px; grid-template-columns:repeat(7,minmax(84px,1fr)); margin:14px 0 16px; }}
+.token-day{{ display:block; min-height:76px; padding:10px; border:1px solid var(--line); border-radius:14px; background:rgba(255,255,255,.62); color:var(--ink); text-decoration:none; }}
+.token-day:hover{{ transform:translateY(-1px); }}
+.token-day strong{{ display:block; font-size:1.05rem; margin-bottom:8px; }}
+.token-day span,.token-day em{{ display:block; color:var(--muted); font-size:.78rem; font-style:normal; line-height:1.25; }}
+.token-day.is-empty{{ opacity:.45; }}
+.token-day.is-selected{{ border-color:rgba(191,75,44,.55); background:rgba(191,75,44,.12); }}
 .token-table-wrap{{ overflow:auto; margin-top:12px; }}
 .token-table-wrap h3{{ margin:0 0 10px; font-size:1rem; }}
 .usage-table{{ width:100%; border-collapse:collapse; min-width:760px; font-size:.9rem; }}
@@ -1193,6 +1315,7 @@ option.no-key{{ color:#bbb; }}
 @media(max-width:620px){{
   .sh{{ padding:18px 14px 34px; }} .st-grid{{ grid-template-columns:1fr; }}
   .cap-fields{{ grid-template-columns:1fr; }} .toolbar{{ align-items:stretch; }}
+  .token-days{{ grid-template-columns:repeat(2,minmax(110px,1fr)); }}
 }}
 </style>
 </head>
@@ -1716,7 +1839,16 @@ class SmartestAdminHandler(BaseHTTPRequestHandler):
         if not self._current_session():
             self._redirect("/login"); return
         values = read_current_config()
-        self._send_html(render_dashboard(values, flash=self._query_param(parsed.query, "flash"), flash_kind=self._query_param(parsed.query, "kind") or "info"), head_only=True)
+        self._send_html(
+            render_dashboard(
+                values,
+                flash=self._query_param(parsed.query, "flash"),
+                flash_kind=self._query_param(parsed.query, "kind") or "info",
+                token_month=self._query_param(parsed.query, "token_month"),
+                token_day=self._query_param(parsed.query, "token_day"),
+            ),
+            head_only=True,
+        )
 
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
@@ -1749,7 +1881,15 @@ class SmartestAdminHandler(BaseHTTPRequestHandler):
         if not self._current_session():
             self._redirect("/login"); return
         values = read_current_config()
-        self._send_html(render_dashboard(values, flash=self._query_param(parsed.query, "flash"), flash_kind=self._query_param(parsed.query, "kind") or "info"))
+        self._send_html(
+            render_dashboard(
+                values,
+                flash=self._query_param(parsed.query, "flash"),
+                flash_kind=self._query_param(parsed.query, "kind") or "info",
+                token_month=self._query_param(parsed.query, "token_month"),
+                token_day=self._query_param(parsed.query, "token_day"),
+            )
+        )
 
     def do_POST(self) -> None:
         parsed = urlparse(self.path)

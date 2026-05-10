@@ -117,7 +117,7 @@ def test_render_dashboard_includes_token_calculator(tmp_path, monkeypatch):
     monkeypatch.setattr(
         admin_ui,
         "token_dashboard_data",
-        lambda: {
+        lambda **_kwargs: {
             "log_path": str(tmp_path / "token_usage.jsonl"),
             "memory_error": "",
             "usage": {
@@ -160,6 +160,7 @@ def test_render_dashboard_includes_token_calculator(tmp_path, monkeypatch):
     rendered = admin_ui.render_dashboard({})
 
     assert "Token calculator" in rendered
+    assert "Token calendar" in rendered
     assert "Tracked LLM calls by model" in rendered
     assert "Working memory context by chat" in rendered
     assert "gpt-test" in rendered

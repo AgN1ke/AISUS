@@ -11,7 +11,7 @@ def _patch_dashboard_runtime(monkeypatch, tmp_path):
     monkeypatch.setattr(
         admin_ui,
         "token_dashboard_data",
-        lambda: {
+        lambda **_kwargs: {
             "log_path": str(tmp_path / "token_usage.jsonl"),
             "memory_error": "",
             "usage": {
@@ -94,6 +94,15 @@ def test_render_dashboard_contains_tuning_section(monkeypatch, tmp_path):
     assert "MEMORY_RECENT_BUDGET" in rendered
     assert "ALBUM_PROCESSING_SETTLE_SECONDS" in rendered
     assert "MEDIA_TMP_MAX_AGE_HOURS" in rendered
+
+
+def test_render_dashboard_contains_token_calendar(monkeypatch, tmp_path):
+    _patch_dashboard_runtime(monkeypatch, tmp_path)
+
+    rendered = admin_ui.render_dashboard({})
+
+    assert "Token calendar" in rendered
+    assert "Selected period by model" in rendered
 
 
 def test_render_prompts_lists_search_gate():
