@@ -7777,3 +7777,64 @@ Strict equality `[Speaker:...] addressed... який твій улюблений
 - `Smartest-prod-backport/agent/search_task.py` (trim_terminal_user_duplicate)
 - `Smartest-prod-backport/tests/acceptance/test_speaker_prefix.py` (+4 тести)
 - Prod `/opt/smartest/app` — обидва сервіси active
+
+## 2026-05-10 — Session 112: Cleanup legacy + periodic media tmp purge
+
+### Проблема
+
+Користувач: "проєкт накопичує аудіо в папці — чому не працює очищення через час?"
+
+Аудит локального репо показав значний legacy-смітник: 28МБ Audio/, 1.8МБ downloads/, 98МБ mariadb-zip, 6 Telethon .session-файлів з 2023-2024, порожній src/, Heroku/Docker артефакти що не використовуються.
+
+### Корінь "не очищається через час"
+
+`purge_stale_media_tmp()` викликається ОДИН раз — на старті бота (`run.py:147`). Per-turn `cleanup_downloaded_media()` працює на happy path, але:
+- Якщо turn падає з exception до cleanup-а → tmp-файл лишається.
+- Якщо процес не рестартить тижнями → orphan-и накопичуються.
+
+На проді `/opt/smartest/tmp` був 3.0МБ / 37 файлів (з квітня).
+
+### Виправлено
+
+**`memory/scheduler.py`** — додано періодичну job:
+```python
+async def periodic_media_tmp_purge():
+    from media.downloader import purge_stale_media_tmp
+    removed = await purge_stale_media_tmp()
+    logger.info("scheduler.media_tmp_purged removed=%s", removed)
+
+_scheduler.add_job(
+    periodic_media_tmp_purge,
+    IntervalTrigger(hours=6),
+    id="media_tmp_purge",
+)
+```
+
+TTL не міняв (24 години через `MEDIA_TMP_MAX_AGE_HOURS`). Тепер scheduler раз на 6 годин чистить файли старші за 24 години.
+
+Prod вручну очищено одноразово (`find /opt/smartest/tmp/ -mmin +1440 -delete`): 3.0МБ → 4K, 37 → 0 файлів.
+
+### Cleanup legacy
+
+**Видалено з git (tracked):**
+- `Dockerfile`, `docker-compose.yml` — деплоїмо через tar+SSH, не Docker.
+- `Procfile` (`bot: python run.py`) — Heroku-only, сервер на systemd.
+- `main.py` — thin `asyncio.run(run.main())` обгортка. systemd запускає `run.py` напряму через `ExecStart=/opt/smartest/venv/bin/python /opt/smartest/app/run.py`.
+- `log.txt` — stale файл з 2024.
+- `sessions/.gitignore` — пустий маркер.
+
+**Видалено локально (untracked, .gitignored):**
+- `src/` — тільки legacy `__pycache__/`.
+- `Audio/` — 28МБ voice-файлів 2023-2024.
+- `downloads/` — 1.8МБ.
+- `Smart.session*`, `*_bot.session`, `aisusbots.session` — 6 Telethon-сесій 2023-2024.
+- `mariadb-12.2.2-winx64.zip` — 98МБ binary installer.
+- `.tmp/` — scratch.
+
+### Артефакти
+
+- `Smartest-prod-backport/memory/scheduler.py` (periodic_media_tmp_purge job)
+- `Smartest/memory/scheduler.py` (синхронно)
+- master: `9ccae91 → b1ee931`
+- multitenant: `576cac0 → 44fd141` (legacy delete + scheduler)
+- Prod `/opt/smartest/app` — обидва сервіси active, scheduler started з двома job-ами
