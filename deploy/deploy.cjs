@@ -51,13 +51,19 @@ if (!process.env.SKIP_ACCEPTANCE) {
 
 console.log('[deploy] Creating archive...');
 try {
-  // Always use POSIX paths + bash for tar (Git Bash on Windows handles it).
-  // cmd.exe + tar interprets C:\ as a remote host ("Cannot connect to C: resolve failed").
-  const tarPosix = tarFile.replace(/\\/g, '/').replace(/^([A-Z]):/i, '/$1');
-  const projPosix = PROJECT_DIR.replace(/\\/g, '/').replace(/^([A-Z]):/i, '/$1');
-  execSync(`tar czf "${tarPosix}" ${excludes} -C "${projPosix}" .`, {
-    stdio: 'inherit', shell: 'bash', cwd: PROJECT_DIR,
-  });
+  if (IS_WIN) {
+    // Use a relative output path on Windows. Absolute C:\ paths make bsdtar
+    // interpret "C:" as a remote host, and Git Bash is not guaranteed here.
+    execSync(`tar czf "deploy/smartest.tar.gz" ${excludes} .`, {
+      stdio: 'inherit', shell: EXEC_SHELL, cwd: PROJECT_DIR,
+    });
+  } else {
+    const tarPosix = tarFile.replace(/\\/g, '/');
+    const projPosix = PROJECT_DIR.replace(/\\/g, '/');
+    execSync(`tar czf "${tarPosix}" ${excludes} -C "${projPosix}" .`, {
+      stdio: 'inherit', shell: 'bash', cwd: PROJECT_DIR,
+    });
+  }
 } catch (e) {
   console.error('[deploy] tar failed:', e.message);
   process.exit(1);

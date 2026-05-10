@@ -2660,3 +2660,25 @@ Prod-backport отримав той самий memory hardening, що й multite
 - `python -m py_compile agent/tools/web_search.py agent/search_task.py agent/runner.py app/message_logic.py agent/planner.py core/prompts.py app/admin_ui.py media/router.py media/downloader.py memory/manager.py memory/summarizer.py` -> OK;
 - той самий широкий target suite по search/planner/message/media/admin/acceptance -> green;
 - deploy через `deploy/deploy.cjs` пройшов acceptance gate, `smartest-bot` і `smartest-admin` після restart мають статус `active`.
+
+## 2026-05-10 — Session 113-P: Admin UI sync with prod runtime knobs
+
+Мета: синхронізувати `smartest.klawa.top` admin UI з тим, що prod `@saintaibot` реально використовує у runtime, без multitenant/test-гілки і без зміни логіки бота.
+
+Зроблено:
+- `/prompts` тепер показує `Search Gate (відсікач пошуку)` і зберігає override у `PROMPT_SEARCH_GATE`; дефолт підтягується з `SEARCH_GATE_SYSTEM_PROMPT`;
+- на головному dashboard додано `Voice & STT`: `OPENAI_WHISPER_MODEL`, `OPENAI_TTS_MODEL`, `OPENAI_VOCALIZER_VOICE`;
+- додано `Memory & Albums`: реальні memory-budget env keys (`MEMORY_CONTEXT_BUDGET`, `MEMORY_WORKING_CONTEXT_BUDGET`, `MEMORY_LONG_CONTEXT_BUDGET`, `MEMORY_CORE_CONTEXT_BUDGET`, `MEMORY_RECENT_BUDGET`, `MEMORY_LONG_BUDGET`, `MEMORY_CORE_BUDGET`), `ALBUM_PROCESSING_SETTLE_SECONDS`, `MEDIA_TMP_MAX_AGE_HOURS`;
+- `stt_voice` виправлено як chat-capability після Whisper-транскрипції: group=`smart`, model_type=`text`, default model=`gpt-4o-mini`;
+- `.env-example` доповнено media/runtime tuning keys;
+- додано acceptance coverage для search-gate prompt, Voice/STT, Memory/Albums і `stt_voice` semantics;
+- stale planner unit tests оновлено під поточну Session 109 архітектуру: planner може вибрати `search`, search-gate є filter, не promoter.
+- `deploy/deploy.cjs` виправлено для Windows pack step: tar тепер використовує relative archive path і не потребує Git Bash.
+
+Перевірка:
+- `python -m py_compile app/admin_ui.py core/prompts.py agent/planner.py agent/search_task.py agent/runner.py app/message_logic.py media/router.py media/downloader.py memory/manager.py` -> OK;
+- `python -m pytest -q --noconftest tests/test_030_agent.py tests/test_031_planner.py tests/test_032_search_task.py tests/test_034_web_search.py tests/test_035_search_provider.py tests/test_038_search_evaluator.py tests/test_041_search_repository.py tests/test_042_search_memory.py tests/test_060_message_logic.py tests/test_061_message_logic_layers.py tests/test_071_admin_ui.py tests/test_106_search_flow.py tests/acceptance` -> green.
+- prod `/opt/smartest/.env` idempotently migrated for voice/memory/album/tmp keys;
+- `deploy/deploy.cjs` acceptance gate passed; `smartest-bot` and `smartest-admin` restarted and are `active`;
+- server-side smoke in `/opt/smartest/app` confirms dashboard contains `Voice & STT`, `Memory & Albums`, `PROMPT_SEARCH_GATE`, and `stt_voice` is `group=smart`, `model_type=text`;
+- `https://smartest.klawa.top/login` returns HTTP 200.

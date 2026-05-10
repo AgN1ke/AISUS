@@ -44,10 +44,10 @@ def test_heuristic_text_falls_to_chat_no_keyword_search(monkeypatch):
     assert decision.planner_source == "heuristic"
 
 
-def test_planner_llm_search_route_is_collapsed_to_chat(monkeypatch):
-    """The router LLM never picks search itself. Even if it tries,
-    _normalize_route folds search→chat. Search is owned by the intent
-    classifier, not the router."""
+def test_planner_llm_search_route_survives_when_gate_disabled(monkeypatch):
+    """Current architecture: planner may pick search directly.
+    If SEARCH_ENABLED=false, the search gate is skipped and the planner
+    decision is left untouched for the caller to handle."""
     monkeypatch.setattr(planner, "_planner_enabled", lambda: True)
     monkeypatch.setattr(planner, "_should_short_circuit", lambda task: False)
     monkeypatch.setattr(planner, "_search_enabled", lambda: False)
@@ -61,17 +61,21 @@ def test_planner_llm_search_route_is_collapsed_to_chat(monkeypatch):
 
     decision = planner.plan_message(planner.PlannerInput(user_text="що там з OpenAI"))
 
-    assert decision.route == "chat"
-    assert decision.capability == "chat_final"
+    assert decision.route == "search"
+    assert decision.capability == "search_web"
 
 
-def test_search_intent_classifier_promotes_chat_to_search(monkeypatch):
-    """Classifier sees the LAST user message and promotes chat→search
-    when it detects intent. Source is search_intent_classifier."""
+def test_search_gate_does_not_promote_chat_to_search(monkeypatch):
+    """Search gate is a filter, not a promoter. If planner picked chat,
+    the gate must not be called even if the user text contains search words."""
     monkeypatch.setattr(planner, "_planner_enabled", lambda: True)
     monkeypatch.setattr(planner, "_should_short_circuit", lambda task: False)
     monkeypatch.setattr(planner, "_search_enabled", lambda: True)
-    monkeypatch.setattr(planner, "_validate_search", lambda task: True)
+    monkeypatch.setattr(
+        planner,
+        "_validate_search",
+        lambda task: (_ for _ in ()).throw(AssertionError("gate must not promote chat")),
+    )
     monkeypatch.setattr(
         planner,
         "chat_once",
@@ -84,9 +88,9 @@ def test_search_intent_classifier_promotes_chat_to_search(monkeypatch):
         planner.PlannerInput(user_text="загугли курс долара")
     )
 
-    assert decision.route == "search"
-    assert decision.capability == "search_web"
-    assert decision.planner_source == "search_intent_classifier"
+    assert decision.route == "chat"
+    assert decision.capability == "chat_final"
+    assert decision.planner_source == "llm"
 
 
 def test_search_intent_classifier_keeps_chat_for_shitpost(monkeypatch):

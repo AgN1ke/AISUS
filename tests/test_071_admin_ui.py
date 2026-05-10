@@ -83,7 +83,13 @@ def test_admin_ui_media_capabilities_have_correct_model_type():
     media_caps = {cap.slug: cap for cap in admin_ui.CAPABILITIES if cap.group == "media"}
     assert media_caps["vision_image"].model_type == "vision"
     assert media_caps["video_understanding"].model_type == "video"
-    assert media_caps["stt_voice"].model_type == "stt"
+
+
+def test_admin_ui_stt_voice_is_chat_capability():
+    cap = next(c for c in admin_ui.CAPABILITIES if c.slug == "stt_voice")
+    assert cap.group == "smart"
+    assert cap.model_type == "text"
+    assert "Whisper" in cap.help_text
 
 
 def test_auto_adapter():

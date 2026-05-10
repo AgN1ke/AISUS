@@ -221,10 +221,11 @@ CAPABILITIES: list[CapabilityDef] = [
         "video", "gemini", "gemini-2.5-flash",
     ),
     CapabilityDef(
-        "stt_voice", "Голос / STT",
-        "Розпізнавання мовлення з аудіо.",
-        "media", "Тільки OpenAI whisper/transcribe",
-        "stt", "openai", "gpt-4o-transcribe",
+        "stt_voice", "Чат-відповідь на голос",
+        "Чат-капабіліті, що формує відповідь на вже транскрибований текст. "
+        "Сама транскрипція робиться окремим Whisper API викликом у секції Voice & STT.",
+        "smart", "Текстова модель (та сама що chat_final або легша)",
+        "text", "openai", "gpt-4o-mini",
     ),
     CapabilityDef(
         "document_context", "Робота з документами",
@@ -258,6 +259,7 @@ def _load_prompt_defaults() -> dict[str, str]:
     """Load default prompt values from core/prompts.py at import time."""
     from core.prompts import (
         PLANNER_SYSTEM_PROMPT,
+        SEARCH_GATE_SYSTEM_PROMPT,
         SEARCH_COMPOSER_SYSTEM_PROMPT,
         SEARCH_QUERY_PLANNER_PROMPT,
         SEARCH_EVALUATOR_SYSTEM_PROMPT,
@@ -271,6 +273,7 @@ def _load_prompt_defaults() -> dict[str, str]:
     )
     return {
         "planner": PLANNER_SYSTEM_PROMPT,
+        "search_gate": SEARCH_GATE_SYSTEM_PROMPT,
         "search_composer": SEARCH_COMPOSER_SYSTEM_PROMPT,
         "search_query_planner": SEARCH_QUERY_PLANNER_PROMPT,
         "search_evaluator": SEARCH_EVALUATOR_SYSTEM_PROMPT,
@@ -306,6 +309,15 @@ PROMPT_DEFS: list[PromptDef] = [
         "Крок 1: Маршрутизація",
         "planner_reasoning",
         "PROMPT_PLANNER_SYSTEM",
+        "",
+    ),
+    PromptDef(
+        "search_gate", "Search Gate (відсікач пошуку)",
+        "Класифікатор-фільтр. Запускається тільки коли planner вибрав search; "
+        "відсікає false positives: lore, теорію, мисленнєві експерименти. Fail-closed: помилка -> CHAT.",
+        "Крок 1.5: Verify search decision",
+        "planner_reasoning",
+        "PROMPT_SEARCH_GATE",
         "",
     ),
     PromptDef(
@@ -431,6 +443,83 @@ GLOBAL_FIELDS: list[FieldDef] = [
     FieldDef("SEARCH_PROFILE_NEWS_ORDER", "Search order: news"),
     FieldDef("SEARCH_PROFILE_DOCS_ORDER", "Search order: docs"),
     FieldDef("SEARCH_PROFILE_RESEARCH_PAPER_ORDER", "Search order: research paper"),
+]
+
+VOICE_FIELDS: list[FieldDef] = [
+    FieldDef(
+        "OPENAI_WHISPER_MODEL",
+        "Whisper модель (STT)",
+        placeholder="whisper-1",
+        help_text="Транскрипція голосу. Працює окремо від stt_voice capability.",
+    ),
+    FieldDef(
+        "OPENAI_TTS_MODEL",
+        "TTS модель (синтез)",
+        placeholder="gpt-4o-mini-tts",
+    ),
+    FieldDef(
+        "OPENAI_VOCALIZER_VOICE",
+        "Голос TTS",
+        placeholder="alloy",
+        help_text="alloy / echo / fable / onyx / nova / shimmer",
+    ),
+]
+
+TUNING_FIELDS: list[FieldDef] = [
+    FieldDef(
+        "MEMORY_CONTEXT_BUDGET",
+        "Total memory context budget (tokens)",
+        placeholder="10000",
+        help_text="Загальний ліміт пам'яті, яку можна додати до prompt після резерву під поточні повідомлення.",
+    ),
+    FieldDef(
+        "MEMORY_WORKING_CONTEXT_BUDGET",
+        "Working memory context budget (tokens)",
+        placeholder="5000",
+        help_text="Скільки токенів recent/working пам'яті можна показати моделі у поточному turn.",
+    ),
+    FieldDef(
+        "MEMORY_LONG_CONTEXT_BUDGET",
+        "Long-term context budget (tokens)",
+        placeholder="4000",
+        help_text="Скільки токенів long-term пам'яті можна повернути у prompt.",
+    ),
+    FieldDef(
+        "MEMORY_CORE_CONTEXT_BUDGET",
+        "Core context budget (tokens)",
+        placeholder="1000",
+        help_text="Скільки токенів core-фактів і beliefs можна повернути у prompt.",
+    ),
+    FieldDef(
+        "MEMORY_RECENT_BUDGET",
+        "Recent memory compression budget (tokens)",
+        placeholder="5000",
+        help_text="Коли recent/working шар перевищує цей ліміт, він стискається у long-term.",
+    ),
+    FieldDef(
+        "MEMORY_LONG_BUDGET",
+        "Long-term storage budget (tokens)",
+        placeholder="30000",
+        help_text="Скільки long-term пам'яті зберігати перед каскадним перестисненням.",
+    ),
+    FieldDef(
+        "MEMORY_CORE_BUDGET",
+        "Core storage budget (tokens)",
+        placeholder="1000",
+        help_text="Ліміт core-шару пам'яті у сховищі.",
+    ),
+    FieldDef(
+        "ALBUM_PROCESSING_SETTLE_SECONDS",
+        "Album collect window (s)",
+        placeholder="6.0",
+        help_text="Скільки чекати, поки прийдуть всі sibling-айтеми альбому.",
+    ),
+    FieldDef(
+        "MEDIA_TMP_MAX_AGE_HOURS",
+        "Media tmp TTL (hours)",
+        placeholder="24",
+        help_text="Файли старші за цей TTL чистяться scheduler job-ом.",
+    ),
 ]
 
 ACCESS_FIELDS: list[FieldDef] = [
@@ -719,6 +808,21 @@ def _effective_model(cap: CapabilityDef, values: dict[str, str]) -> str:
 # Rendering: dashboard
 # ---------------------------------------------------------------------------
 
+def _render_field_grid(fields: list[FieldDef], values: dict[str, str], *, item_class: str = "adv-label") -> str:
+    out = ""
+    for f in fields:
+        value = html.escape(values.get(f.key, "") or f.placeholder)
+        placeholder = html.escape(f.placeholder)
+        help_html = f'<p class="field-help">{html.escape(f.help_text)}</p>' if f.help_text else ""
+        out += (
+            f'<label class="{item_class}">{html.escape(f.label)}'
+            f'<input class="inp" type="{html.escape(f.input_type)}" '
+            f'name="{html.escape(f.key)}" value="{value}" placeholder="{placeholder}">'
+            f'{help_html}</label>'
+        )
+    return out
+
+
 def render_dashboard(values: dict[str, str], flash: str = "", flash_kind: str = "info") -> str:
     bot_status = service_status(MANAGED_BOT_SERVICE)
     admin_status = service_status(SELF_SERVICE_NAME)
@@ -940,10 +1044,9 @@ def render_dashboard(values: dict[str, str], flash: str = "", flash_kind: str = 
         </section>'''
 
     # --- Advanced (collapsed) ---
-    adv_fields = ""
-    for f in GLOBAL_FIELDS:
-        v = html.escape(values.get(f.key, "") or f.placeholder)
-        adv_fields += f'<label class="adv-label">{html.escape(f.label)}<input class="inp" type="text" name="{html.escape(f.key)}" value="{v}" placeholder="{html.escape(f.placeholder)}"></label>'
+    voice_fields = _render_field_grid(VOICE_FIELDS, values)
+    tuning_fields = _render_field_grid(TUNING_FIELDS, values)
+    adv_fields = _render_field_grid(GLOBAL_FIELDS, values)
 
     return f"""<!doctype html>
 <html lang="uk">
@@ -1077,6 +1180,7 @@ option.no-key{{ color:#bbb; }}
 .adv-grid{{ display:grid; gap:14px; grid-template-columns:repeat(auto-fit,minmax(260px,1fr)); }}
 .adv-label{{ display:block; font-weight:700; font-size:.88rem; }}
 .adv-label input{{ margin-top:6px; }}
+.field-help{{ margin:6px 0 0; color:var(--muted); font-size:.8rem; line-height:1.35; font-weight:500; }}
 
 /* Access */
 .acc-grid{{ display:grid; gap:16px; grid-template-columns:repeat(auto-fit,minmax(260px,1fr)); }}
@@ -1141,6 +1245,20 @@ option.no-key{{ color:#bbb; }}
         </label>
       </div>
       <div class="prov-grid">{search_cards}</div>
+    </section>
+
+    <!-- Voice and STT -->
+    <section class="panel">
+      <h2>Voice & STT</h2>
+      <p class="panel-desc">Реальні runtime-ключі для транскрипції голосу і синтезу аудіовідповідей. Це не вибір чат-моделі для stt_voice.</p>
+      <div class="adv-grid">{voice_fields}</div>
+    </section>
+
+    <!-- Memory and albums -->
+    <section class="panel">
+      <h2>Memory & Albums</h2>
+      <p class="panel-desc">Бюджети пам'яті, вікно збору Telegram-альбомів і TTL тимчасових медіафайлів.</p>
+      <div class="adv-grid">{tuning_fields}</div>
     </section>
 
     <!-- Agent groups -->
@@ -1724,8 +1842,8 @@ class SmartestAdminHandler(BaseHTTPRequestHandler):
         gb = existing.get("PROVIDER_GEMINI_THINKING_BUDGET", "0")
         updates["PROVIDER_GEMINI_THINKING_BUDGET"] = gb
 
-        # Global / advanced fields
-        for f in GLOBAL_FIELDS:
+        # Dashboard env fields
+        for f in [*VOICE_FIELDS, *TUNING_FIELDS, *GLOBAL_FIELDS]:
             updates[f.key] = params.get(f.key, "").strip()
 
         # Access
