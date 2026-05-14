@@ -303,7 +303,11 @@ def _chat_once_gemini(
         "x-goog-api-key": binding.api_key,
         "Content-Type": "application/json",
     }
-    response = requests.post(url, headers=headers, json=payload, timeout=60)
+    # Gemini reasoning (`/think` route) often needs 90-150s. Old 60s timeout
+    # caused recurring ReadTimeout errors (e.g. 2026-05-13 15:18 trace
+    # 257552). Bumping to 180s gives reasoning enough headroom while still
+    # bounded enough to surface real failures.
+    response = requests.post(url, headers=headers, json=payload, timeout=180)
     try:
         response.raise_for_status()
     except requests.HTTPError as exc:

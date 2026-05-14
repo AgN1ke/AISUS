@@ -317,6 +317,28 @@ def plan_message(task: PlannerInput) -> PlanDecision:
             planned = None
         decision = planned or fallback
 
+    # Auto-downgrade BEFORE calling gate when user is in a reply-to-bot
+    # conversation. The user is asking a follow-up about what the bot just
+    # said — they're not asking the bot to fetch fresh web data. Saves
+    # tokens and prevents false-positive searches like "шо там пишуть?" /
+    # "а коли це було?" / "де саме?" / etc. (Session 114: trace 257692).
+    if (
+        _search_enabled()
+        and decision.route == "search"
+        and task.reply_to_bot
+    ):
+        logger.info(
+            "planner.search_auto_downgrade reason=reply_to_bot last=%s",
+            (task.user_text or "")[:120],
+        )
+        return PlanDecision(
+            route="chat",
+            capability="chat_final",
+            use_reasoning=decision.use_reasoning,
+            planner_source="search_auto_downgrade_reply_to_bot",
+            notes="reply_to_bot_context_takes_precedence",
+        )
+
     # Search-gate as FILTER (Session 109 revert):
     # If the primary planner picked `search`, the focused gate verifies the
     # decision. If gate downgrades — drop back to chat. This is the

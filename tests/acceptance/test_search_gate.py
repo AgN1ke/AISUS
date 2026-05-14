@@ -322,6 +322,71 @@ def test_plan_message_does_NOT_call_gate_on_empty_user_text(monkeypatch):
 # ===== logging: verdict + truncated user message =====
 
 
+def test_plan_message_auto_downgrades_search_when_reply_to_bot(monkeypatch):
+    """Session 114: when user is in reply-to-bot conversation, planner-picked
+    search must be auto-downgraded WITHOUT calling the LLM gate.
+
+    Real failure: trace 257692 — user reply'ed bot with 'шо там пишуть?',
+    planner picked search, gate said SEARCH → bot googled. Anti-rule: if
+    you're talking to me, you're not asking me to fetch fresh data."""
+    monkeypatch.setattr(planner_mod, "_planner_enabled", lambda: True)
+    monkeypatch.setattr(
+        planner_mod, "_plan_with_model",
+        lambda task: PlanDecision(
+            route="search",
+            capability="search_web",
+            use_reasoning=False,
+            planner_source="llm",
+            notes="",
+        ),
+    )
+    gate_calls = []
+    monkeypatch.setattr(
+        planner_mod, "_validate_search",
+        lambda task: gate_calls.append(task) or True,
+    )
+
+    task = PlannerInput(
+        user_text="шо там пишуть?",
+        is_private=False,
+        addressed_via_mention=False,
+        reply_to_bot=True,
+        has_media_context=False,
+        media_kind=None,
+        dialogue_context=(),
+    )
+    decision = planner_mod.plan_message(task)
+    assert decision.route == "chat"
+    assert decision.planner_source == "search_auto_downgrade_reply_to_bot"
+    # Gate should NOT have been consulted (auto-downgrade saves tokens)
+    assert len(gate_calls) == 0
+
+
+def test_search_gate_prompt_covers_deictic_questions():
+    """Session 114: 'шо там пишуть?' / 'а тут що?' / 'це правда?' refer to
+    in-context objects (prev bot message, replied media). Prompt must
+    explicitly mark these as CHAT, not SEARCH."""
+    from core.prompts import SEARCH_GATE_SYSTEM_PROMPT
+    assert "деіктич" in SEARCH_GATE_SYSTEM_PROMPT.lower()
+    assert "шо там пишуть" in SEARCH_GATE_SYSTEM_PROMPT.lower()
+
+
+def test_gemini_timeout_is_at_least_120s():
+    """Session 114: Gemini /think reasoning often takes 90-150s. Old 60s
+    timeout caused recurring ReadTimeout on /think turns (trace 257552)."""
+    import inspect
+    from agent import llm
+    src = inspect.getsource(llm)
+    # Find the Gemini request line. Hard-coded timeout must be >= 120.
+    import re
+    matches = re.findall(r"timeout=(\d+)", src)
+    gemini_timeouts = [int(m) for m in matches if int(m) >= 60]
+    assert any(t >= 120 for t in gemini_timeouts), (
+        "Gemini request timeout must be at least 120s (was 60s, caused "
+        "ReadTimeout for /think reasoning)"
+    )
+
+
 def test_validate_search_logs_verdict_and_short_excerpt(monkeypatch, caplog):
     """Gate must log verdict + first ~120 chars of user_msg for ops debugging."""
     import logging
