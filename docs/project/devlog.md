@@ -2718,3 +2718,18 @@ Prod-backport отримав той самий memory hardening, що й multite
 Перевірка:
 - `python -m py_compile app/message_logic.py media/router.py media/vision.py core/prompts.py agent/runner.py` -> OK;
 - `python -m pytest -q --noconftest tests/test_030_agent.py tests/test_031_planner.py tests/test_032_search_task.py tests/test_034_web_search.py tests/test_035_search_provider.py tests/test_038_search_evaluator.py tests/test_040_media_router.py tests/test_041_search_repository.py tests/test_042_search_memory.py tests/test_060_message_logic.py tests/test_061_message_logic_layers.py tests/test_071_admin_ui.py tests/test_087_token_usage.py tests/test_106_search_flow.py tests/acceptance` -> green.
+
+## 2026-05-15 — Session 116-P: Task-aware vision/video prompting
+
+Мета: підкрутити якість відповідей після успішного `vision_image`, бо бот уже бачив поточне фото, але відповідав занадто відсторонено: "на зображенні, яке ти описав", "якщо можеш надати більше деталей". Це створювало враження, ніби він не дивиться на картинку, а обробляє чужий опис.
+
+Зроблено:
+- у `media.router` додано короткий task-aware hint для image/video extraction: якщо користувач питає "хто це", "що це", "що робить", цей запит передається в `describe_images()` / `analyze_video()` як явний фокус аналізу;
+- hint включає запит користувача і, якщо є, підпис/текст target media, але не додається окремим великим блоком у фінальний prompt;
+- `vision_image` capability prompt уточнено: коли є `[MEDIA_CURRENT]`, бот має відповідати як той, хто бачить медіа, не просити користувача переописати картинку і не писати "на зображенні, яке ти описав";
+- `video_understanding` prompt синхронізовано з `[MEDIA_CURRENT]`, щоб відео мало таку саму геометрію пріоритету, як фото;
+- додано регресійні тести, що photo/video analysis реально отримують task-aware user hint.
+
+Перевірка:
+- `python -m py_compile media/router.py media/vision.py media/video.py core/prompts.py app/message_logic.py` -> OK;
+- `python -m pytest -q --noconftest tests/test_040_media_router.py tests/test_041_video_pipeline.py tests/test_060_message_logic.py tests/test_061_message_logic_layers.py tests/test_071_admin_ui.py tests/test_087_token_usage.py tests/acceptance/test_media.py tests/acceptance/test_albums.py tests/acceptance/test_wiring.py tests/acceptance/test_search_gate.py` -> green.

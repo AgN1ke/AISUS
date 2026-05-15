@@ -113,12 +113,36 @@ def _compose_album_bundle(
     return "\n".join(lines).strip()
 
 
+def _build_task_aware_media_hint(
+    task_hint: str | None,
+    post_text: str | None = None,
+) -> str | None:
+    user_request = (task_hint or "").strip()
+    target_caption = (post_text or "").strip()
+    lines: list[str] = []
+    if user_request:
+        lines.append(f"Запит користувача до цього медіа: {user_request[:1000]}")
+    if target_caption and target_caption != user_request:
+        lines.append(f"Підпис або текст медіа: {target_caption[:1000]}")
+    if not lines:
+        return None
+    lines.append(
+        "Сфокусуй аналіз на деталях, потрібних для відповіді на цей запит. "
+        "Якщо питають 'хто це' або 'що це', дай максимально конкретну "
+        "ідентифікацію; якщо точність невисока, назви найімовірніші варіанти "
+        "і видимі ознаки. Якщо питають 'що робить', опиши дію. "
+        "Не відповідай користувачу напряму: дай факти для фінального агента."
+    )
+    return "\n".join(lines)
+
+
 async def _build_media_context(
     info: dict, task_hint: str | None, on_error
 ) -> tuple[str, str | None]:
     media_type = info.get("type")
     paths = info.get("paths") or []
     post_text = (info.get("text") or "").strip()
+    media_task_hint = _build_task_aware_media_hint(task_hint, post_text)
 
     if media_type == "album":
         items = []
@@ -139,16 +163,22 @@ async def _build_media_context(
                 item_payload["analysis"] = item_error
             elif item_type == "photo" and item_paths:
                 try:
+                    item_task_hint = _build_task_aware_media_hint(
+                        task_hint, item_payload["text"] or post_text
+                    )
                     item_payload["analysis"] = await asyncio.to_thread(
-                        describe_images, item_paths, task_hint or None,
+                        describe_images, item_paths, item_task_hint,
                     )
                 except Exception as exc:
                     logger.error("album photo analysis failed: %s", exc, exc_info=True)
                     item_payload["analysis"] = f"Не вдалося проаналізувати фото: {exc}"
             elif item_type == "video" and item_paths:
                 try:
+                    item_task_hint = _build_task_aware_media_hint(
+                        task_hint, item_payload["text"] or post_text
+                    )
                     video_payload = await asyncio.to_thread(
-                        analyze_video, item_paths[0], task_hint or None,
+                        analyze_video, item_paths[0], item_task_hint,
                     )
                     item_payload["analysis"] = video_payload.get("summary") or ""
                     item_payload["transcript"] = (
@@ -196,7 +226,7 @@ async def _build_media_context(
 
     if media_type == "photo" and paths:
         try:
-            analysis = await asyncio.to_thread(describe_images, paths, task_hint or None)
+            analysis = await asyncio.to_thread(describe_images, paths, media_task_hint)
         except Exception as exc:
             logger.error("photo analysis failed: %s", exc, exc_info=True)
             analysis = f"Не вдалося проаналізувати фото: {exc}"
@@ -214,7 +244,7 @@ async def _build_media_context(
 
     if media_type == "video" and paths:
         try:
-            payload = await asyncio.to_thread(analyze_video, paths[0], task_hint or None)
+            payload = await asyncio.to_thread(analyze_video, paths[0], media_task_hint)
         except Exception as exc:
             logger.error("video analysis failed: %s", exc, exc_info=True)
             return (

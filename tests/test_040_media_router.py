@@ -131,6 +131,77 @@ async def test_reply_to_bot_with_current_photo_uses_current_message(monkeypatch)
 
 
 @pytest.mark.asyncio
+async def test_photo_analysis_gets_task_aware_user_hint(monkeypatch):
+    chat = 99908
+    current = DummyMsg(chat, 40, text="@mybot хто це такі?")
+
+    async def fake_download(msg, context):
+        return {"type": "photo", "paths": ["/tmp/p.jpg"], "text": "птахи на траві"}
+
+    captured = {}
+
+    def fake_describe(paths, task_hint=None):
+        captured["paths"] = paths
+        captured["task_hint"] = task_hint
+        return "img"
+
+    monkeypatch.setattr("media.router.download_from_ptb_message", fake_download)
+    monkeypatch.setattr("media.router.describe_images", fake_describe)
+
+    async def fake_append(*_args, **_kwargs):
+        return None
+
+    async def fake_budget(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(memory_manager, "append_message", fake_append)
+    monkeypatch.setattr(memory_manager, "ensure_budget", fake_budget)
+
+    upd = DummyUpdate(chat, current)
+    await handle_ptb_mention(upd, DummyCtx, "mybot")
+
+    assert captured["paths"] == ["/tmp/p.jpg"]
+    assert "Запит користувача до цього медіа: хто це такі?" in captured["task_hint"]
+    assert "Підпис або текст медіа: птахи на траві" in captured["task_hint"]
+    assert "ідентифікацію" in captured["task_hint"]
+
+
+@pytest.mark.asyncio
+async def test_video_analysis_gets_task_aware_user_hint(monkeypatch):
+    chat = 99909
+    current = DummyMsg(chat, 41, text="@mybot що він робить?")
+
+    async def fake_download(msg, context):
+        return {"type": "video", "paths": ["/tmp/v.mp4"], "text": ""}
+
+    captured = {}
+
+    def fake_analyze(path, task_hint=None):
+        captured["path"] = path
+        captured["task_hint"] = task_hint
+        return {"summary": "video", "transcript": "", "frames": [], "vision_summary": ""}
+
+    monkeypatch.setattr("media.router.download_from_ptb_message", fake_download)
+    monkeypatch.setattr("media.router.analyze_video", fake_analyze)
+
+    async def fake_append(*_args, **_kwargs):
+        return None
+
+    async def fake_budget(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(memory_manager, "append_message", fake_append)
+    monkeypatch.setattr(memory_manager, "ensure_budget", fake_budget)
+
+    upd = DummyUpdate(chat, current)
+    await handle_ptb_mention(upd, DummyCtx, "mybot")
+
+    assert captured["path"] == "/tmp/v.mp4"
+    assert "Запит користувача до цього медіа: що він робить?" in captured["task_hint"]
+    assert "що робить" in captured["task_hint"]
+
+
+@pytest.mark.asyncio
 async def test_reply_to_media_text_prompt_uses_reply_target(monkeypatch):
     chat = 99907
     reply_to = DummyMsg(chat, 30, caption="мем", photo=[object()])
