@@ -22,7 +22,12 @@ logger = logging.getLogger(__name__)
 # Command prefixes to strip — this is command parsing, not intent detection.
 SEARCH_QUERY_PREFIXES = [
     r"^/think\b",
-    r"^(пошукай|погугли|загугли)\b[\s:,-]*",
+    # Explicit search commands. Includes short forms ("гугли", "шукай") that
+    # users actually type in chat — devlog Session 115: trace 257757/9 was
+    # "Гугли - сбу операція павутина" — "гугли" without "за/по" prefix
+    # wasn't matched, request was auto-downgraded as if there were no
+    # keyword. Now "гугли" / "шукай" count as explicit triggers.
+    r"^(пошукай|погугли|загугли|гугли|шукай)\b[\s:,-]*",
     r"^(знайди|перевір)\s+в\s+інтернеті\b[\s:,-]*",
 ]
 

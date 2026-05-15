@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from agent.llm import chat_once, make_messages
+from agent.search_task import is_explicit_search_request
 from core.env import env_bool
 from core.prompts import PLANNER_SYSTEM_PROMPT, SEARCH_GATE_SYSTEM_PROMPT
 
@@ -318,14 +319,22 @@ def plan_message(task: PlannerInput) -> PlanDecision:
         decision = planned or fallback
 
     # Auto-downgrade BEFORE calling gate when user is in a reply-to-bot
-    # conversation. The user is asking a follow-up about what the bot just
-    # said — they're not asking the bot to fetch fresh web data. Saves
-    # tokens and prevents false-positive searches like "шо там пишуть?" /
-    # "а коли це було?" / "де саме?" / etc. (Session 114: trace 257692).
+    # conversation with NO explicit search keyword. The user is asking a
+    # follow-up about what the bot just said — not requesting fresh web
+    # data. Saves tokens and prevents false-positive searches on contextual
+    # questions ("шо там пишуть?", "а коли це було?", "де саме?").
+    #
+    # IMPORTANT bypass (Session 115): if the user typed an EXPLICIT keyword
+    # ("пошукай / загугли / погугли / гугли / знайди в інтернеті / шукай"),
+    # honor it even in reply-to-bot mode. Session 114's blanket downgrade
+    # killed legitimate "загугли X" replies (trace 257752/4/7/9: user wrote
+    # "Гугли - сбу операція павутина" 4 times in a reply chain, all got
+    # downgraded → bot kept answering from memory).
     if (
         _search_enabled()
         and decision.route == "search"
         and task.reply_to_bot
+        and not is_explicit_search_request(task.user_text or "")
     ):
         logger.info(
             "planner.search_auto_downgrade reason=reply_to_bot last=%s",

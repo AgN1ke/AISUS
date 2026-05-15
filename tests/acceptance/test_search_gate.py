@@ -322,6 +322,86 @@ def test_plan_message_does_NOT_call_gate_on_empty_user_text(monkeypatch):
 # ===== logging: verdict + truncated user message =====
 
 
+def test_explicit_keyword_search_bypasses_reply_to_bot_downgrade(monkeypatch):
+    """Session 115 fix: explicit 'Гугли/пошукай/загугли' in reply-to-bot
+    must NOT be auto-downgraded. Session 114's blanket downgrade killed
+    legitimate explicit-search requests in reply chains
+    (trace 257752/4/7/9: 'Гугли - сбу операція павутина')."""
+    monkeypatch.setattr(planner_mod, "_planner_enabled", lambda: True)
+    monkeypatch.setattr(
+        planner_mod, "_plan_with_model",
+        lambda task: PlanDecision(
+            route="search",
+            capability="search_web",
+            use_reasoning=False,
+            planner_source="llm",
+            notes="",
+        ),
+    )
+    # Gate not consulted in this path; if it would be, return True so the
+    # final decision is still 'search' (we want to verify the BYPASS path).
+    monkeypatch.setattr(planner_mod, "_validate_search", lambda task: True)
+
+    for explicit_text in (
+        "Гугли - сбу операція павутина",
+        "загугли сбу операція павутина",
+        "пошукай новини про NASA",
+        "погугли курс долара",
+    ):
+        task = PlannerInput(
+            user_text=explicit_text,
+            is_private=False,
+            addressed_via_mention=False,
+            reply_to_bot=True,  # in a reply chain with bot
+            has_media_context=False,
+            media_kind=None,
+            dialogue_context=(),
+        )
+        decision = planner_mod.plan_message(task)
+        assert decision.route == "search", (
+            f"explicit keyword '{explicit_text}' must reach search "
+            f"despite reply_to_bot; got route={decision.route} "
+            f"source={decision.planner_source}"
+        )
+
+
+def test_short_form_keywords_recognized_as_explicit_search():
+    """Session 115: short forms 'гугли' / 'шукай' (without 'за'/'по' prefix)
+    must count as explicit search requests."""
+    from agent.search_task import is_explicit_search_request
+    assert is_explicit_search_request("Гугли - сбу операція") is True
+    assert is_explicit_search_request("гугли новини") is True
+    assert is_explicit_search_request("Шукай останнє про NASA") is True
+    # And the longer forms still work
+    assert is_explicit_search_request("пошукай новини") is True
+    assert is_explicit_search_request("загугли курс") is True
+
+
+def test_vision_prompt_extracts_maximum_detail():
+    """Session 115: vision prompt must instruct extraction of maximum
+    information for handoff to flagship model — NOT a 'стисло' summary."""
+    from core.prompts import VISION_IMAGE_DESCRIPTION_PROMPT
+    p = VISION_IMAGE_DESCRIPTION_PROMPT.lower()
+    # Must NOT contain restricting word "стисло"
+    assert "стисло" not in p, (
+        "vision prompt must not restrict to short summary — flagship model "
+        "composes the user-facing answer, vision should extract everything"
+    )
+    # Must include category-instructions for text/people/objects/context
+    for kw in ("ocr", "впізнавані", "брен", "контекст", "не цензуруй"):
+        assert kw in p, f"vision prompt missing '{kw}'"
+
+
+def test_video_extractor_prompt_demands_full_detail():
+    """Session 115: video extraction prompt must request structured full
+    detail (text, people, characters, objects, context, action)."""
+    import inspect
+    from media import video
+    src = inspect.getsource(video).lower()
+    for kw in ("text:", "people:", "objects:", "context:", "не цензуруй"):
+        assert kw in src, f"video prompt missing '{kw}'"
+
+
 def test_plan_message_auto_downgrades_search_when_reply_to_bot(monkeypatch):
     """Session 114: when user is in reply-to-bot conversation, planner-picked
     search must be auto-downgraded WITHOUT calling the LLM gate.
