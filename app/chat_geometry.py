@@ -314,6 +314,11 @@ def render_turn_context_messages(geometry: MessageGeometry) -> list[dict[str, st
         lines.append(f"target_media_kind: {geometry.target_media_kind}")
     reply = geometry.reply_target
     if reply.message_id is not None:
+        lines.append(
+            "reply_context_policy: current_user_text is the active request; "
+            "reply_target_text is quoted context only. Do not answer "
+            "reply_target_text as a second request unless current_user_text asks for it."
+        )
         lines.append(f"reply_target_message_id: {reply.message_id}")
         if reply.author.display_name or reply.author.username:
             author_bits = [reply.author.display_name or ""]

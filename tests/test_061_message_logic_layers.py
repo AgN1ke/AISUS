@@ -1,3 +1,4 @@
+import asyncio
 from types import SimpleNamespace
 
 import pytest
@@ -5,6 +6,7 @@ import pytest
 import app.message_logic as message_logic
 from adapters.base import MessageGeometry, ReplyTarget, UnifiedMessage
 from agent.planner import PlanDecision
+from app.chat_geometry import render_turn_context_messages
 
 
 class DummyPTBMessage:
@@ -38,6 +40,27 @@ def make_unified_message(text: str = "", bot_username: str = "botx") -> UnifiedM
         raw_update=update,
         bot_username=bot_username,
     )
+
+
+@pytest.mark.asyncio
+async def test_process_message_skips_duplicate_message_id(monkeypatch):
+    message_logic._RECENT_MESSAGE_KEYS.clear()
+    calls = []
+
+    async def fake_process_inner(msg, trace):
+        calls.append(trace)
+        await asyncio.sleep(0.01)
+
+    monkeypatch.setattr(message_logic, "_process_message_inner", fake_process_inner)
+
+    msg = make_unified_message("@botx hi")
+    await asyncio.gather(
+        message_logic.process_message(msg),
+        message_logic.process_message(msg),
+    )
+
+    assert calls == ["ptb:99950:77"]
+    message_logic._RECENT_MESSAGE_KEYS.clear()
 
 
 @pytest.mark.asyncio
@@ -115,6 +138,27 @@ async def test_build_user_task_marks_instruction_on_target():
     assert task.target_message_id == 123
     assert task.target_message_text == "це мем про змову"
     assert task.should_store_user_message is True
+
+
+def test_turn_context_marks_reply_target_as_context_only():
+    geometry = MessageGeometry(
+        chat_type="group",
+        clean_text="count to 17",
+        reply_to_bot=True,
+        reply_target=ReplyTarget(
+            message_id=123,
+            text="old long answer about magnesium",
+            is_bot=True,
+        ),
+    )
+
+    context = render_turn_context_messages(geometry)[0]["content"]
+
+    assert "current_user_text: count to 17" in context
+    assert "reply_target_text: old long answer about magnesium" in context
+    assert "reply_context_policy:" in context
+    assert "current_user_text is the active request" in context
+    assert "Do not answer reply_target_text as a second request" in context
 
 
 @pytest.mark.asyncio

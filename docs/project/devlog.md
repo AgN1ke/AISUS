@@ -2733,3 +2733,24 @@ Prod-backport отримав той самий memory hardening, що й multite
 Перевірка:
 - `python -m py_compile media/router.py media/vision.py media/video.py core/prompts.py app/message_logic.py` -> OK;
 - `python -m pytest -q --noconftest tests/test_040_media_router.py tests/test_041_video_pipeline.py tests/test_060_message_logic.py tests/test_061_message_logic_layers.py tests/test_071_admin_ui.py tests/test_087_token_usage.py tests/acceptance/test_media.py tests/acceptance/test_albums.py tests/acceptance/test_wiring.py tests/acceptance/test_search_gate.py` -> green.
+
+## 2026-05-15 — Session 117-P: Duplicate update guard + reply-context priority
+
+Мета: розібрати prod-випадок після 21:00 Kyiv, де бот почав відповідати двічі на одне повідомлення і тягнути попередню тему в наступні реплаї.
+
+Діагностика:
+- prod-логи показали дубль одного й того самого update-а: `trace=ptb:-1001656354144:258061` стартував о 19:27:06 UTC і повторно о 19:27:24 UTC з тим самим `chat_id/message_id`;
+- обидва turns дійшли до LLM і записали дві assistant-відповіді в `memory_recent`;
+- наступний reply-turn "порахуй до 17" отримав у контексті великий `reply_target_text` про магній і модель фактично продовжила стару тему замість активного запиту;
+- на сервері є staging-процес, але він використовує інший bot token (`8377179919`), тому причина не в двох prod-pollers; основний prod token (`6553829571`) працює в одному `smartest-bot.service`.
+
+Зроблено:
+- `adapters.telegram_bot` тепер явно ігнорує `edited_message` updates, бо PTB `MessageHandler(filters.ALL)` може отримувати `effective_message` для редагованого повідомлення з тим самим `message_id`;
+- `app.message_logic.process_message()` отримав idempotency guard на `(platform, chat_id, message_id)` з TTL 10 хвилин, щоб повторний delivery того самого update-а не запускав другий LLM-turn паралельно;
+- `app.chat_geometry.render_turn_context_messages()` додає `reply_context_policy`: `current_user_text` є активним запитом, `reply_target_text` лише цитований контекст;
+- `TELEGRAM_TRANSPORT_SYSTEM_PROMPT` уточнено тим самим правилом, щоб фінальна модель не відповідала на reply-target як на другий окремий запит;
+- додано регресійні тести на duplicate message guard, edited-message detection і reply-context priority.
+
+Перевірка:
+- `python -m py_compile adapters/telegram_bot.py app/message_logic.py app/chat_geometry.py core/prompts.py tests/test_043_telegram_adapter.py tests/test_061_message_logic_layers.py` -> OK;
+- `python -m pytest -q --noconftest tests/test_043_telegram_adapter.py tests/test_040_media_router.py tests/test_060_message_logic.py tests/test_061_message_logic_layers.py tests/test_071_admin_ui.py tests/test_087_token_usage.py tests/acceptance` -> green.

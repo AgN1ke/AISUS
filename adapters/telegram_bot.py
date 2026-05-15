@@ -14,6 +14,10 @@ from media.album_registry import observe_album_message
 logger = logging.getLogger(__name__)
 
 
+def _is_edited_message_update(update) -> bool:
+    return getattr(update, "edited_message", None) is not None and getattr(update, "message", None) is None
+
+
 class TelegramBotAdapter(AbstractAdapter):
     def __init__(self, name: str, token: str):
         self.name = name
@@ -35,6 +39,15 @@ class TelegramBotAdapter(AbstractAdapter):
         async def _on_message(update, context):
             # attach context for later use
             setattr(update, "_bot", context)
+            if _is_edited_message_update(update):
+                edited = getattr(update, "edited_message", None)
+                logger.info(
+                    "telegram_bot.skip_update name=%s reason=edited_message chat_id=%s message_id=%s",
+                    self.name,
+                    getattr(getattr(update, "effective_chat", None), "id", None),
+                    getattr(edited, "message_id", None),
+                )
+                return
             msg = update.effective_message
             if msg is None or update.effective_chat is None:
                 logger.warning(

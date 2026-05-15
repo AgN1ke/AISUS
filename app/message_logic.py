@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import time
 from dataclasses import replace as _dc_replace
 from dataclasses import dataclass, field
 from typing import Any
@@ -41,6 +42,8 @@ SEARCH_HINT_PATTERNS = (
 # справді задіяна (без них «вмикнувся reasoning чи ні» — невидимо).
 SEARCH_PERFORMED_MARKER = "⚠️УВАГА! ВІДБУВСЯ ПОШУК!⚠️"
 REASONING_MARKER = "🧠 [reasoning ON]"
+MESSAGE_DEDUPE_TTL_SECONDS = 10 * 60
+_RECENT_MESSAGE_KEYS: dict[tuple[str, int, int], float] = {}
 
 
 @dataclass
@@ -100,6 +103,20 @@ def _trace_id(msg: UnifiedMessage) -> str:
 
 def _raw_text(msg: UnifiedMessage) -> str:
     return (msg.text or msg.caption or "") or ""
+
+
+def _claim_message_once(msg: UnifiedMessage) -> bool:
+    now = time.monotonic()
+    cutoff = now - MESSAGE_DEDUPE_TTL_SECONDS
+    stale = [key for key, ts in _RECENT_MESSAGE_KEYS.items() if ts < cutoff]
+    for key in stale:
+        _RECENT_MESSAGE_KEYS.pop(key, None)
+
+    key = (msg.platform, int(msg.chat_id), int(msg.message_id))
+    if key in _RECENT_MESSAGE_KEYS:
+        return False
+    _RECENT_MESSAGE_KEYS[key] = now
+    return True
 
 
 def _session_state(chat_id: int, settings: dict[str, Any] | None) -> SessionState:
@@ -623,6 +640,9 @@ def _turn_failure_message(exc: BaseException) -> str:
 
 async def process_message(msg: UnifiedMessage) -> None:
     trace = _trace_id(msg)
+    if not _claim_message_once(msg):
+        logger.info("flow.duplicate_skip trace=%s", trace)
+        return
     try:
         await _process_message_inner(msg, trace)
     except Exception as exc:
