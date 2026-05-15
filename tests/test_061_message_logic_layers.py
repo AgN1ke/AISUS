@@ -205,6 +205,42 @@ async def test_execute_plan_routes_to_search(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_execute_plan_prepends_current_media_context(monkeypatch):
+    called = {}
+
+    async def fake_run_simple(chat_id, user_text, **kwargs):
+        called["chat_id"] = chat_id
+        called["user_text"] = user_text
+        called["kwargs"] = kwargs
+        return "VISION: OK"
+
+    monkeypatch.setattr(message_logic, "run_simple", fake_run_simple)
+
+    task = message_logic.UserTask(
+        instruction="хто це?",
+        has_media_target=True,
+        media_type="image",
+        media_context="target_media_type: photo\nmedia_analysis: поточне фото з пташками",
+        turn_context_msgs=[{"role": "system", "content": "[CHAT-GEOMETRY]"}],
+    )
+    plan = message_logic.ExecutionPlan(
+        route="image",
+        capability="vision_image",
+        use_reasoning=False,
+        planner_source="test",
+    )
+
+    result = await message_logic.execute_plan(99950, task, plan)
+
+    assert result.text == "VISION: OK"
+    turn_context = called["kwargs"]["turn_context_msgs"]
+    assert turn_context[0]["role"] == "system"
+    assert turn_context[0]["content"].startswith("[MEDIA_CURRENT]")
+    assert "поточне фото з пташками" in turn_context[0]["content"]
+    assert turn_context[1:] == task.turn_context_msgs
+
+
+@pytest.mark.asyncio
 async def test_send_response_renders_telegram_html():
     msg = make_unified_message()
 

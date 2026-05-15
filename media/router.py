@@ -200,6 +200,9 @@ async def _build_media_context(
         except Exception as exc:
             logger.error("photo analysis failed: %s", exc, exc_info=True)
             analysis = f"Не вдалося проаналізувати фото: {exc}"
+        if not (analysis or "").strip():
+            logger.warning("photo analysis returned empty result paths=%s", len(paths))
+            analysis = "Не вдалося проаналізувати фото: vision-модель повернула порожній опис."
         return (
             _compose_media_bundle(
                 media_type="photo",
@@ -325,6 +328,7 @@ async def handle_ptb_mention(
         return (
             user_text or semantic_text or MEDIA_DEFAULT_TASK_PROMPT,
             _planner_media_kind(info.get("route_kind") or info.get("type")),
+            media_context,
         )
     finally:
         await cleanup_downloaded_media(info.get("paths") or [])
@@ -381,6 +385,7 @@ async def handle_telethon_mention(
         return (
             user_text or semantic_text or MEDIA_DEFAULT_TASK_PROMPT,
             _planner_media_kind(info.get("route_kind") or info.get("type")),
+            media_context,
         )
     finally:
         await cleanup_downloaded_media(info.get("paths") or [])

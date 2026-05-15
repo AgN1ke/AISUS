@@ -42,11 +42,20 @@ class DummyCtx:
 
 
 @pytest.mark.asyncio
-async def test_first_mention_with_text():
+async def test_first_mention_with_text(monkeypatch):
+    async def fake_append(*_args, **_kwargs):
+        return None
+
+    async def fake_budget(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(memory_manager, "append_message", fake_append)
+    monkeypatch.setattr(memory_manager, "ensure_budget", fake_budget)
+
     chat = 99904
     msg = DummyMsg(chat, 10, text="@mybot зроби щось")
     upd = DummyUpdate(chat, msg)
-    txt = await handle_ptb_mention(upd, DummyCtx, "mybot")
+    txt, _kind, _context = await handle_ptb_mention(upd, DummyCtx, "mybot")
     assert "зроби" in txt
 
 
@@ -83,8 +92,9 @@ async def test_video_mention_adds_media(monkeypatch, tmp_path):
 
     msg = DummyMsg(chat, 11, text="@mybot")
     upd = DummyUpdate(chat, msg)
-    out = await handle_ptb_mention(upd, DummyCtx, "mybot")
+    out, _kind, current_context = await handle_ptb_mention(upd, DummyCtx, "mybot")
     assert "[MEDIA]" in stored.get("content", "")
+    assert "target_media_type: video" in (current_context or "")
     assert "Проаналізуй" in out
 
 
@@ -147,7 +157,7 @@ async def test_reply_to_media_text_prompt_uses_reply_target(monkeypatch):
     monkeypatch.setattr(memory_manager, "ensure_budget", fake_budget)
 
     upd = DummyUpdate(chat, current)
-    txt = await handle_ptb_mention(upd, DummyCtx, "mybot")
+    txt, _kind, _context = await handle_ptb_mention(upd, DummyCtx, "mybot")
 
     assert captured["message_id"] == 30
     assert "поясни мем" in txt

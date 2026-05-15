@@ -300,13 +300,13 @@ async def check_access(
 async def _resolve_media_instruction(
     msg: UnifiedMessage,
     geometry: MessageGeometry,
-) -> tuple[str | None, str | None]:
-    """Returns (user_text, media_kind_override).
+) -> tuple[str | None, str | None, str | None]:
+    """Returns (user_text, media_kind_override, media_context).
     media_kind_override may differ from geometry.target_media_kind for albums:
     e.g. an album with photos+videos resolves to 'video' as the routing kind.
     """
     if not _should_use_media_route(geometry):
-        return None, None
+        return None, None, None
 
     trace = _trace_id(msg)
     bot_username = msg.bot_username or ""
@@ -331,20 +331,23 @@ async def _resolve_media_instruction(
     if isinstance(media_result, tuple):
         user_text = media_result[0] if len(media_result) >= 1 else None
         media_kind_hint = media_result[1] if len(media_result) >= 2 else None
+        media_context = media_result[2] if len(media_result) >= 3 else None
     else:
         # Backward compatibility for older media routers/tests that returned
         # only the resolved instruction string.
         user_text = media_result
         media_kind_hint = None
+        media_context = None
 
     logger.info(
-        "flow.mention_route_done trace=%s user_text_len=%s media_kind=%s media_kind_hint=%s",
+        "flow.mention_route_done trace=%s user_text_len=%s media_kind=%s media_kind_hint=%s media_context_len=%s",
         trace,
         len(user_text or ""),
         geometry.target_media_kind or "",
         media_kind_hint or "",
+        len(media_context or ""),
     )
-    return user_text, media_kind_hint
+    return user_text, media_kind_hint, media_context
 
 
 async def build_user_task(
@@ -352,6 +355,7 @@ async def build_user_task(
     geometry: MessageGeometry,
     media_instruction: str | None,
     media_type_override: str | None = None,
+    media_context: str | None = None,
 ) -> UserTask | None:
     trace = _trace_id(msg)
     instruction = (media_instruction or "").strip()
@@ -377,7 +381,7 @@ async def build_user_task(
         instruction=instruction,
         has_media_target=bool(effective_media_kind),
         media_type=effective_media_kind,
-        media_context=None,
+        media_context=media_context,
         needs_search_hint=_needs_search_hint(instruction),
         is_instruction_on_target=bool(target_message_id and instruction),
         target_message_id=target_message_id,
@@ -386,11 +390,12 @@ async def build_user_task(
         should_store_user_message=should_store_user_message,
     )
     logger.info(
-        "flow.task_built trace=%s instruction_len=%s media_target=%s media_type=%s search_hint=%s",
+        "flow.task_built trace=%s instruction_len=%s media_target=%s media_type=%s media_context_len=%s search_hint=%s",
         trace,
         len(task.instruction),
         task.has_media_target,
         task.media_type or "",
+        len(task.media_context or ""),
         task.needs_search_hint,
     )
     return task
@@ -442,12 +447,24 @@ async def execute_plan(
     task: UserTask,
     plan: ExecutionPlan,
 ) -> ExecutionResult:
+    turn_context_msgs = list(task.turn_context_msgs)
+    if task.media_context:
+        # The current media target must outrank recalled [MEDIA] blocks.
+        # Otherwise vision answers can accidentally describe an older image
+        # selected by memory retrieval instead of the photo from this turn.
+        turn_context_msgs.insert(
+            0,
+            {
+                "role": "system",
+                "content": f"[MEDIA_CURRENT]\n{task.media_context}",
+            },
+        )
     if plan.route == "search":
         answer = await run_search(
             chat_id,
             task.instruction,
             use_reasoning=plan.use_reasoning,
-            turn_context_msgs=task.turn_context_msgs,
+            turn_context_msgs=turn_context_msgs,
         )
     else:
         answer = await run_simple(
@@ -455,7 +472,7 @@ async def execute_plan(
             task.instruction,
             capability=plan.capability,
             use_reasoning=plan.use_reasoning,
-            turn_context_msgs=task.turn_context_msgs,
+            turn_context_msgs=turn_context_msgs,
         )
     text = (answer or "").strip()
     if plan.route == "search" and text and SEARCH_PERFORMED_MARKER not in text:
@@ -760,9 +777,13 @@ async def _process_message_inner(msg: UnifiedMessage, trace: str) -> None:
             await send_response(msg, _voice_command_error_message(voice_cmd))
         return
 
-    media_instruction, media_kind_override = await _resolve_media_instruction(msg, geometry)
+    media_instruction, media_kind_override, media_context = await _resolve_media_instruction(msg, geometry)
     task = await build_user_task(
-        msg, geometry, media_instruction, media_type_override=media_kind_override
+        msg,
+        geometry,
+        media_instruction,
+        media_type_override=media_kind_override,
+        media_context=media_context,
     )
     if task is None:
         return

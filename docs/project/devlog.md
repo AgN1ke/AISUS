@@ -2701,3 +2701,20 @@ Prod-backport отримав той самий memory hardening, що й multite
 - deploy через `deploy/deploy.cjs`: acceptance gate пройшов, `smartest-bot` і `smartest-admin` після restart мають `active`;
 - server-side smoke у `/opt/smartest/app`: `Token calendar`, `Selected period by model`, `token_month/token_day` query і calendar aggregation працюють;
 - `https://smartest.klawa.top/login` повертає HTTP 200.
+
+## 2026-05-15 — Session 115-P: Current-media priority for vision turns
+
+Мета: виправити prod-regression, де `@saintaibot` бачив сам факт фото і запускав `vision_image`, але відповідав про не те зображення. Реальні prod-логи за 10:48 і 12:39 показали, що проблема не в planner route: `flow.classified` мав `current_media/target_media=image`, `media.ptb.start/downloaded/target/done` відпрацьовували, `flow.planner_decision` вибирав `route=image capability=vision_image`, а `capability.start/finish` завершувались штатно.
+
+Причина була в геометрії контексту після media-router: опис поточного фото записувався у пам'ять як `[MEDIA]`, але не передавався напряму в `turn_context_msgs` для фінального `run_simple/run_search`. Через це фінальна модель могла отримати з retrieval старий `[MEDIA]` і описати попереднє зображення, хоча поточний vision-пайплайн формально запускався правильно.
+
+Зроблено:
+- `media.router` тепер повертає не тільки instruction і media kind, а й повний `media_context` поточного target media;
+- `app.message_logic` прокидає цей контекст у `UserTask.media_context` і перед виконанням capability додає службовий блок `[MEDIA_CURRENT]` на початок `turn_context_msgs`;
+- `vision_image` prompt явно задає пріоритет `[MEDIA_CURRENT]` над старими `[MEDIA]` блоками з пам'яті;
+- `media.vision.describe_images()` більше не ковтає `RuntimeError` тихим `return ""`: помилка логується і піднімається в router, де вже є видимий fallback `Не вдалося проаналізувати фото...`;
+- додано regression-тест, що `execute_plan()` ставить `[MEDIA_CURRENT]` перед іншими turn-context блоками, і оновлено media-router тести під новий контракт.
+
+Перевірка:
+- `python -m py_compile app/message_logic.py media/router.py media/vision.py core/prompts.py agent/runner.py` -> OK;
+- `python -m pytest -q --noconftest tests/test_030_agent.py tests/test_031_planner.py tests/test_032_search_task.py tests/test_034_web_search.py tests/test_035_search_provider.py tests/test_038_search_evaluator.py tests/test_040_media_router.py tests/test_041_search_repository.py tests/test_042_search_memory.py tests/test_060_message_logic.py tests/test_061_message_logic_layers.py tests/test_071_admin_ui.py tests/test_087_token_usage.py tests/test_106_search_flow.py tests/acceptance` -> green.

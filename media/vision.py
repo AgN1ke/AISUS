@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import base64
+import logging
 import mimetypes
 from typing import List
 
 from agent.llm import chat_once
 from core.prompts import VISION_IMAGE_DESCRIPTION_PROMPT
+
+
+logger = logging.getLogger(__name__)
 
 
 def _img_to_data_url(path: str) -> str:
@@ -46,6 +50,7 @@ def describe_images(paths: List[str], task_hint: str | None = None) -> str:
             capability="vision_image",
             max_tokens=1200,
         )
-    except RuntimeError:
-        return ""
+    except RuntimeError as exc:
+        logger.warning("vision image description failed: %s", exc)
+        raise RuntimeError(f"vision image description failed: {exc}") from exc
     return (resp.choices[0].message.content or "").strip()
