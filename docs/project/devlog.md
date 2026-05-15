@@ -7838,3 +7838,58 @@ Prod вручну очищено одноразово (`find /opt/smartest/tmp/ 
 - master: `9ccae91 → b1ee931`
 - multitenant: `576cac0 → 44fd141` (legacy delete + scheduler)
 - Prod `/opt/smartest/app` — обидва сервіси active, scheduler started з двома job-ами
+
+## 2026-05-14 — Session 114: Gemini timeout 180s + reply-to-bot auto-downgrade + deictic CHAT signal
+
+### Що зробив
+
+1. **`agent/llm.py:306`** — Gemini timeout 60s → 180s. `/think` reasoning часто триває 90-150s; старий 60s давав регулярні ReadTimeout (trace 257552, 2026-05-13 15:18).
+
+2. **`agent/planner.py:plan_message`** — auto-downgrade route=search → chat коли `reply_to_bot=True`. User у reply-діалозі з ботом ставить follow-up запитання, не просить fresh web data.
+
+3. **`core/prompts.py:SEARCH_GATE_SYSTEM_PROMPT`** — додано CHAT-категорію для деіктичних питань: "шо там / тут / це / оце" + питання = CHAT (user посилається на in-context об'єкт).
+
+### Підтверджено
+- `/a` працює, користувач підтвердив.
+
+### Acceptance
++3 тести у `test_search_gate.py` (`test_plan_message_auto_downgrades_search_when_reply_to_bot`, `test_search_gate_prompt_covers_deictic_questions`, `test_gemini_timeout_is_at_least_120s`).
+
+153 passed.
+
+### Артефакти
+- `Smartest-prod-backport/agent/llm.py`, `agent/planner.py`, `core/prompts.py`, `tests/acceptance/test_search_gate.py`
+- master: `0267403 → 21ab3fb`
+
+## 2026-05-15 — Session 115: Explicit keyword bypass + detailed vision/video extractors
+
+### Регрес від Session 114
+
+Auto-downgrade на `reply_to_bot=True` (введений у 114) **поглинув явні keyword-запити**. Користувач у логах 4 рази підряд написав reply'ом "Гугли — сбу операція павутина", всі traces 257752/4/7/9 → `search_auto_downgrade reason=reply_to_bot` → бот відповідав із пам'яті, не гуглив.
+
+### Що зроблено
+
+1. **`agent/planner.py`** — bypass auto-downgrade коли `is_explicit_search_request(user_text)`. Явний keyword перемагає reply_to_bot evrist.
+
+2. **`agent/search_task.py:SEARCH_QUERY_PREFIXES`** — додано короткі форми `гугли` / `шукай` (без префіксу "за/по"). Раніше "Гугли" не матчив.
+
+3. **`core/prompts.py:VISION_IMAGE_DESCRIPTION_PROMPT`** — переписаний з однорядкового `"Опиши стисло, виділи текст і дії"` на структурований **maximum-extraction** промпт: OCR / People / Objects / Context / Action / Composition / Cultural. Архітектура vision → [MEDIA] memory → chat_final (флагман) **збережена** — флагман сам компонує відповідь користувачу з повного extracted блоку. Vision модель не повинна сама "узагальнювати" перед передачею флагману.
+
+4. **`media/video.py:_analyze_with_native_gemini`** — аналогічний extractor-промпт для video pipeline (TEXT/PEOPLE/CHARACTERS/OBJECTS/CONTEXT/ACTION/AUDIO_NOTES/GENRE/CULTURAL).
+
+### Корінь "чорнової інформації"
+
+Користувач відчував, що vision/search видає "чорнову інформацію". Архітектура коректна (vision → memory → chat_final compose), **але vision-промпт буквально містив "стисло"** — обмежував модель пре-узагальненням. Тепер vision/video витягають **усе що бачать** без редагування, флагман далі вирішує що показати.
+
+### Acceptance
++4 тести у `test_search_gate.py`:
+- `test_explicit_keyword_search_bypasses_reply_to_bot_downgrade`
+- `test_short_form_keywords_recognized_as_explicit_search`
+- `test_vision_prompt_extracts_maximum_detail` — забороняє "стисло" у vision промпті.
+- `test_video_extractor_prompt_demands_full_detail` — TEXT/PEOPLE/OBJECTS/... обов'язкові.
+
+157 passed.
+
+### Артефакти
+- `Smartest-prod-backport/agent/planner.py`, `agent/search_task.py`, `core/prompts.py`, `media/video.py`, `tests/acceptance/test_search_gate.py`
+- master: `21ab3fb → d6f636c`
