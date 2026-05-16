@@ -200,25 +200,30 @@ def test_now_system_msg_emits_iso_date():
 # ===== B-040 search_gate prompt rubric — must reject technical/theoretical questions =====
 
 
-def test_search_gate_prompt_rejects_engineering_principles():
-    """B-040: search_gate prompt must explicitly tell model that questions
-    about engineering principles, physics, theory → CHAT (not SEARCH).
+def test_search_gate_prompt_is_principle_first():
+    """B-040: search_gate prompt encodes a stable principle, not a list of
+    specific anti-examples.
 
-    Real failure (Session 106): user asked about engine operation principle
-    at supersonic speed; gate voted SEARCH. The prompt now contains explicit
-    anti-examples covering this category.
+    Session 118 lesson: enumerating anti-examples (engine, supersonic, lore,
+    etc.) led the gate model to pattern-match on those topics and miss new
+    ones (medical lab interpretation at 11:30 16-05). The prompt now states
+    the principle plainly: would the answer change month-over-month? Numbers
+    and specifics don't promote SEARCH; interpretation is stable knowledge.
     """
     from core.prompts import SEARCH_GATE_SYSTEM_PROMPT
 
-    # The prompt must contain the principle: search only for time-changing data
-    assert "змінюються в часі" in SEARCH_GATE_SYSTEM_PROMPT
-    # The prompt must contain explicit instruction that engineering / physics
-    # / theory questions are CHAT.
-    assert "принципи роботи" in SEARCH_GATE_SYSTEM_PROMPT
-    assert "фізика" in SEARCH_GATE_SYSTEM_PROMPT
-    # And concrete anti-examples — engine + supersonic case.
-    assert "двигун" in SEARCH_GATE_SYSTEM_PROMPT.lower()
-    assert "надзвук" in SEARCH_GATE_SYSTEM_PROMPT
+    # Core principle: search only for data that changes over time
+    assert "в часі" in SEARCH_GATE_SYSTEM_PROMPT
+    # The month-ago time-stability test must be stated explicitly
+    assert "місяць тому" in SEARCH_GATE_SYSTEM_PROMPT
+    # Stable-knowledge categories must include theory and interpretation
+    assert "теорія" in SEARCH_GATE_SYSTEM_PROMPT
+    assert "інтерпретація" in SEARCH_GATE_SYSTEM_PROMPT
+    # Numbers/specifics rule — protects medical lab values, parameters, etc.
+    assert "конкретних чисел" in SEARCH_GATE_SYSTEM_PROMPT
+    assert "SEARCH-ом" in SEARCH_GATE_SYSTEM_PROMPT
+    # "Що робити коли X" stability rule
+    assert "Що робити коли" in SEARCH_GATE_SYSTEM_PROMPT
 
 
 def test_search_gate_prompt_explicit_dont_search_phrases():
@@ -250,45 +255,38 @@ def test_search_gate_prompt_complexity_is_not_search_signal():
     )
 
 
-def test_search_gate_prompt_covers_game_lore():
-    """Session 108: friend's '/ідентифікуй танок хуман містіка в л2' triggered
-    SEARCH. Game lore / fan-canon is stable knowledge — must be explicit CHAT."""
+def test_search_gate_prompt_covers_lore_as_principle():
+    """Session 108 origin: '/ідентифікуй танок хуман містіка в л2' triggered
+    SEARCH. Session 118 redesign: rather than enumerating specific anti-examples
+    (lore, identify, deictic — which caused pattern-overfit), the prompt now
+    carries them under the umbrella of stable knowledge categories.
+    """
     from core.prompts import SEARCH_GATE_SYSTEM_PROMPT
 
-    # Game / fan-canon as CHAT category
-    assert "lore" in SEARCH_GATE_SYSTEM_PROMPT.lower(), (
-        "prompt missing 'lore' category — game/fan-canon questions will trigger search"
-    )
-    # Concrete L2 anti-example
-    assert "л2" in SEARCH_GATE_SYSTEM_PROMPT.lower() or "lineage" in SEARCH_GATE_SYSTEM_PROMPT.lower()
-
-
-def test_search_gate_prompt_covers_identify_verb():
-    """Session 108: 'ідентифікуй / розпізнай' is 'recall from your knowledge',
-    NOT 'find in internet'. Must be explicit CHAT signal."""
-    from core.prompts import SEARCH_GATE_SYSTEM_PROMPT
-
-    assert "ідентифікуй" in SEARCH_GATE_SYSTEM_PROMPT.lower() or (
-        "розпізнай" in SEARCH_GATE_SYSTEM_PROMPT.lower()
+    # "lore" must still be named as a stable-knowledge category
+    assert "lore" in SEARCH_GATE_SYSTEM_PROMPT.lower()
+    # "Identify / what is this" must still be named as a CHAT pattern, but as
+    # a category description, not a concrete example.
+    assert "ідентифікація" in SEARCH_GATE_SYSTEM_PROMPT.lower() or (
+        "що це" in SEARCH_GATE_SYSTEM_PROMPT.lower()
     )
 
 
-def test_search_gate_prompt_has_concrete_anti_examples():
-    """Anti-examples are anchors for the model. Must contain concrete cases."""
+def test_search_gate_prompt_protects_numeric_and_actionable_questions():
+    """Session 118: real failure — '@bot шо робити коли ттг 11, а т4 0,39?'
+    voted SEARCH because the prompt enumerated lore/physics anti-examples
+    but did not state that numbers and actionable wording don't promote SEARCH.
+
+    The new prompt makes this an explicit principle, not an example list.
+    """
     from core.prompts import SEARCH_GATE_SYSTEM_PROMPT
 
-    # Must contain at least these distinctive anti-example phrases
-    anti_examples = [
-        "двигун",      # engine principle
-        "тульп",       # mythology
-        "етимологія",  # linguistics
-        "будд",        # historical canon
-        "л2",          # game lore
-    ]
-    for kw in anti_examples:
-        assert kw in SEARCH_GATE_SYSTEM_PROMPT.lower(), (
-            f"anti-example for '{kw}' missing from gate prompt"
-        )
+    # Specific numbers / values / parameters rule
+    assert "конкретних чисел" in SEARCH_GATE_SYSTEM_PROMPT
+    # 'Що робити коли X' actionability rule
+    assert "Що робити коли" in SEARCH_GATE_SYSTEM_PROMPT
+    # Stable interpretation should be named as CHAT
+    assert "інтерпретація" in SEARCH_GATE_SYSTEM_PROMPT
 
 
 # ===== Still YELLOW =====

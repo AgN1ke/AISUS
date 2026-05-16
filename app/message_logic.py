@@ -582,7 +582,16 @@ def _build_chat_turn_memory_event(geometry: MessageGeometry, task: UserTask) -> 
     if geometry.reply_target.media_kind:
         lines.append(f"reply_target_media_kind: {geometry.reply_target.media_kind}")
     if task.target_message_text:
-        lines.append(f"reply_target_text: {task.target_message_text[:1200]}")
+        # When the user replied to the bot's OWN previous message, the target
+        # text is already in recent memory as an assistant turn — duplicating
+        # it into [CHAT-TURN] would later be lifted into [Speaker:] header on
+        # the user message and act as a strong "continue this topic" signal,
+        # even for unrelated follow-ups like a bare "привіт". Skip the text
+        # in that case; the reply_to_bot flag itself carries the geometry.
+        # For reply-to-other-user, keep the quoted text — it provides
+        # geometry context the model wouldn't otherwise see.
+        if not geometry.reply_to_bot:
+            lines.append(f"reply_target_text: {task.target_message_text[:1200]}")
     if geometry.clean_text:
         lines.append(f"current_user_text: {geometry.clean_text[:1200]}")
     if task.instruction and task.instruction != geometry.clean_text:

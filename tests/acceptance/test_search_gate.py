@@ -442,13 +442,16 @@ def test_plan_message_auto_downgrades_search_when_reply_to_bot(monkeypatch):
     assert len(gate_calls) == 0
 
 
-def test_search_gate_prompt_covers_deictic_questions():
-    """Session 114: 'шо там пишуть?' / 'а тут що?' / 'це правда?' refer to
-    in-context objects (prev bot message, replied media). Prompt must
-    explicitly mark these as CHAT, not SEARCH."""
+def test_search_gate_prompt_covers_contextual_clarification():
+    """Session 114 origin: 'шо там пишуть?' / 'а тут що?' / 'це правда?' refer
+    to in-context objects (prev bot message, replied media). Session 118
+    redesign: rather than listing specific deictic phrases as anti-examples
+    (which caused pattern-overfit), the prompt names 'контекстне уточнення'
+    as a CHAT category and instructs the gate not to extrapolate intent
+    from prior turns."""
     from core.prompts import SEARCH_GATE_SYSTEM_PROMPT
-    assert "деіктич" in SEARCH_GATE_SYSTEM_PROMPT.lower()
-    assert "шо там пишуть" in SEARCH_GATE_SYSTEM_PROMPT.lower()
+    assert "контекстне уточнення" in SEARCH_GATE_SYSTEM_PROMPT.lower()
+    assert "disambiguation" in SEARCH_GATE_SYSTEM_PROMPT.lower()
 
 
 def test_gemini_timeout_is_at_least_120s():
