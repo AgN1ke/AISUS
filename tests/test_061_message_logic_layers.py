@@ -249,6 +249,41 @@ async def test_execute_plan_routes_to_search(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_execute_plan_reroutes_fake_search_tool_block(monkeypatch):
+    calls = {"simple": 0, "search": 0}
+
+    async def fake_run_simple(chat_id, user_text, **kwargs):
+        calls["simple"] += 1
+        return '[SEARCH]\n{"query":"коти у трипільців"}\n[/SEARCH]\nЗагуглив...'
+
+    async def fake_run_search(chat_id, user_text, **kwargs):
+        calls["search"] += 1
+        return "REAL SEARCH OK"
+
+    monkeypatch.setattr(message_logic, "run_simple", fake_run_simple)
+    monkeypatch.setattr(message_logic, "run_search", fake_run_search)
+
+    task = message_logic.UserTask(
+        instruction="Загугли, чи були коти у трипільців",
+        has_media_target=False,
+        turn_context_msgs=[{"role": "system", "content": "[CHAT-GEOMETRY]"}],
+    )
+    plan = message_logic.ExecutionPlan(
+        route="chat",
+        capability="chat_final",
+        use_reasoning=False,
+        planner_source="test",
+    )
+
+    result = await message_logic.execute_plan(99950, task, plan)
+
+    assert calls == {"simple": 1, "search": 1}
+    assert result.route == "search"
+    assert result.capability == "search_web"
+    assert result.text == f"REAL SEARCH OK\n\n{message_logic.SEARCH_PERFORMED_MARKER}"
+
+
+@pytest.mark.asyncio
 async def test_execute_plan_prepends_current_media_context(monkeypatch):
     called = {}
 

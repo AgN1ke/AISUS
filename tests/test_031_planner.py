@@ -65,9 +65,9 @@ def test_planner_llm_search_route_survives_when_gate_disabled(monkeypatch):
     assert decision.capability == "search_web"
 
 
-def test_search_gate_does_not_promote_chat_to_search(monkeypatch):
+def test_search_gate_does_not_promote_non_explicit_chat_to_search(monkeypatch):
     """Search gate is a filter, not a promoter. If planner picked chat,
-    the gate must not be called even if the user text contains search words."""
+    the gate must not be called for non-command text."""
     monkeypatch.setattr(planner, "_planner_enabled", lambda: True)
     monkeypatch.setattr(planner, "_should_short_circuit", lambda task: False)
     monkeypatch.setattr(planner, "_search_enabled", lambda: True)
@@ -85,7 +85,7 @@ def test_search_gate_does_not_promote_chat_to_search(monkeypatch):
     )
 
     decision = planner.plan_message(
-        planner.PlannerInput(user_text="загугли курс долара")
+        planner.PlannerInput(user_text="що там з курсом долара")
     )
 
     assert decision.route == "chat"

@@ -44,6 +44,11 @@ SEARCH_PERFORMED_MARKER = "⚠️УВАГА! ВІДБУВСЯ ПОШУК!⚠️"
 REASONING_MARKER = "🧠 [reasoning ON]"
 MESSAGE_DEDUPE_TTL_SECONDS = 10 * 60
 _RECENT_MESSAGE_KEYS: dict[tuple[str, int, int], float] = {}
+_FAKE_SEARCH_BLOCK_RE = re.compile(r"^\s*\[SEARCH\][\s\S]{0,2000}?\[/SEARCH\]", re.I)
+
+
+def _looks_like_fake_search_block(text: str) -> bool:
+    return bool(_FAKE_SEARCH_BLOCK_RE.search(text or ""))
 
 
 @dataclass
@@ -476,6 +481,8 @@ async def execute_plan(
                 "content": f"[MEDIA_CURRENT]\n{task.media_context}",
             },
         )
+    actual_route = plan.route
+    actual_capability = plan.capability
     if plan.route == "search":
         answer = await run_search(
             chat_id,
@@ -491,13 +498,27 @@ async def execute_plan(
             use_reasoning=plan.use_reasoning,
             turn_context_msgs=turn_context_msgs,
         )
+        if _looks_like_fake_search_block(answer):
+            logger.warning(
+                "flow.fake_search_block_reroute capability=%s text_len=%s",
+                plan.capability,
+                len(answer or ""),
+            )
+            answer = await run_search(
+                chat_id,
+                task.instruction,
+                use_reasoning=plan.use_reasoning,
+                turn_context_msgs=turn_context_msgs,
+            )
+            actual_route = "search"
+            actual_capability = "search_web"
     text = (answer or "").strip()
-    if plan.route == "search" and text and SEARCH_PERFORMED_MARKER not in text:
+    if actual_route == "search" and text and SEARCH_PERFORMED_MARKER not in text:
         text = f"{text}\n\n{SEARCH_PERFORMED_MARKER}"
     return ExecutionResult(
         text=text,
-        route=plan.route,
-        capability=plan.capability,
+        route=actual_route,
+        capability=actual_capability,
     )
 
 
@@ -848,7 +869,7 @@ async def _process_message_inner(msg: UnifiedMessage, trace: str) -> None:
 
     # Append debug markers so user can visually verify which path ran.
     answer_text = result.text
-    if plan.route == "search" and SEARCH_PERFORMED_MARKER not in answer_text:
+    if result.route == "search" and SEARCH_PERFORMED_MARKER not in answer_text:
         answer_text = f"{answer_text.rstrip()}\n\n{SEARCH_PERFORMED_MARKER}"
     if plan.use_reasoning:
         answer_text = f"{answer_text.rstrip()}\n\n{REASONING_MARKER}"

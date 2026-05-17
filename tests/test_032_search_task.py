@@ -171,6 +171,40 @@ async def test_plan_search_queries_decomposes_compound_request(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_plan_search_queries_rejects_unrelated_planner_topic(monkeypatch):
+    def fake_chat_once(*_args, **_kwargs):
+        return DummyResponse(
+            """
+            {
+              "intent_hypothesis": "wrong stale context",
+              "sub_queries": [
+                {"query": "difference between LLM function calling and prompting", "profile": "general"}
+              ],
+              "needs_extract": false,
+              "recency_days": null
+            }
+            """
+        )
+
+    monkeypatch.setattr(search_task, "chat_once", fake_chat_once)
+    base = search_task.SearchTask(
+        original_request="Загугли ще раз",
+        query="коти у трипільців археологія",
+        source="llm_composer",
+        used_context=True,
+    )
+
+    plan = await search_task.plan_search_queries(
+        "Загугли ще раз",
+        [{"role": "assistant", "content": "попередньо говорили про котів у трипільців"}],
+        fallback_task=base,
+    )
+
+    assert len(plan.sub_queries) == 1
+    assert plan.sub_queries[0].query == "коти у трипільців археологія"
+
+
+@pytest.mark.asyncio
 async def test_build_search_tasks_populates_alternative_queries(monkeypatch):
     async def fake_select_context(*_args, **_kwargs):
         return [{"role": "user", "content": "порівняй новини про OpenAI і Anthropic"}]
@@ -261,6 +295,78 @@ def test_normalize_search_query_strips_command_prefix():
 def test_normalize_search_query_strips_at_mentions():
     query = search_task.normalize_search_query("пошукай @bot новини про OpenAI")
     assert query == "новини про OpenAI"
+
+
+@pytest.mark.asyncio
+async def test_build_search_task_semantic_lookup_uses_composer(monkeypatch):
+    async def fake_select_context(*_args, **_kwargs):
+        return [
+            {
+                "role": "assistant",
+                "content": "розмова була про котів у трипільців",
+            }
+        ]
+
+    def fake_chat_once(messages, **_kwargs):
+        return DummyResponse(
+            '{"query":"чи були коти у трипільців археологія",'
+            '"reason":"semantic external lookup","used_context":false}'
+        )
+
+    monkeypatch.setattr(
+        search_task.memory_manager, "select_context", fake_select_context
+    )
+    monkeypatch.setattr(search_task, "chat_once", fake_chat_once)
+
+    task = await search_task.build_search_task(
+        123,
+        "Бля, пробий по OSINT чи були коти у трипільців",
+    )
+
+    assert task.query == "чи були коти у трипільців археологія"
+    assert task.source == "llm_composer"
+    assert task.used_context is False
+
+
+@pytest.mark.asyncio
+async def test_build_search_tasks_vague_repeat_uses_reply_context_not_planner(
+    monkeypatch,
+):
+    async def fake_select_context(*_args, **_kwargs):
+        return [
+            {
+                "role": "assistant",
+                "content": "unrelated stale context about function calling",
+            }
+        ]
+
+    def fail_chat_once(*_args, **_kwargs):
+        raise AssertionError("query planner must not rewrite vague explicit search")
+
+    monkeypatch.setattr(
+        search_task.memory_manager, "select_context", fake_select_context
+    )
+    monkeypatch.setattr(search_task, "chat_once", fail_chat_once)
+
+    tasks = await search_task.build_search_tasks(
+        123,
+        "Загугли ще раз",
+        turn_context_msgs=[
+            {
+                "role": "system",
+                "content": (
+                    "[CHAT-GEOMETRY]\n"
+                    "reply_target_text: коти у трипільців: чи є археологічні докази\n"
+                    "current_user_text: Загугли ще раз"
+                ),
+            }
+        ],
+    )
+
+    assert len(tasks) == 1
+    assert "коти у трипільців" in tasks[0].query
+    assert tasks[0].source == "heuristic_context"
+    assert tasks[0].used_context is True
 
 
 def test_results_brief_uses_normalized_result_fields():

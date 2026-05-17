@@ -2754,3 +2754,26 @@ Prod-backport отримав той самий memory hardening, що й multite
 Перевірка:
 - `python -m py_compile adapters/telegram_bot.py app/message_logic.py app/chat_geometry.py core/prompts.py tests/test_043_telegram_adapter.py tests/test_061_message_logic_layers.py` -> OK;
 - `python -m pytest -q --noconftest tests/test_043_telegram_adapter.py tests/test_040_media_router.py tests/test_060_message_logic.py tests/test_061_message_logic_layers.py tests/test_071_admin_ui.py tests/test_087_token_usage.py tests/acceptance` -> green.
+
+## 2026-05-17 — Session 118-P: Semantic search intent + fake SEARCH guard
+
+Мета: виправити prod-випадок, де `@saintaibot` на явне прохання пошуку по темі трипільців або повертав порожню відповідь, або симулював `[SEARCH]` у chat-відповіді, або при короткому `загугли ще раз` стрибав на нерелевантну стару тему.
+
+Діагностика:
+- реальний trace показав, що перший `Загугли, чи були коти у трипільців` planner спочатку вів у `search`, але `search_gate` відкидав у `CHAT`, бо prompt gate-а був надто звужений до критерію “тільки свіжі змінні дані”;
+- після downgrade фінальна chat-модель могла надрукувати службовий блок `[SEARCH] ... [/SEARCH]`, тобто імітувати tool-call замість реального search-route;
+- коротке `Загугли ще раз` дійшло до search, але query-planner взяв нерелевантний семантичний контекст і сформував запит про function calling замість теми котів у трипільців.
+
+Зроблено:
+- `PLANNER_SYSTEM_PROMPT` і `SEARCH_GATE_SYSTEM_PROMPT` розширено з “fresh data only” до семантики external evidence intent: web retrieval, відкриті джерела, OSINT/open-source lookup, джерела, цитати, підтвердження або спростування через зовнішні дані;
+- збережено принцип економії токенів: gate не стає глобальним promoter-ом для кожного chat-turn, він лишається filter після planner-search;
+- `SEARCH_COMPOSER_SYSTEM_PROMPT` навчився прибирати не конкретний список команд, а службову оболонку external lookup і витягувати тему з найближчого релевантного контексту для коротких follow-up запитів;
+- `SEARCH_QUERY_PLANNER_PROMPT` отримав правило не змінювати тему запиту;
+- у `agent/search_task.py` додано anchor guard: якщо query-planner пропонує sub-query без зв'язку з базовою query, план відкидається і використовується fallback query;
+- у `app/message_logic.py` додано boundary guard: якщо non-search capability повернула службовий блок `[SEARCH]...[/SEARCH]`, turn автоматично перезапускається через реальний `run_search`, а користувач більше не бачить фейковий tool-call;
+- underspecified explicit search типу `загугли ще раз` більше не йде напряму як query `ще раз`, а проходить через composer/context fallback.
+
+Перевірка:
+- `python -m py_compile agent/planner.py agent/search_task.py app/message_logic.py core/prompts.py` -> OK;
+- `python -m pytest -q --noconftest tests/test_031_planner.py tests/test_032_search_task.py tests/test_061_message_logic_layers.py tests/acceptance/test_search_gate.py` -> green;
+- `python -m pytest -q --noconftest tests/test_030_agent.py tests/test_031_planner.py tests/test_032_search_task.py tests/test_034_web_search.py tests/test_035_search_provider.py tests/test_038_search_evaluator.py tests/test_040_media_router.py tests/test_041_search_repository.py tests/test_042_search_memory.py tests/test_060_message_logic.py tests/test_061_message_logic_layers.py tests/test_071_admin_ui.py tests/test_087_token_usage.py tests/test_106_search_flow.py tests/acceptance` -> green.

@@ -776,7 +776,9 @@ def _build_single_search_task_from_context(
     context: list[dict],
 ) -> SearchTask:
     normalized_direct = normalize_search_query(user_text)
-    if is_explicit_search_request(user_text):
+    if is_explicit_search_request(user_text) and not _is_underspecified_search_request(
+        user_text
+    ):
         return _build_search_task(
             original_request=user_text,
             query=normalized_direct,
@@ -870,6 +872,28 @@ def _tasks_from_plan(base_task: SearchTask, plan: SearchPlan) -> list[SearchTask
         tasks.append(_enrich_weather_task(task))
 
     return tasks or [_enrich_weather_task(base_task)]
+
+
+def _plan_preserves_base_query_anchor(base_task: SearchTask, plan: SearchPlan) -> bool:
+    """Reject query-planner hallucinations that jump to an unrelated topic.
+
+    The LLM planner may decompose or translate the base query, but it must keep
+    at least some anchor terms from the composer/direct query. If a vague
+    follow-up like "загугли ще раз" got resolved to "коти у трипільців", a plan
+    about "function calling vs prompting" should never replace it.
+    """
+    required = _required_query_terms(base_task.query)
+    if len(required) < 2 or not plan.sub_queries:
+        return True
+    haystack = " ".join(
+        part
+        for sub_query in plan.sub_queries
+        for part in (sub_query.query, sub_query.alternative or "")
+        if part
+    ).lower()
+    matches = sum(1 for term in required if _term_in_haystack(term, haystack))
+    minimum = 1 if len(required) == 2 else 2
+    return matches >= minimum
 
 
 # ---------------------------------------------------------------------------
@@ -1455,6 +1479,13 @@ async def plan_search_queries(
         planned = None
 
     if not planned or not planned.sub_queries:
+        return fallback_plan
+    if not _plan_preserves_base_query_anchor(base_task, planned):
+        logger.warning(
+            "search_plan.anchor_mismatch base=%s planned=%s",
+            (base_task.query or "")[:160],
+            [sub.query[:120] for sub in planned.sub_queries],
+        )
         return fallback_plan
 
     return SearchPlan(

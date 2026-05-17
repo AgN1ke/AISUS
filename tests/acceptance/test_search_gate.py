@@ -454,6 +454,28 @@ def test_search_gate_prompt_covers_contextual_clarification():
     assert "disambiguation" in SEARCH_GATE_SYSTEM_PROMPT.lower()
 
 
+def test_search_prompts_cover_semantic_external_evidence_intent():
+    from core.prompts import (
+        PLANNER_SYSTEM_PROMPT,
+        SEARCH_COMPOSER_SYSTEM_PROMPT,
+        SEARCH_GATE_SYSTEM_PROMPT,
+        SEARCH_QUERY_PLANNER_PROMPT,
+    )
+
+    planner = PLANNER_SYSTEM_PROMPT.lower()
+    gate = SEARCH_GATE_SYSTEM_PROMPT.lower()
+    composer = SEARCH_COMPOSER_SYSTEM_PROMPT.lower()
+    query_planner = SEARCH_QUERY_PLANNER_PROMPT.lower()
+
+    assert "external-evidence intent" in gate
+    assert "osint" in planner
+    assert "osint" in gate
+    assert "відкритих джерел" in planner
+    assert "відкриті джерела" in gate
+    assert "обшукай інтернет" in composer
+    assert "ніколи не змінюй тему запиту" in query_planner
+
+
 def test_gemini_timeout_is_at_least_120s():
     """Session 114: Gemini /think reasoning often takes 90-150s. Old 60s
     timeout caused recurring ReadTimeout on /think turns (trace 257552)."""
