@@ -44,6 +44,52 @@ class _DummyResponse:
         self.choices[0].message.content = content
 
 
+@pytest.mark.asyncio
+async def test_run_capability_places_turn_context_after_memory(monkeypatch):
+    captured: dict[str, object] = {}
+
+    async def fake_select_context(*_args, **_kwargs):
+        return [
+            {"role": "system", "content": "[LONG-MEMO] stale cats topic"},
+            {"role": "assistant", "content": "old answer about tripillia cats"},
+        ]
+
+    def fake_chat_once(messages, **_kwargs):
+        captured["messages"] = messages
+        return _DummyResponse("shortened current reply")
+
+    monkeypatch.setattr(runner.memory_manager, "select_context", fake_select_context)
+    monkeypatch.setattr(runner, "chat_once", fake_chat_once)
+    monkeypatch.setattr(runner, "capability_model", lambda _capability: "test-model")
+
+    await runner.run_capability(
+        CHAT,
+        "korotshe",
+        turn_context_msgs=[
+            {
+                "role": "system",
+                "content": (
+                    "[CHAT-GEOMETRY]\n"
+                    "reply_to_bot: true\n"
+                    "reply_target_text: current answer about reusable memory package\n"
+                    "current_user_text: korotshe"
+                ),
+            }
+        ],
+    )
+
+    messages = captured["messages"]
+    contents = [item["content"] for item in messages]  # type: ignore[index]
+    stale_idx = contents.index("old answer about tripillia cats")
+    geometry_idx = next(
+        i for i, content in enumerate(contents) if content.startswith("[CHAT-GEOMETRY]")
+    )
+    final_user_idx = len(contents) - 1
+
+    assert stale_idx < geometry_idx < final_user_idx
+    assert contents[final_user_idx] == "korotshe"
+
+
 def _tool_response(name: str, arguments: str):
     class _Obj:
         pass

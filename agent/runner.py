@@ -295,7 +295,10 @@ def _merge_turn_context(
 ) -> list[dict]:
     if not turn_context_msgs:
         return context_msgs
-    return list(turn_context_msgs) + list(context_msgs)
+    # Current-turn geometry/media/search evidence must be the freshest context
+    # the model sees. Put it after recalled memory, immediately before the
+    # terminal user message added by make_messages().
+    return list(context_msgs) + list(turn_context_msgs)
 
 
 @dataclass(frozen=True)

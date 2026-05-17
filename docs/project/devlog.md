@@ -2777,3 +2777,21 @@ Prod-backport отримав той самий memory hardening, що й multite
 - `python -m py_compile agent/planner.py agent/search_task.py app/message_logic.py core/prompts.py` -> OK;
 - `python -m pytest -q --noconftest tests/test_031_planner.py tests/test_032_search_task.py tests/test_061_message_logic_layers.py tests/acceptance/test_search_gate.py` -> green;
 - `python -m pytest -q --noconftest tests/test_030_agent.py tests/test_031_planner.py tests/test_032_search_task.py tests/test_034_web_search.py tests/test_035_search_provider.py tests/test_038_search_evaluator.py tests/test_040_media_router.py tests/test_041_search_repository.py tests/test_042_search_memory.py tests/test_060_message_logic.py tests/test_061_message_logic_layers.py tests/test_071_admin_ui.py tests/test_087_token_usage.py tests/test_106_search_flow.py tests/acceptance` -> green.
+
+## 2026-05-17 - Session 119-P: Current turn context precedence
+
+Goal: fix the prod case where a reply-to-bot follow-up `korotshe` was answered from an older cats/Tripillia memory topic instead of shortening the immediately replied-to bot answer.
+
+Diagnosis:
+- prod logs for `2026-05-17 12:04 UTC` showed `flow.classified reply_to_bot=True`, `route=chat`, `capability=chat_final`;
+- `memory_recent` showed the current user turn had `reply_to_bot: true`, but its stored `[CHAT-TURN]` intentionally omitted `reply_target_text` for bot replies;
+- runtime `[CHAT-GEOMETRY]` can contain the reply target text, but `agent.runner._merge_turn_context()` prepended it before recalled memory, so stale recent/long context could become the stronger topic cue.
+
+Changes:
+- `agent.runner._merge_turn_context()` now appends current turn context after recalled memory, immediately before the terminal user message produced by `make_messages()`;
+- this preserves the old safety rule: `reply_target_text` is still quoted context, not a second request, but it is now the freshest context for short follow-ups;
+- `app.message_logic` logs `target_text_len` in `flow.task_built`, so future reply-target text loss is visible in prod logs;
+- regression coverage added in `tests/test_030_agent.py` to ensure stale memory appears before `[CHAT-GEOMETRY]`, and `[CHAT-GEOMETRY]` appears before the final user message.
+
+Verification:
+- `python -m pytest -q --noconftest tests/test_030_agent.py tests/test_031_planner.py tests/test_032_search_task.py tests/test_061_message_logic_layers.py tests/acceptance` -> green.

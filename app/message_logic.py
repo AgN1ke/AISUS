@@ -412,13 +412,14 @@ async def build_user_task(
         should_store_user_message=should_store_user_message,
     )
     logger.info(
-        "flow.task_built trace=%s instruction_len=%s media_target=%s media_type=%s media_context_len=%s search_hint=%s",
+        "flow.task_built trace=%s instruction_len=%s media_target=%s media_type=%s media_context_len=%s search_hint=%s target_text_len=%s",
         trace,
         len(task.instruction),
         task.has_media_target,
         task.media_type or "",
         len(task.media_context or ""),
         task.needs_search_hint,
+        len(task.target_message_text or ""),
     )
     return task
 
