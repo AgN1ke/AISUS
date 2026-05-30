@@ -14,6 +14,29 @@ const REMOTE_VENV = '/opt/smartest/venv';
 const IS_WIN = process.platform === 'win32';
 const EXEC_SHELL = IS_WIN ? undefined : 'bash';
 
+// ── Branch guard ─────────────────────────────────────────────────
+// Prod (/opt/smartest/app, @saintaibot) must ONLY ever be deployed from the
+// canonical `master` branch. This prevents the Session-101 incident where
+// multitenant code was accidentally deployed to prod and crashed on import.
+// Bypass with ALLOW_NONMASTER=1 only if you really know what you're doing.
+if (!process.env.ALLOW_NONMASTER) {
+  let branch = '';
+  try {
+    branch = execSync('git rev-parse --abbrev-ref HEAD', { cwd: PROJECT_DIR })
+      .toString().trim();
+  } catch (e) {
+    console.error(`[deploy] Cannot determine git branch of ${PROJECT_DIR} - aborting.`);
+    console.error('[deploy] Set ALLOW_NONMASTER=1 to bypass the branch guard.');
+    process.exit(1);
+  }
+  if (branch !== 'master') {
+    console.error(`[deploy] Refusing to deploy to prod from branch "${branch}".`);
+    console.error('[deploy] Prod is master-only. Checkout master or set ALLOW_NONMASTER=1.');
+    process.exit(1);
+  }
+  console.log('[deploy] Branch guard OK (master).');
+}
+
 const excludes = [
   '.git',
   '__pycache__',
